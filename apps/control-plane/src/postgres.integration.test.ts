@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 
-import { hashPassword } from "@agent-runtime/auth";
+import { hashOpaqueToken, hashPassword } from "@agent-runtime/auth";
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase1Repository,
+  createPhase2Repository,
   migrateDatabase,
   type DatabaseClient,
 } from "@agent-runtime/database";
@@ -14,11 +14,13 @@ import { buildControlPlane } from "./app.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithPostgres = databaseUrl === undefined ? describe.skip : describe;
+const NOW = new Date("2026-09-10T08:00:00.000Z");
 
-describeWithPostgres("Phase 1 PostgreSQL integration", () => {
+describeWithPostgres("Phase 1 and 2 PostgreSQL integration", () => {
   const userAId = randomUUID();
   const userBId = randomUUID();
   const suffix = randomUUID();
+  const workerId = `worker-${suffix}`;
   let database!: DatabaseClient;
 
   beforeAll(async () => {
@@ -30,12 +32,13 @@ describeWithPostgres("Phase 1 PostgreSQL integration", () => {
 
   afterAll(async () => {
     await database`delete from workspaces where user_id in (${userAId}, ${userBId})`;
+    await database`delete from workers where id = ${workerId}`;
     await database`delete from users where id in (${userAId}, ${userBId})`;
     await database.end({ timeout: 5 });
   });
 
   it("logs in two persisted users and isolates their workspaces", async () => {
-    const repository = createPhase1Repository(database);
+    const repository = createPhase2Repository(database);
     await repository.createUser({
       id: userAId,
       email: `a-${suffix}@example.test`,
@@ -54,11 +57,14 @@ describeWithPostgres("Phase 1 PostgreSQL integration", () => {
     const app = buildControlPlane({
       checkDatabase: async () => checkDatabase(database),
       store: repository,
+      workerStore: repository,
       sessionSecret: "integration-session-secret-at-least-32-characters",
       portalOrigin: "http://portal.test",
       secureCookies: false,
       sessionTtlMs: 60 * 60 * 1_000,
       defaultRuntimeImage: "agent-runtime:integration-unassigned",
+      workerOfflineAfterMs: 35_000,
+      workerCommandTimeoutMs: 1_000,
     });
 
     async function login(email: string, password: string) {
@@ -115,5 +121,61 @@ describeWithPostgres("Phase 1 PostgreSQL integration", () => {
     expect(listB.json()).toEqual({ workspaces: [] });
 
     await app.close();
+  });
+
+  it("persists a bound Worker credential and rotates it atomically", async () => {
+    const repository = createPhase2Repository(database);
+    const originalToken = "originalworker0123456789abcdef0123456789abcdef";
+    const rotatedToken = "rotatedworker0123456789abcdef0123456789abcdef";
+    const originalHash = hashOpaqueToken(originalToken);
+    const rotatedHash = hashOpaqueToken(rotatedToken);
+    await repository.provisionWorker({
+      workerId,
+      credentialHash: originalHash,
+    });
+
+    expect(await repository.findWorkerByCredentialHash(originalHash)).toEqual({
+      workerId,
+      enabled: true,
+    });
+    expect(
+      await repository.recordWorkerHello({
+        credentialHash: originalHash,
+        workerId,
+        hostname: "integration-worker.internal",
+        architecture: "arm64",
+        runtimeImage: "unavailable",
+        runtimeVersion: "phase-2",
+        capabilities: {
+          browser: false,
+          office: false,
+          ffmpeg: false,
+          python: false,
+          node: false,
+          rust: false,
+        },
+        maxWorkspaces: 4,
+        allocatedWorkspaces: 0,
+        systemResources: {
+          logicalCpuCount: 8,
+          memoryBytes: 16 * 1024 ** 3,
+        },
+        receivedAt: NOW,
+      }),
+    ).toBe(true);
+
+    expect(
+      await repository.rotateWorkerCredential({
+        workerId,
+        credentialHash: rotatedHash,
+      }),
+    ).toBe(true);
+    expect(await repository.findWorkerByCredentialHash(originalHash)).toBeNull();
+    expect(await repository.findWorkerByCredentialHash(rotatedHash)).toEqual({
+      workerId,
+      enabled: true,
+    });
+    expect((await repository.listWorkers()).find((worker) => worker.id === workerId))
+      .toMatchObject({ status: "OFFLINE", lastHeartbeatAt: null });
   });
 });

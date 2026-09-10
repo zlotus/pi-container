@@ -33,3 +33,10 @@ export {
   type UserRole,
   type WorkspaceRecord,
 } from "./phase1.js";
+export {
+  createPhase2Repository,
+  type Phase2Repository,
+  type WorkerIdentity,
+  type WorkerRecord,
+  type WorkerStatus,
+} from "./phase2.js";

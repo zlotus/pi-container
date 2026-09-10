@@ -10,15 +10,24 @@ import {
 import type {
   AuthenticatedSessionRecord,
   Phase1Repository,
+  Phase2Repository,
   UserRecord,
+  WorkerRecord,
   WorkspaceRecord,
 } from "@agent-runtime/database";
+import websocket from "@fastify/websocket";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
   type FastifyRequest,
 } from "fastify";
 import { z } from "zod";
+
+import { WorkerChannel } from "./worker-channel.js";
+import {
+  registerWorkerControlChannel,
+  type WorkerControlStore,
+} from "./worker-control.js";
 
 const LoginBodySchema = z
   .object({
@@ -52,14 +61,19 @@ type Phase1Store = Pick<
   | "deleteOwnedWorkspace"
 >;
 
+type WorkerAdminStore = Pick<Phase2Repository, "listWorkers">;
+
 export interface ControlPlaneDependencies {
   checkDatabase: () => Promise<void>;
   store: Phase1Store;
+  workerStore: WorkerControlStore & WorkerAdminStore;
   sessionSecret: string;
   portalOrigin: string;
   secureCookies: boolean;
   sessionTtlMs: number;
   defaultRuntimeImage: string;
+  workerOfflineAfterMs: number;
+  workerCommandTimeoutMs: number;
   now?: () => Date;
 }
 
@@ -127,6 +141,33 @@ function publicWorkspace(workspace: WorkspaceRecord) {
   };
 }
 
+function publicWorker(
+  worker: WorkerRecord,
+  currentTime: Date,
+  offlineAfterMs: number,
+) {
+  const status = !worker.enabled
+    ? "DISABLED"
+    : worker.lastHeartbeatAt !== null &&
+        currentTime.getTime() - worker.lastHeartbeatAt.getTime() < offlineAfterMs
+      ? "ONLINE"
+      : "OFFLINE";
+  return {
+    id: worker.id,
+    hostname: worker.hostname,
+    architecture: worker.architecture,
+    status,
+    enabled: worker.enabled,
+    runtimeImage: worker.runtimeImage,
+    runtimeVersion: worker.runtimeVersion,
+    capabilities: worker.capabilities,
+    maxWorkspaces: worker.maxWorkspaces,
+    allocatedWorkspaces: worker.allocatedWorkspaces,
+    systemResources: worker.systemResources,
+    lastHeartbeatAt: worker.lastHeartbeatAt?.toISOString() ?? null,
+  };
+}
+
 function isUniqueViolation(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -141,6 +182,17 @@ export function buildControlPlane(
 ): FastifyInstance {
   const app = Fastify({ logger: false });
   const now = dependencies.now ?? (() => new Date());
+  const workerChannel = new WorkerChannel(dependencies.workerCommandTimeoutMs);
+  void app.register(websocket, {
+    options: { maxPayload: 256 * 1024, perMessageDeflate: false },
+  });
+  void app.register(async (workerControlScope) => {
+    registerWorkerControlChannel(workerControlScope, {
+      store: dependencies.workerStore,
+      channel: workerChannel,
+      now,
+    });
+  });
   const cookieName = dependencies.secureCookies
     ? "__Host-platform-session"
     : "platform-session";
@@ -301,6 +353,28 @@ export function buildControlPlane(
       auth.session.user.id,
     );
     return { workspaces: workspaces.map(publicWorkspace) };
+  });
+
+  app.get("/api/admin/workers", async (request, reply) => {
+    const auth = await authenticate(request, reply);
+    if (auth === null) return reply;
+    if (auth.session.user.role !== "admin") {
+      return reply
+        .code(403)
+        .send(errorBody("FORBIDDEN", "Administrator access is required"));
+    }
+    const currentTime = now();
+    const workers = await dependencies.workerStore.listWorkers();
+    reply.header("cache-control", "no-store");
+    return {
+      workers: workers.map((worker) =>
+        publicWorker(
+          worker,
+          currentTime,
+          dependencies.workerOfflineAfterMs,
+        ),
+      ),
+    };
   });
 
   app.post("/api/workspaces", async (request, reply) => {

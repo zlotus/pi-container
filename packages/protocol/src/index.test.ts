@@ -30,6 +30,10 @@ describe("worker protocol", () => {
         },
         maxWorkspaces: 4,
         allocatedWorkspaces: 0,
+        systemResources: {
+          logicalCpuCount: 8,
+          memoryBytes: 17_179_869_184,
+        },
       },
     });
 
@@ -42,6 +46,34 @@ describe("worker protocol", () => {
       type: "workspace.start",
       requestId,
       payload: { workspaceId },
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a Worker claiming more allocations than its capacity", () => {
+    const result = WorkerToControlMessageSchema.safeParse({
+      version: 1,
+      type: "worker.hello",
+      requestId,
+      payload: {
+        workerId: "worker-01",
+        hostname: "worker-01.internal",
+        architecture: "arm64",
+        runtimeImage: "unavailable",
+        runtimeVersion: "phase-2",
+        capabilities: {
+          browser: false,
+          office: false,
+          ffmpeg: false,
+          python: false,
+          node: false,
+          rust: false,
+        },
+        maxWorkspaces: 1,
+        allocatedWorkspaces: 2,
+        systemResources: { logicalCpuCount: 8, memoryBytes: 16_000_000_000 },
+      },
     });
 
     expect(result.success).toBe(false);

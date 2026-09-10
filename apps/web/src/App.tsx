@@ -15,6 +15,17 @@ interface Workspace {
   createdAt: string;
 }
 
+interface Worker {
+  id: string;
+  hostname: string | null;
+  architecture: "amd64" | "arm64" | null;
+  status: "ONLINE" | "OFFLINE" | "DISABLED";
+  runtimeVersion: string | null;
+  maxWorkspaces: number | null;
+  allocatedWorkspaces: number;
+  lastHeartbeatAt: string | null;
+}
+
 interface SessionResponse {
   user: User;
   csrfToken: string;
@@ -53,6 +64,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 export function App() {
   const [session, setSession] = useState<SessionResponse | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workers, setWorkers] = useState<Worker[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,6 +72,19 @@ export function App() {
     const result = await api<{ workspaces: Workspace[] }>("/api/workspaces");
     setWorkspaces(result.workspaces);
   }, []);
+
+  const loadWorkers = useCallback(async () => {
+    const result = await api<{ workers: Worker[] }>("/api/admin/workers");
+    setWorkers(result.workers);
+  }, []);
+
+  const refreshWorkers = useCallback(async () => {
+    try {
+      await loadWorkers();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to load Workers");
+    }
+  }, [loadWorkers]);
 
   useEffect(() => {
     void (async () => {
@@ -76,6 +101,13 @@ export function App() {
       }
     })();
   }, [loadWorkspaces]);
+
+  useEffect(() => {
+    if (session?.user.role !== "admin") return;
+    void refreshWorkers();
+    const timer = window.setInterval(() => void refreshWorkers(), 5_000);
+    return () => window.clearInterval(timer);
+  }, [refreshWorkers, session?.user.role]);
 
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -139,6 +171,7 @@ export function App() {
     });
     setSession(null);
     setWorkspaces([]);
+    setWorkers([]);
   }
 
   if (loading) {
@@ -195,6 +228,41 @@ export function App() {
             <button type="submit">新建 Workspace</button>
           </form>
         </div>
+        {session.user.role === "admin" ? (
+          <section className="worker-panel" aria-labelledby="worker-panel-title">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">ADMIN</p>
+                <h2 id="worker-panel-title">Workers</h2>
+              </div>
+              <button className="secondary" onClick={() => void refreshWorkers()}>
+                刷新
+              </button>
+            </div>
+            {workers.length === 0 ? (
+              <p className="muted">尚未预注册 Worker。</p>
+            ) : (
+              <div className="worker-table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Worker</th><th>状态</th><th>架构</th><th>Workspace</th><th>最后心跳</th></tr>
+                  </thead>
+                  <tbody>
+                    {workers.map((worker) => (
+                      <tr key={worker.id}>
+                        <td><strong>{worker.id}</strong><small>{worker.hostname ?? "尚未连接"}</small></td>
+                        <td><span className={`state worker-${worker.status.toLowerCase()}`}>{worker.status}</span></td>
+                        <td>{worker.architecture ?? "—"}</td>
+                        <td>{worker.allocatedWorkspaces}/{worker.maxWorkspaces ?? "—"}</td>
+                        <td>{worker.lastHeartbeatAt === null ? "—" : new Date(worker.lastHeartbeatAt).toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        ) : null}
         {error === null ? null : <p className="error banner">{error}</p>}
         {workspaces.length === 0 ? (
           <section className="empty-state">

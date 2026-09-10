@@ -554,6 +554,10 @@ Control Plane 必须将 credential 绑定到预注册的 `worker_id`；`worker.h
 ID 不得覆盖该绑定。Worker Gateway 地址也属于管理员配置或预注册信息，不能直接信任
 未认证消息中的任意 URL，否则会形成 SSRF 或错误路由入口。
 
+Phase 2 的 credential rotation 采用单一当前 credential：数据库原子替换 token hash 并
+清空旧 heartbeat。握手与每条后续消息都校验当前 hash，因此旧 token 立即不能新建连接，
+已有旧连接最迟在下一条消息或 heartbeat 时关闭。数据库和 Admin API 不返回原始 token。
+
 ---
 
 # 14. Workspace 调度
@@ -1347,6 +1351,12 @@ response.error
 错误对象发送给 Browser。非请求触发的 `event.workspace` / `event.error` 使用独立
 `eventId` 与 `observedAt`，不要伪造 request correlation。超时、重试和重复响应处理在
 Phase 2 control channel 实现时固定并测试。
+
+Phase 2 固定为：每个 dispatch 只发送一次，超时后失败，不做传输层隐式重试；迟到或
+重复 response 在 pending request 已清理后忽略。response 的 Worker、`requestId` 或
+`requestType` 不匹配时，不得完成另一个请求。后续 Phase 如需重试，由业务层根据命令
+语义显式决定；`workspace.ensure` 依靠其幂等契约允许安全重试，destructive command 不得
+被通用传输层自动重放。
 
 ---
 

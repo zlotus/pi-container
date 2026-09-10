@@ -4,10 +4,10 @@
 [pi-web](https://github.com/agegr/pi-web) 与 Pi Coding Agent，自身只负责认证、
 Workspace、Worker、Docker 生命周期、调度和安全代理。
 
-当前仓库已完成 **Phase 1：Multi-user Portal**：包含 PostgreSQL migration、本地账户、
-服务端 session、Workspace CRUD、ownership 隔离和 React Portal。Worker、Docker
-Workspace Runtime 与最终用户 Gateway 尚未实现；不要把 `CREATED` Workspace 当作已经
-运行的 Agent 环境。
+当前仓库已完成 **Phase 2：Worker Control Channel**：在 Phase 1 Portal 之上增加
+预注册 Worker、独立 credential 与 Worker ID 绑定、持久 WebSocket、heartbeat、
+Online/Offline 检测和 Admin Worker 列表。Docker Workspace Runtime、调度与最终用户
+Gateway 尚未实现；不要把在线 Worker 或 `CREATED` Workspace 当作已可运行 Agent。
 
 ## Prerequisites
 
@@ -46,9 +46,10 @@ pnpm user:create
 unset LOCAL_USER_PASSWORD
 ```
 
-密码至少 12 个字符，以 scrypt 和随机 salt 保存。`LOCAL_USER_USERNAME` 可省略。
+密码至少 12 个字符，以 scrypt 和随机 salt 保存。`LOCAL_USER_USERNAME` 可省略。查看
+Worker 管理页的账户应将 `LOCAL_USER_ROLE` 设置为 `admin`。
 
-## Run the Phase 1 portal
+## Run the Portal and Control Plane
 
 启动 Control Plane：
 
@@ -74,7 +75,41 @@ pnpm dev:web
 使用带 `Secure`、`HttpOnly`、`SameSite=Lax` 的 `__Host-platform-session` Cookie。
 所有修改状态的 API 同时校验配置的 Origin 和 session-bound CSRF token。
 
-Phase 1 API：
+## Provision and run Workers
+
+Worker 不会自行注册身份。管理员使用 Control Plane 数据库预注册每个 Worker；命令只输出一次
+原始 token，数据库只保存 hash：
+
+```bash
+export WORKER_ID=worker-a
+pnpm worker:provision
+# 安全保存输出的 WORKER_TOKEN，然后为 worker-b 重复一次
+```
+
+复制 `deploy/worker.env.example` 到已被 `.gitignore` 排除的 `.data/`，为每个 Worker
+保留各自的私有环境文件，填入对应 ID/token 后启动；不要提交这些文件：
+
+```bash
+mkdir -p .data
+cp deploy/worker.env.example .data/worker-a.env
+set -a
+. ./.data/worker-a.env
+set +a
+pnpm dev:worker
+```
+
+同一 credential 不能在 `worker.hello` 中声明另一个 Worker ID。默认每 10 秒 heartbeat，
+35 秒未收到服务端认可的 hello/heartbeat 后 Admin 列表显示 `OFFLINE`。轮换凭证使用：
+
+```bash
+export WORKER_ID=worker-a
+pnpm worker:rotate
+```
+
+轮换会立即使旧 token 无法重连，并在旧连接的下一条消息或 heartbeat 时关闭它。生产网络
+应使用 `wss://`；示例中的 `ws://127.0.0.1` 仅用于 loopback 开发。
+
+Platform API：
 
 ```text
 POST   /api/auth/login
@@ -84,6 +119,8 @@ GET    /api/workspaces
 POST   /api/workspaces
 GET    /api/workspaces/:id
 DELETE /api/workspaces/:id
+GET    /api/admin/workers
+WS     /api/workers/connect
 ```
 
 当前只允许删除尚未分配 Worker 且处于 `CREATED` 的 Workspace。未来已分配 Workspace

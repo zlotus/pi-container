@@ -9,10 +9,13 @@
   },
   "scripts": {
     "dev:control-plane": "pnpm --filter @agent-runtime/control-plane dev",
+    "dev:worker": "pnpm --filter @agent-runtime/worker dev",
     "dev:web": "pnpm --filter @agent-runtime/web dev",
     "build:web": "pnpm --filter @agent-runtime/web build",
     "db:migrate": "pnpm --filter @agent-runtime/database migrate",
     "user:create": "pnpm --filter @agent-runtime/control-plane user:create",
+    "worker:provision": "pnpm --filter @agent-runtime/control-plane worker:provision",
+    "worker:rotate": "pnpm --filter @agent-runtime/control-plane worker:rotate",
     "lint": "eslint .",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test"

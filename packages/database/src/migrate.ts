@@ -7,6 +7,10 @@ const MIGRATIONS = [
     name: "0001_phase1",
     url: new URL("../migrations/0001_phase1.sql", import.meta.url),
   },
+  {
+    name: "0002_phase2_workers",
+    url: new URL("../migrations/0002_phase2_workers.sql", import.meta.url),
+  },
 ] as const;
 
 export async function migrateDatabase(client: DatabaseClient): Promise<void> {

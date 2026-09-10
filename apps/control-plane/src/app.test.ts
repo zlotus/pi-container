@@ -1,7 +1,11 @@
-import { hashPassword } from "@agent-runtime/auth";
+import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+
+import { hashOpaqueToken, hashPassword } from "@agent-runtime/auth";
 import type {
   AuthenticatedSessionRecord,
   UserRecord,
+  WorkerRecord,
   WorkspaceRecord,
 } from "@agent-runtime/database";
 import { describe, expect, it, vi } from "vitest";
@@ -15,6 +19,9 @@ const ORIGIN = "http://portal.test";
 const NOW = new Date("2026-09-10T08:00:00.000Z");
 const USER_A_ID = "11111111-1111-4111-8111-111111111111";
 const USER_B_ID = "22222222-2222-4222-8222-222222222222";
+const ADMIN_ID = "33333333-3333-4333-8333-333333333333";
+const WORKER_1_TOKEN = "worker1token0123456789abcdef0123456789abcdef";
+const WORKER_2_TOKEN = "worker2token0123456789abcdef0123456789abcdef";
 
 async function createTestDependencies(): Promise<ControlPlaneDependencies> {
   const users: UserRecord[] = [
@@ -34,12 +41,42 @@ async function createTestDependencies(): Promise<ControlPlaneDependencies> {
       role: "user",
       createdAt: NOW,
     },
+    {
+      id: ADMIN_ID,
+      email: "admin@example.test",
+      username: "admin",
+      passwordHash: await hashPassword("password-for-admin"),
+      role: "admin",
+      createdAt: NOW,
+    },
   ];
   const sessions = new Map<
     string,
     { id: string; userId: string; expiresAt: Date; revoked: boolean }
   >();
   const workspaces: WorkspaceRecord[] = [];
+  const workers: WorkerRecord[] = [WORKER_1_TOKEN, WORKER_2_TOKEN].map(
+    (_token, index) => ({
+      id: `worker-0${index + 1}`,
+      hostname: null,
+      architecture: null,
+      status: "REGISTERED",
+      enabled: true,
+      runtimeImage: null,
+      runtimeVersion: null,
+      capabilities: {},
+      maxWorkspaces: null,
+      allocatedWorkspaces: 0,
+      systemResources: { logicalCpuCount: null, memoryBytes: null },
+      lastHeartbeatAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    }),
+  );
+  const credentials = new Map([
+    [hashOpaqueToken(WORKER_1_TOKEN), "worker-01"],
+    [hashOpaqueToken(WORKER_2_TOKEN), "worker-02"],
+  ]);
 
   return {
     checkDatabase: vi.fn<() => Promise<void>>(),
@@ -48,7 +85,51 @@ async function createTestDependencies(): Promise<ControlPlaneDependencies> {
     secureCookies: false,
     sessionTtlMs: 12 * 60 * 60 * 1_000,
     defaultRuntimeImage: "agent-runtime:test-unassigned",
+    workerOfflineAfterMs: 35_000,
+    workerCommandTimeoutMs: 1_000,
     now: () => NOW,
+    workerStore: {
+      async findWorkerByCredentialHash(credentialHash) {
+        const workerId = credentials.get(credentialHash);
+        if (workerId === undefined) return null;
+        const worker = workers.find((candidate) => candidate.id === workerId);
+        return worker === undefined
+          ? null
+          : { workerId, enabled: worker.enabled };
+      },
+      async recordWorkerHello(input) {
+        if (credentials.get(input.credentialHash) !== input.workerId) return false;
+        const worker = workers.find((candidate) => candidate.id === input.workerId);
+        if (worker === undefined || !worker.enabled) return false;
+        Object.assign(worker, {
+          hostname: input.hostname,
+          architecture: input.architecture,
+          status: "ONLINE",
+          runtimeImage: input.runtimeImage,
+          runtimeVersion: input.runtimeVersion,
+          capabilities: input.capabilities,
+          maxWorkspaces: input.maxWorkspaces,
+          allocatedWorkspaces: input.allocatedWorkspaces,
+          systemResources: input.systemResources,
+          lastHeartbeatAt: input.receivedAt,
+          updatedAt: input.receivedAt,
+        });
+        return true;
+      },
+      async recordWorkerHeartbeat(input) {
+        if (credentials.get(input.credentialHash) !== input.workerId) return false;
+        const worker = workers.find((candidate) => candidate.id === input.workerId);
+        if (worker === undefined || !worker.enabled) return false;
+        worker.allocatedWorkspaces = input.allocatedWorkspaces;
+        worker.lastHeartbeatAt = input.receivedAt;
+        worker.updatedAt = input.receivedAt;
+        worker.status = "ONLINE";
+        return true;
+      },
+      async listWorkers() {
+        return workers;
+      },
+    },
     store: {
       async findUserByLogin(login) {
         const normalized = login.trim().toLowerCase();
@@ -369,6 +450,166 @@ describe("workspace ownership", () => {
 
     expect(missingCsrf.statusCode).toBe(403);
     expect(wrongOrigin.statusCode).toBe(403);
+    await app.close();
+  });
+});
+
+function workerHello(workerId: string) {
+  return {
+    version: 1,
+    type: "worker.hello",
+    requestId: randomUUID(),
+    payload: {
+      workerId,
+      hostname: `${workerId}.internal`,
+      architecture: "arm64",
+      runtimeImage: "unavailable",
+      runtimeVersion: "phase-2",
+      capabilities: {
+        browser: false,
+        office: false,
+        ffmpeg: false,
+        python: false,
+        node: false,
+        rust: false,
+      },
+      maxWorkspaces: 4,
+      allocatedWorkspaces: 0,
+      systemResources: {
+        logicalCpuCount: 8,
+        memoryBytes: 16 * 1024 ** 3,
+      },
+    },
+  };
+}
+
+describe("Phase 2 worker control channel", () => {
+  it("rejects an unknown Worker credential during the WebSocket handshake", async () => {
+    const app = buildControlPlane(await createTestDependencies());
+    await app.ready();
+
+    await expect(
+      app.injectWS("/api/workers/connect", {
+        headers: {
+          authorization:
+            "Bearer unknownworker0123456789abcdef0123456789abcdef",
+        },
+      }),
+    ).rejects.toThrow();
+    await app.close();
+  });
+
+  it("binds credentials to Worker IDs and accepts two concurrent Workers", async () => {
+    const app = buildControlPlane(await createTestDependencies());
+    await app.ready();
+    const worker1 = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    const worker2 = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_2_TOKEN}` },
+    });
+    worker1.send(JSON.stringify(workerHello("worker-01")));
+    worker2.send(JSON.stringify(workerHello("worker-02")));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const admin = await login(app, "admin", "password-for-admin");
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/admin/workers",
+      headers: { cookie: admin.cookie },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      workers: [
+        { id: "worker-01", status: "ONLINE", architecture: "arm64" },
+        { id: "worker-02", status: "ONLINE", architecture: "arm64" },
+      ],
+    });
+
+    worker1.close();
+    worker2.close();
+    await app.close();
+  });
+
+  it("closes a credential that claims another pre-registered Worker ID", async () => {
+    const app = buildControlPlane(await createTestDependencies());
+    await app.ready();
+    const worker = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    const closed = once(worker, "close");
+    worker.send(JSON.stringify(workerHello("worker-02")));
+
+    const [code] = await closed;
+    expect(code).toBe(1008);
+    await app.close();
+  });
+
+  it("revokes an established channel on its next message after rotation", async () => {
+    const dependencies = await createTestDependencies();
+    const findCredential =
+      dependencies.workerStore.findWorkerByCredentialHash;
+    let credentialRotated = false;
+    dependencies.workerStore.findWorkerByCredentialHash = async (
+      credentialHash,
+    ) => (credentialRotated ? null : findCredential(credentialHash));
+    const app = buildControlPlane(dependencies);
+    await app.ready();
+    const worker = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    worker.send(JSON.stringify(workerHello("worker-01")));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    credentialRotated = true;
+    const closed = once(worker, "close");
+    worker.send(
+      JSON.stringify({
+        version: 1,
+        type: "worker.heartbeat",
+        requestId: randomUUID(),
+        payload: {
+          workerId: "worker-01",
+          allocatedWorkspaces: 0,
+          observedAt: NOW.toISOString(),
+        },
+      }),
+    );
+
+    const [code] = await closed;
+    expect(code).toBe(1008);
+    await app.close();
+  });
+
+  it("restricts the Worker inventory to admins and derives Offline by age", async () => {
+    const dependencies = await createTestDependencies();
+    const workers = await dependencies.workerStore.listWorkers();
+    const first = workers[0];
+    const second = workers[1];
+    if (first === undefined || second === undefined) throw new Error("fixture missing");
+    first.lastHeartbeatAt = NOW;
+    second.lastHeartbeatAt = new Date(NOW.getTime() - 35_000);
+    const app = buildControlPlane(dependencies);
+    const user = await login(app, "user-a", "password-for-user-a");
+    const admin = await login(app, "admin", "password-for-admin");
+
+    const forbidden = await app.inject({
+      method: "GET",
+      url: "/api/admin/workers",
+      headers: { cookie: user.cookie },
+    });
+    const allowed = await app.inject({
+      method: "GET",
+      url: "/api/admin/workers",
+      headers: { cookie: admin.cookie },
+    });
+
+    expect(forbidden.statusCode).toBe(403);
+    expect(allowed.json()).toMatchObject({
+      workers: [
+        { id: "worker-01", status: "ONLINE" },
+        { id: "worker-02", status: "OFFLINE" },
+      ],
+    });
     await app.close();
   });
 });

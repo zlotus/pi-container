@@ -10,6 +10,12 @@ export const WorkerIdSchema = z
   .max(64)
   .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/);
 
+export const WorkerTokenSchema = z
+  .string()
+  .min(32)
+  .max(256)
+  .regex(/^[A-Za-z0-9_-]+$/);
+
 export const ArchitectureSchema = z.enum(["amd64", "arm64"]);
 
 export const WorkspaceStateSchema = z.enum([
@@ -32,6 +38,13 @@ export const WorkerCapabilitiesSchema = z
     python: z.boolean(),
     node: z.boolean(),
     rust: z.boolean(),
+  })
+  .strict();
+
+export const WorkerSystemResourcesSchema = z
+  .object({
+    logicalCpuCount: z.number().int().positive().max(4_096),
+    memoryBytes: z.number().int().positive().safe(),
   })
   .strict();
 
@@ -60,10 +73,15 @@ export const WorkerHelloMessageSchema = RequestEnvelopeSchema.extend({
       runtimeImage: z.string().min(1).max(255),
       runtimeVersion: z.string().min(1).max(128),
       capabilities: WorkerCapabilitiesSchema,
-      maxWorkspaces: z.number().int().positive(),
-      allocatedWorkspaces: z.number().int().nonnegative(),
+      maxWorkspaces: z.number().int().positive().max(10_000),
+      allocatedWorkspaces: z.number().int().nonnegative().max(10_000),
+      systemResources: WorkerSystemResourcesSchema,
     })
-    .strict(),
+    .strict()
+    .refine(
+      (value) => value.allocatedWorkspaces <= value.maxWorkspaces,
+      "allocatedWorkspaces cannot exceed maxWorkspaces",
+    ),
 }).strict();
 
 export const WorkerHeartbeatMessageSchema = RequestEnvelopeSchema.extend({
@@ -71,7 +89,7 @@ export const WorkerHeartbeatMessageSchema = RequestEnvelopeSchema.extend({
   payload: z
     .object({
       workerId: WorkerIdSchema,
-      allocatedWorkspaces: z.number().int().nonnegative(),
+      allocatedWorkspaces: z.number().int().nonnegative().max(10_000),
       observedAt: z.string().datetime({ offset: true }),
     })
     .strict(),
@@ -205,6 +223,9 @@ export type ControlToWorkerMessage = z.infer<
   typeof ControlToWorkerMessageSchema
 >;
 export type WorkerCapabilities = z.infer<typeof WorkerCapabilitiesSchema>;
+export type WorkerSystemResources = z.infer<
+  typeof WorkerSystemResourcesSchema
+>;
 export type WorkerToControlMessage = z.infer<
   typeof WorkerToControlMessageSchema
 >;

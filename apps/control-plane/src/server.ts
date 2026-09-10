@@ -1,7 +1,7 @@
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase1Repository,
+  createPhase2Repository,
   migrateDatabase,
 } from "@agent-runtime/database";
 import { z } from "zod";
@@ -27,7 +27,25 @@ const ServerConfigSchema = z
     DEFAULT_RUNTIME_IMAGE: z
       .string()
       .min(1)
-      .default("agent-runtime:phase1-unassigned"),
+      .default("agent-runtime:phase2-unassigned"),
+    WORKER_OFFLINE_AFTER_MS: z.coerce
+      .number()
+      .int()
+      .min(5_000)
+      .max(300_000)
+      .default(35_000),
+    WORKER_STATUS_SWEEP_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(60_000)
+      .default(5_000),
+    WORKER_COMMAND_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(300_000)
+      .default(15_000),
   })
   .passthrough();
 
@@ -36,18 +54,31 @@ const database = createDatabaseClient(config.DATABASE_URL);
 
 await migrateDatabase(database);
 
-const repository = createPhase1Repository(database);
+const repository = createPhase2Repository(database);
 const app = buildControlPlane({
   checkDatabase: async () => checkDatabase(database),
   store: repository,
+  workerStore: repository,
   sessionSecret: config.SESSION_SECRET,
   portalOrigin: config.PORTAL_ORIGIN,
   secureCookies: config.SESSION_COOKIE_SECURE,
   sessionTtlMs: config.SESSION_TTL_HOURS * 60 * 60 * 1_000,
   defaultRuntimeImage: config.DEFAULT_RUNTIME_IMAGE,
+  workerOfflineAfterMs: config.WORKER_OFFLINE_AFTER_MS,
+  workerCommandTimeoutMs: config.WORKER_COMMAND_TIMEOUT_MS,
 });
 
+const workerStatusTimer = setInterval(() => {
+  const cutoff = new Date(Date.now() - config.WORKER_OFFLINE_AFTER_MS);
+  void repository.markWorkersOffline(cutoff).catch(() => {
+    // Readiness and the Admin API expose database failure without terminating
+    // healthy Worker sockets because of a transient sweep failure.
+  });
+}, config.WORKER_STATUS_SWEEP_MS);
+workerStatusTimer.unref();
+
 const shutdown = async (): Promise<void> => {
+  clearInterval(workerStatusTimer);
   await app.close();
   await database.end({ timeout: 5 });
 };
