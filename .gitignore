@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.env
+.DS_Store
+*.log
+
+# Local PostgreSQL and runtime data must never become repository content.
+.data/
