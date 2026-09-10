@@ -100,14 +100,15 @@ export function App() {
     event.preventDefault();
     if (session === null) return;
     setError(null);
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     try {
       await api("/api/workspaces", {
         method: "POST",
         headers: { "x-csrf-token": session.csrfToken },
         body: JSON.stringify({ name: form.get("name") }),
       });
-      event.currentTarget.reset();
+      formElement.reset();
       await loadWorkspaces();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Creation failed");
