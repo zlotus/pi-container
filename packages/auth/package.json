@@ -1,5 +1,5 @@
 {
-  "name": "@agent-runtime/database",
+  "name": "@agent-runtime/auth",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -10,16 +10,8 @@
     }
   },
   "scripts": {
-    "migrate": "tsx src/migrate-cli.ts",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run"
-  },
-  "dependencies": {
-    "postgres": "3.4.9",
-    "zod": "4.5.4"
-  },
-  "devDependencies": {
-    "tsx": "4.23.13"
   }
 }

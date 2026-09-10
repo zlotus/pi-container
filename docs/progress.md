@@ -4,26 +4,32 @@ Last reviewed: 2026-09-10
 
 ## Current Milestone
 
-Phase 0 已完成：仓库可以安装、lint、typecheck、测试并连接开发 PostgreSQL。
+Phase 1 已完成：两个本地账户可以独立登录、管理各自的 Workspace，服务端在 API 和
+PostgreSQL 查询两层执行 ownership 隔离。
 
 ## Current Baseline
 
-- 根级 TypeScript strict、ESLint、Vitest 与 pnpm workspace 配置。
-- `packages/protocol` 提供 version 1 Worker hello/heartbeat、Workspace 命令、响应与事件的 Zod schema。
-- `packages/database` 提供受校验的 PostgreSQL client 与 readiness probe。
-- `apps/control-plane` 提供 `/health` 和 PostgreSQL-aware `/ready`。
+- `packages/auth` 使用 Node.js scrypt、随机 salt、opaque session token hash 和
+  session-bound HMAC CSRF token，不保存明文密码或 session token。
+- `packages/database` 提供幂等 migration，以及 users、server-side sessions、workspaces
+  的 PostgreSQL repository；Workspace UUID 由服务端生成。
+- `apps/control-plane` 提供本地登录/注销、`/api/me`、Workspace list/create/get/delete；
+  state-changing API 校验精确 Origin 和 CSRF，跨用户资源统一返回 404。
+- `apps/web` 提供 React/Vite 登录和 Workspace Portal；不复制 pi-web Chat UI。
+- 未分配且为 `CREATED` 的 Workspace 可以删除；任何已分配/已进入运行生命周期的
+  Workspace 都拒绝纯 metadata 删除，等待后续 Worker 确认协议。
 - `apps/worker` 仅提供严格配置解析；Worker daemon、Docker 管理尚未实现。
 - `deploy/compose.dev.yml` 提供仅绑定 loopback 的 PostgreSQL 17.6 开发服务。
 
 ## In Progress
 
-None。下一开发边界是 Phase 1，不应在同一变更中提前实现 Worker/Docker Runtime。
+None。下一开发边界是 Phase 2 Worker Control Channel，不应提前实现 Phase 3 Runtime。
 
 ## Next
 
-1. 实现 Phase 1 PostgreSQL schema、migration、本地账户与安全 session。
-2. 实现 Workspace CRUD 和所有 API ownership 测试，不提前引入 Worker/Docker 逻辑。
-3. Phase 2 固定 command timeout/retry 语义，并实现 per-worker identity binding。
+1. 固定 Phase 2 command timeout/retry 语义与 credential rotation 行为。
+2. 实现 per-worker credential -> worker_id binding、persistent control channel 与 heartbeat。
+3. 实现 admin worker page，并用两个 Worker 验证 Online/Offline 检测。
 
 ## Risks And Blockers
 
@@ -41,3 +47,8 @@ None。下一开发边界是 Phase 1，不应在同一变更中提前实现 Work
 - 2026-09-10：PostgreSQL 17.6-alpine 实际启动为 healthy；Control Plane `/health` 返回
   `ok`，`/ready` 通过真实 PostgreSQL 查询返回 `ready`。验证后已停止 Container，
   Compose named volume 保留。
+- 2026-09-10：Phase 1 `pnpm typecheck`、`pnpm lint`、`pnpm test` 和 `pnpm build:web`
+  通过；常规测试共 20 个用例通过，PostgreSQL 集成用例在未设置 `TEST_DATABASE_URL` 时跳过。
+- 2026-09-10：在一次性 PostgreSQL 17.6-alpine tmpfs Container 上实际执行 migration 两次，
+  两个持久化用户均登录成功；User A 创建 Workspace 后 User B 列表为空。集成测试 9/9
+  通过，随后停止并自动删除测试 Container 与 tmpfs 数据。

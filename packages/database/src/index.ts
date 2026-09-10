@@ -23,3 +23,13 @@ export function createDatabaseClient(databaseUrl: string): DatabaseClient {
 export async function checkDatabase(client: DatabaseClient): Promise<void> {
   await client`select 1`;
 }
+
+export { migrateDatabase } from "./migrate.js";
+export {
+  createPhase1Repository,
+  type AuthenticatedSessionRecord,
+  type Phase1Repository,
+  type UserRecord,
+  type UserRole,
+  type WorkspaceRecord,
+} from "./phase1.js";

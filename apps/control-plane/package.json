@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
+    "user:create": "tsx src/create-user.ts",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run"
   },
   "dependencies": {
+    "@agent-runtime/auth": "workspace:*",
     "@agent-runtime/database": "workspace:*",
     "fastify": "5.12.3",
     "zod": "4.5.4"
