@@ -87,6 +87,17 @@ pnpm worker:provision
 # 安全保存输出的 WORKER_TOKEN，然后为 worker-b 重复一次
 ```
 
+Worker 默认将 Workspace 持久数据写入 `/var/lib/agent-runtime`。首次在一台宿主机运行 Worker
+前，需要由管理员创建该目录并将其交给运行 Worker 的系统用户；Worker 本身不应以 root 身份运行：
+
+```bash
+sudo install -d \
+  -o "$(id -u)" \
+  -g "$(id -g)" \
+  -m 0700 \
+  /var/lib/agent-runtime
+```
+
 复制 `deploy/worker.env.example` 到已被 `.gitignore` 排除的 `.data/`，为每个 Worker
 保留各自的私有环境文件，填入对应 ID/token 后启动；不要提交这些文件：
 
