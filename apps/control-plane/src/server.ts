@@ -1,7 +1,7 @@
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase2Repository,
+  createPhase3Repository,
   migrateDatabase,
 } from "@agent-runtime/database";
 import { z } from "zod";
@@ -27,7 +27,7 @@ const ServerConfigSchema = z
     DEFAULT_RUNTIME_IMAGE: z
       .string()
       .min(1)
-      .default("agent-runtime:phase2-unassigned"),
+      .default("agent-runtime:phase3-minimal"),
     WORKER_OFFLINE_AFTER_MS: z.coerce
       .number()
       .int()
@@ -46,6 +46,14 @@ const ServerConfigSchema = z
       .min(100)
       .max(300_000)
       .default(15_000),
+    WORKSPACE_CPU_COUNT: z.coerce.number().positive().max(256).default(2),
+    WORKSPACE_MEMORY_BYTES: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(Number.MAX_SAFE_INTEGER)
+      .default(4 * 1024 ** 3),
+    WORKSPACE_PIDS_LIMIT: z.coerce.number().int().positive().default(512),
   })
   .passthrough();
 
@@ -54,7 +62,7 @@ const database = createDatabaseClient(config.DATABASE_URL);
 
 await migrateDatabase(database);
 
-const repository = createPhase2Repository(database);
+const repository = createPhase3Repository(database);
 const app = buildControlPlane({
   checkDatabase: async () => checkDatabase(database),
   store: repository,
@@ -66,6 +74,11 @@ const app = buildControlPlane({
   defaultRuntimeImage: config.DEFAULT_RUNTIME_IMAGE,
   workerOfflineAfterMs: config.WORKER_OFFLINE_AFTER_MS,
   workerCommandTimeoutMs: config.WORKER_COMMAND_TIMEOUT_MS,
+  workspaceResources: {
+    cpuCount: config.WORKSPACE_CPU_COUNT,
+    memoryBytes: config.WORKSPACE_MEMORY_BYTES,
+    pidsLimit: config.WORKSPACE_PIDS_LIMIT,
+  },
 });
 
 const workerStatusTimer = setInterval(() => {

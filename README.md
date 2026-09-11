@@ -4,10 +4,10 @@
 [pi-web](https://github.com/agegr/pi-web) 与 Pi Coding Agent，自身只负责认证、
 Workspace、Worker、Docker 生命周期、调度和安全代理。
 
-当前仓库已完成 **Phase 2：Worker Control Channel**：在 Phase 1 Portal 之上增加
-预注册 Worker、独立 credential 与 Worker ID 绑定、持久 WebSocket、heartbeat、
-Online/Offline 检测和 Admin Worker 列表。Docker Workspace Runtime、调度与最终用户
-Gateway 尚未实现；不要把在线 Worker 或 `CREATED` Workspace 当作已可运行 Agent。
+当前仓库已实现 **Phase 3：Minimal Runtime + pi-web**：在 Phase 2 control channel
+之上增加 pinned Runtime Image、受约束的本机 Docker 生命周期、Workspace/Pi state
+持久化，以及仅在恰好一个 eligible Worker 时进行的最小自动绑定。最终用户 Gateway
+仍未实现；Portal 的“打开”入口会保持禁用直到 Phase 4。
 
 ## Prerequisites
 
@@ -22,6 +22,7 @@ pnpm install
 cp deploy/.env.example .env
 # 将 SESSION_SECRET 替换为：openssl rand -hex 32
 docker compose --env-file .env -f deploy/compose.dev.yml up -d postgres
+docker build --tag agent-runtime:phase3-minimal runtime
 set -a
 . ./.env
 set +a
@@ -119,13 +120,25 @@ GET    /api/workspaces
 POST   /api/workspaces
 GET    /api/workspaces/:id
 DELETE /api/workspaces/:id
+POST   /api/workspaces/:id/start
+POST   /api/workspaces/:id/stop
 GET    /api/admin/workers
 WS     /api/workers/connect
 ```
 
-当前只允许删除尚未分配 Worker 且处于 `CREATED` 的 Workspace。未来已分配 Workspace
-必须等待 Worker 明确确认底层 Container 与持久目录均已删除，Control Plane 不会提前
-删除 metadata。
+首次启动仅在恰好一个在线、enabled、容量未满且 Runtime/架构/capability 兼容的 Worker
+存在时自动绑定；零个会返回 unavailable，多个会要求管理员预先固定 assignment，不做
+Phase 5 的评分或随机选择。已分配 Workspace 的删除必须等待 Worker 明确确认 managed
+Container、独立 network 与持久目录均已删除，Control Plane 才删除 metadata。
+
+Phase 3 人工集成时，可在 Worker 宿主机用下面的命令查看仅绑定 loopback 的临时端口：
+
+```bash
+docker port agent-runtime-<workspace-uuid> 30141/tcp
+```
+
+该地址只用于本机开发/验收，不是最终用户入口，不应暴露到 LAN。Phase 4 才会实现经过
+平台认证与 ownership 检查的 HTTP/WebSocket Gateway。
 
 架构与安全边界以 [AGENTS.md](AGENTS.md) 为长期规则，以 [specs.md](specs.md)
 为产品范围和分阶段验收规范。当前状态见 [docs/progress.md](docs/progress.md)。

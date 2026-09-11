@@ -4,11 +4,17 @@ import { cpus, hostname, totalmem } from "node:os";
 import {
   ControlToWorkerMessageSchema,
   type Architecture,
+  type ControlToWorkerMessage,
   type WorkerToControlMessage,
+  type WorkspaceResources,
 } from "@agent-runtime/protocol";
 import WebSocket from "ws";
 
 import type { WorkerConfig } from "./config.js";
+import {
+  WorkspaceRuntimeError,
+  type WorkspaceRuntimeObservation,
+} from "./runtime.js";
 
 type WorkerHelloMessage = Extract<
   WorkerToControlMessage,
@@ -19,14 +25,27 @@ type WorkerHeartbeatMessage = Extract<
   { type: "worker.heartbeat" }
 >;
 
-const NO_PHASE_3_CAPABILITIES = {
+const PHASE_3_CAPABILITIES = {
   browser: false,
   office: false,
   ffmpeg: false,
-  python: false,
-  node: false,
+  python: true,
+  node: true,
   rust: false,
 } as const;
+
+export interface WorkspaceRuntime {
+  ensure(
+    workspaceId: string,
+    runtimeImage: string,
+    resources: WorkspaceResources,
+  ): Promise<WorkspaceRuntimeObservation>;
+  start(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
+  stop(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
+  delete(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
+  inspect(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
+  allocatedWorkspaces(): Promise<number>;
+}
 
 export function currentArchitecture(nodeArchitecture: string): Architecture {
   if (nodeArchitecture === "x64") return "amd64";
@@ -42,6 +61,7 @@ export function buildWorkerHello(
     logicalCpuCount: number;
     memoryBytes: number;
   },
+  allocatedWorkspaces = 0,
 ): WorkerHelloMessage {
   return {
     version: 1,
@@ -53,9 +73,9 @@ export function buildWorkerHello(
       architecture: system.architecture,
       runtimeImage: config.RUNTIME_IMAGE,
       runtimeVersion: config.RUNTIME_VERSION,
-      capabilities: NO_PHASE_3_CAPABILITIES,
+      capabilities: PHASE_3_CAPABILITIES,
       maxWorkspaces: config.WORKER_MAX_WORKSPACES,
-      allocatedWorkspaces: 0,
+      allocatedWorkspaces,
       systemResources: {
         logicalCpuCount: system.logicalCpuCount,
         memoryBytes: system.memoryBytes,
@@ -67,6 +87,7 @@ export function buildWorkerHello(
 export function buildWorkerHeartbeat(
   workerId: string,
   observedAt: Date,
+  allocatedWorkspaces = 0,
 ): WorkerHeartbeatMessage {
   return {
     version: 1,
@@ -74,7 +95,7 @@ export function buildWorkerHeartbeat(
     requestId: randomUUID(),
     payload: {
       workerId,
-      allocatedWorkspaces: 0,
+      allocatedWorkspaces,
       observedAt: observedAt.toISOString(),
     },
   };
@@ -86,9 +107,11 @@ export class WorkerDaemon {
   #reconnectTimer: NodeJS.Timeout | null = null;
   #reconnectDelayMs: number;
   #stopping = false;
+  #commandQueue = Promise.resolve();
 
   constructor(
     readonly config: WorkerConfig,
+    readonly runtime: WorkspaceRuntime,
     readonly log: Pick<Console, "info" | "warn"> = console,
   ) {
     this.#reconnectDelayMs = config.WORKER_RECONNECT_INITIAL_MS;
@@ -121,17 +144,7 @@ export class WorkerDaemon {
     socket.on("open", () => {
       this.#reconnectDelayMs = this.config.WORKER_RECONNECT_INITIAL_MS;
       this.log.info(`Worker ${this.config.WORKER_ID} control channel connected`);
-      this.#send(
-        buildWorkerHello(this.config, {
-          hostname: hostname(),
-          architecture: currentArchitecture(process.arch),
-          logicalCpuCount: cpus().length,
-          memoryBytes: totalmem(),
-        }),
-      );
-      this.#heartbeatTimer = setInterval(() => {
-        this.#send(buildWorkerHeartbeat(this.config.WORKER_ID, new Date()));
-      }, this.config.WORKER_HEARTBEAT_INTERVAL_MS);
+      void this.#beginReporting(socket);
     });
 
     socket.on("message", (data, isBinary) => {
@@ -151,17 +164,9 @@ export class WorkerDaemon {
         socket.close(1008, "Invalid protocol message");
         return;
       }
-      this.#send({
-        version: 1,
-        type: "response.error",
-        requestId: parsed.data.requestId,
-        payload: {
-          requestType: parsed.data.type,
-          code: "WORKSPACE_RUNTIME_NOT_IMPLEMENTED",
-          message: "Workspace runtime commands begin in Phase 3",
-          retryable: false,
-        },
-      });
+      this.#commandQueue = this.#commandQueue
+        .then(() => this.#handleCommand(parsed.data))
+        .catch(() => undefined);
     });
 
     socket.on("error", () => {
@@ -179,6 +184,105 @@ export class WorkerDaemon {
   #send(message: WorkerToControlMessage): void {
     if (this.#socket?.readyState !== WebSocket.OPEN) return;
     this.#socket.send(JSON.stringify(message));
+  }
+
+  async #beginReporting(socket: WebSocket): Promise<void> {
+    try {
+      const allocatedWorkspaces = await this.runtime.allocatedWorkspaces();
+      if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+      this.#send(
+        buildWorkerHello(
+          this.config,
+          {
+            hostname: hostname(),
+            architecture: currentArchitecture(process.arch),
+            logicalCpuCount: cpus().length,
+            memoryBytes: totalmem(),
+          },
+          allocatedWorkspaces,
+        ),
+      );
+      this.#heartbeatTimer = setInterval(() => {
+        void this.#sendHeartbeat(socket);
+      }, this.config.WORKER_HEARTBEAT_INTERVAL_MS);
+    } catch {
+      this.log.warn(
+        `Worker ${this.config.WORKER_ID} could not inspect the local Docker runtime`,
+      );
+      socket.close(1011, "Local Docker runtime unavailable");
+    }
+  }
+
+  async #sendHeartbeat(socket: WebSocket): Promise<void> {
+    try {
+      const allocatedWorkspaces = await this.runtime.allocatedWorkspaces();
+      if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+      this.#send(
+        buildWorkerHeartbeat(
+          this.config.WORKER_ID,
+          new Date(),
+          allocatedWorkspaces,
+        ),
+      );
+    } catch {
+      this.log.warn(
+        `Worker ${this.config.WORKER_ID} lost access to the local Docker runtime`,
+      );
+      socket.close(1011, "Local Docker runtime unavailable");
+    }
+  }
+
+  async #handleCommand(message: ControlToWorkerMessage): Promise<void> {
+    try {
+      let workspace: WorkspaceRuntimeObservation;
+      switch (message.type) {
+        case "workspace.ensure":
+          workspace = await this.runtime.ensure(
+            message.payload.workspaceId,
+            message.payload.runtimeImage,
+            message.payload.resources,
+          );
+          break;
+        case "workspace.start":
+          workspace = await this.runtime.start(message.payload.workspaceId);
+          break;
+        case "workspace.stop":
+          workspace = await this.runtime.stop(message.payload.workspaceId);
+          break;
+        case "workspace.delete":
+          workspace = await this.runtime.delete(message.payload.workspaceId);
+          break;
+        case "workspace.inspect":
+          workspace = await this.runtime.inspect(message.payload.workspaceId);
+          break;
+      }
+      this.#send({
+        version: 1,
+        type: "response.ok",
+        requestId: message.requestId,
+        payload: { requestType: message.type, workspace },
+      });
+    } catch (error) {
+      const runtimeError =
+        error instanceof WorkspaceRuntimeError
+          ? error
+          : new WorkspaceRuntimeError(
+              "RUNTIME_ENGINE_ERROR",
+              "Workspace Runtime operation failed",
+              true,
+            );
+      this.#send({
+        version: 1,
+        type: "response.error",
+        requestId: message.requestId,
+        payload: {
+          requestType: message.type,
+          code: runtimeError.code,
+          message: runtimeError.message,
+          retryable: runtimeError.retryable,
+        },
+      });
+    }
   }
 
   #scheduleReconnect(): void {

@@ -129,6 +129,26 @@ async function createTestDependencies(): Promise<ControlPlaneDependencies> {
       async listWorkers() {
         return workers;
       },
+      async listEligibleWorkerIds(input) {
+        const workspace = workspaces.find(
+          (candidate) =>
+            candidate.id === input.workspaceId &&
+            candidate.userId === input.userId,
+        );
+        if (workspace === undefined) return [];
+        return workers
+          .filter(
+            (worker) =>
+              worker.enabled &&
+              worker.status === "ONLINE" &&
+              worker.lastHeartbeatAt !== null &&
+              worker.lastHeartbeatAt > input.heartbeatCutoff &&
+              worker.runtimeImage === workspace.runtimeImage &&
+              worker.maxWorkspaces !== null &&
+              worker.allocatedWorkspaces < worker.maxWorkspaces,
+          )
+          .map((worker) => worker.id);
+      },
     },
     store: {
       async findUserByLogin(login) {
@@ -213,6 +233,94 @@ async function createTestDependencies(): Promise<ControlPlaneDependencies> {
         workspaces.splice(index, 1);
         return true;
       },
+      async beginWorkspaceStart(input) {
+        const workspace = workspaces.find(
+          (candidate) =>
+            candidate.id === input.workspaceId &&
+            candidate.userId === input.userId &&
+            (candidate.workerId === null || candidate.workerId === input.workerId) &&
+            ["CREATED", "STOPPED", "ERROR", "WORKER_OFFLINE"].includes(
+              candidate.state,
+            ),
+        );
+        if (workspace === undefined) return null;
+        workspace.workerId = input.workerId;
+        workspace.state = "STARTING";
+        return workspace;
+      },
+      async finishWorkspaceStart(input) {
+        const workspace = workspaces.find(
+          (candidate) =>
+            candidate.id === input.workspaceId &&
+            candidate.workerId === input.workerId &&
+            candidate.state === "STARTING",
+        );
+        if (workspace === undefined) return false;
+        workspace.state = "RUNNING";
+        return true;
+      },
+      async beginWorkspaceStop(input) {
+        const workspace = workspaces.find(
+          (candidate) =>
+            candidate.id === input.workspaceId &&
+            candidate.userId === input.userId &&
+            candidate.workerId === input.workerId &&
+            candidate.state === "RUNNING",
+        );
+        if (workspace === undefined) return false;
+        workspace.state = "STOPPING";
+        return true;
+      },
+      async finishWorkspaceStop(input) {
+        const workspace = workspaces.find(
+          (candidate) =>
+            candidate.id === input.workspaceId &&
+            candidate.workerId === input.workerId &&
+            candidate.state === "STOPPING",
+        );
+        if (workspace === undefined) return false;
+        workspace.state = "STOPPED";
+        return true;
+      },
+      async beginWorkspaceDelete(input) {
+        const workspace = workspaces.find(
+          (candidate) =>
+            candidate.id === input.workspaceId &&
+            candidate.userId === input.userId &&
+            candidate.workerId === input.workerId &&
+            !["STARTING", "STOPPING", "DELETING"].includes(candidate.state),
+        );
+        if (workspace === undefined) return false;
+        workspace.state = "DELETING";
+        return true;
+      },
+      async deleteConfirmedWorkspace(input) {
+        const index = workspaces.findIndex(
+          (candidate) =>
+            candidate.id === input.workspaceId &&
+            candidate.userId === input.userId &&
+            candidate.workerId === input.workerId &&
+            candidate.state === "DELETING",
+        );
+        if (index < 0) return false;
+        workspaces.splice(index, 1);
+        return true;
+      },
+      async markWorkspaceRuntimeFailure(input) {
+        const workspace = workspaces.find(
+          (candidate) =>
+            candidate.id === input.workspaceId &&
+            candidate.workerId === input.workerId,
+        );
+        if (workspace !== undefined) {
+          workspace.state = input.workerOffline ? "WORKER_OFFLINE" : "ERROR";
+        }
+      },
+    },
+    workspaceResources: {
+      cpuCount: 2,
+      memoryBytes: 4 * 1024 ** 3,
+      pidsLimit: 512,
     },
   };
 }
@@ -454,6 +562,183 @@ describe("workspace ownership", () => {
   });
 });
 
+describe("Phase 3 Workspace Runtime lifecycle", () => {
+  it("binds only one eligible Worker and drives ensure, start, stop, and delete", async () => {
+    const app = buildControlPlane(await createTestDependencies());
+    await app.ready();
+    const worker = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    const commands: string[] = [];
+    worker.on("message", (data) => {
+      const command = JSON.parse(data.toString()) as {
+        requestId: string;
+        type:
+          | "workspace.ensure"
+          | "workspace.start"
+          | "workspace.stop"
+          | "workspace.delete";
+        payload: { workspaceId: string };
+      };
+      commands.push(command.type);
+      const state =
+        command.type === "workspace.start"
+          ? "RUNNING"
+          : command.type === "workspace.ensure" || command.type === "workspace.stop"
+            ? "STOPPED"
+            : "CREATED";
+      worker.send(
+        JSON.stringify({
+          version: 1,
+          type: "response.ok",
+          requestId: command.requestId,
+          payload: {
+            requestType: command.type,
+            workspace: {
+              workspaceId: command.payload.workspaceId,
+              state,
+              runtimeImage: "agent-runtime:test-unassigned",
+              observedAt: NOW.toISOString(),
+            },
+          },
+        }),
+      );
+    });
+    worker.send(JSON.stringify(workerHello("worker-01")));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const owner = await login(app, "user-a", "password-for-user-a");
+    const other = await login(app, "user-b", "password-for-user-b");
+    const create = await app.inject({
+      method: "POST",
+      url: "/api/workspaces",
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+      payload: { name: "phase-3-runtime" },
+    });
+    const workspaceId = create.json<{ workspace: WorkspaceRecord }>().workspace.id;
+
+    const foreignStart = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${workspaceId}/start`,
+      headers: {
+        cookie: other.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": other.csrfToken,
+      },
+      payload: {},
+    });
+    expect(foreignStart.statusCode).toBe(404);
+
+    const start = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${workspaceId}/start`,
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+      payload: {},
+    });
+    expect(start.statusCode).toBe(200);
+    expect(start.json()).toMatchObject({
+      workspace: { workerId: "worker-01", state: "RUNNING" },
+    });
+
+    const foreignStop = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${workspaceId}/stop`,
+      headers: {
+        cookie: other.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": other.csrfToken,
+      },
+      payload: {},
+    });
+    expect(foreignStop.statusCode).toBe(404);
+
+    const stop = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${workspaceId}/stop`,
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+      payload: {},
+    });
+    expect(stop.statusCode).toBe(200);
+    expect(stop.json()).toMatchObject({ workspace: { state: "STOPPED" } });
+
+    const deletion = await app.inject({
+      method: "DELETE",
+      url: `/api/workspaces/${workspaceId}`,
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+    });
+    expect(deletion.statusCode).toBe(204);
+    expect(commands).toEqual([
+      "workspace.ensure",
+      "workspace.start",
+      "workspace.stop",
+      "workspace.delete",
+    ]);
+
+    worker.close();
+    await app.close();
+  });
+
+  it("refuses arbitrary placement when multiple eligible Workers are online", async () => {
+    const app = buildControlPlane(await createTestDependencies());
+    await app.ready();
+    const worker1 = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    const worker2 = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_2_TOKEN}` },
+    });
+    worker1.send(JSON.stringify(workerHello("worker-01")));
+    worker2.send(JSON.stringify(workerHello("worker-02")));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const owner = await login(app, "user-a", "password-for-user-a");
+    const create = await app.inject({
+      method: "POST",
+      url: "/api/workspaces",
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+      payload: { name: "needs-explicit-placement" },
+    });
+    const workspaceId = create.json<{ workspace: WorkspaceRecord }>().workspace.id;
+    const start = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${workspaceId}/start`,
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+      payload: {},
+    });
+
+    expect(start.statusCode).toBe(409);
+    expect(start.json()).toMatchObject({
+      error: { code: "WORKER_ASSIGNMENT_REQUIRED" },
+    });
+    worker1.close();
+    worker2.close();
+    await app.close();
+  });
+});
+
 function workerHello(workerId: string) {
   return {
     version: 1,
@@ -463,14 +748,14 @@ function workerHello(workerId: string) {
       workerId,
       hostname: `${workerId}.internal`,
       architecture: "arm64",
-      runtimeImage: "unavailable",
-      runtimeVersion: "phase-2",
+      runtimeImage: "agent-runtime:test-unassigned",
+      runtimeVersion: "phase-3",
       capabilities: {
         browser: false,
         office: false,
         ffmpeg: false,
-        python: false,
-        node: false,
+        python: true,
+        node: true,
         rust: false,
       },
       maxWorkspaces: 4,

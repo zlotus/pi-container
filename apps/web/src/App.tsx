@@ -67,6 +67,7 @@ export function App() {
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [pendingWorkspaceId, setPendingWorkspaceId] = useState<string | null>(null);
 
   const loadWorkspaces = useCallback(async () => {
     const result = await api<{ workspaces: Workspace[] }>("/api/workspaces");
@@ -151,6 +152,7 @@ export function App() {
     if (session === null) return;
     if (!window.confirm(`永久删除 Workspace “${workspace.name}”？`)) return;
     setError(null);
+    setPendingWorkspaceId(workspace.id);
     try {
       await api(`/api/workspaces/${workspace.id}`, {
         method: "DELETE",
@@ -159,6 +161,31 @@ export function App() {
       await loadWorkspaces();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Deletion failed");
+    } finally {
+      setPendingWorkspaceId(null);
+    }
+  }
+
+  async function changeWorkspaceRuntime(
+    workspace: Workspace,
+    action: "start" | "stop",
+  ) {
+    if (session === null) return;
+    setError(null);
+    setPendingWorkspaceId(workspace.id);
+    try {
+      await api(`/api/workspaces/${workspace.id}/${action}`, {
+        method: "POST",
+        headers: { "x-csrf-token": session.csrfToken },
+        body: "{}",
+      });
+      await loadWorkspaces();
+      if (session.user.role === "admin") await loadWorkers();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Runtime operation failed");
+      await loadWorkspaces();
+    } finally {
+      setPendingWorkspaceId(null);
     }
   }
 
@@ -268,7 +295,7 @@ export function App() {
           <section className="empty-state">
             <span>＋</span>
             <h2>还没有 Workspace</h2>
-            <p>创建第一个工作环境，Runtime 接入后即可从这里启动 pi-web。</p>
+            <p>创建第一个工作环境，在唯一 eligible Worker 上启动 pi-web。</p>
           </section>
         ) : (
           <section className="workspace-grid">
@@ -284,8 +311,27 @@ export function App() {
                   <div><dt>创建时间</dt><dd>{new Date(workspace.createdAt).toLocaleString()}</dd></div>
                 </dl>
                 <div className="card-actions">
-                  <button disabled title="Phase 3 接入 Runtime 后可用">打开</button>
-                  <button className="danger" onClick={() => void deleteWorkspace(workspace)}>删除</button>
+                  {workspace.state === "RUNNING" ? (
+                    <button
+                      className="secondary"
+                      disabled={pendingWorkspaceId === workspace.id}
+                      onClick={() => void changeWorkspaceRuntime(workspace, "stop")}
+                    >停止</button>
+                  ) : (
+                    <button
+                      disabled={
+                        pendingWorkspaceId === workspace.id ||
+                        ["STARTING", "STOPPING", "DELETING"].includes(workspace.state)
+                      }
+                      onClick={() => void changeWorkspaceRuntime(workspace, "start")}
+                    >启动</button>
+                  )}
+                  <button disabled title="Phase 4 Authenticated Gateway 完成后开放">打开</button>
+                  <button
+                    className="danger"
+                    disabled={pendingWorkspaceId === workspace.id}
+                    onClick={() => void deleteWorkspace(workspace)}
+                  >删除</button>
                 </div>
               </article>
             ))}

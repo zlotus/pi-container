@@ -1,6 +1,11 @@
 import { WorkerIdSchema, WorkerTokenSchema } from "@agent-runtime/protocol";
 import { z } from "zod";
 
+const AbsolutePathSchema = z
+  .string()
+  .min(1)
+  .refine((value) => value.startsWith("/"), "path must be absolute");
+
 export const WorkerConfigSchema = z
   .object({
     CONTROL_PLANE_URL: z.string().url().refine(
@@ -28,8 +33,30 @@ export const WorkerConfigSchema = z
       .min(1_000)
       .max(300_000)
       .default(30_000),
-    RUNTIME_IMAGE: z.string().min(1).max(255).default("unavailable"),
-    RUNTIME_VERSION: z.string().min(1).max(128).default("phase-2"),
+    RUNTIME_IMAGE: z
+      .string()
+      .min(1)
+      .max(255)
+      .default("agent-runtime:phase3-minimal"),
+    RUNTIME_VERSION: z.string().min(1).max(128).default("phase-3"),
+    DOCKER_SOCKET_PATH: AbsolutePathSchema.default("/var/run/docker.sock"),
+    WORKER_MANAGED_ROOT: AbsolutePathSchema.default("/var/lib/agent-runtime"),
+    WORKSPACE_CPU_COUNT: z.coerce.number().positive().max(256).default(2),
+    WORKSPACE_MEMORY_BYTES: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(Number.MAX_SAFE_INTEGER)
+      .default(4 * 1024 ** 3),
+    WORKSPACE_PIDS_LIMIT: z.coerce.number().int().positive().default(512),
+    WORKSPACE_UID: z.coerce.number().int().positive().default(1_000),
+    WORKSPACE_GID: z.coerce.number().int().positive().default(1_000),
+    WORKSPACE_START_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(300_000)
+      .default(60_000),
   })
   .refine(
     (value) =>

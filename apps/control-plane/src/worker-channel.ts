@@ -43,6 +43,10 @@ export class WorkerChannel {
 
   constructor(readonly commandTimeoutMs: number) {}
 
+  isConnected(workerId: string): boolean {
+    return this.#connections.get(workerId)?.readyState === 1;
+  }
+
   register(workerId: string, socket: ChannelSocket): void {
     const existing = this.#connections.get(workerId);
     if (existing !== undefined && existing !== socket) {

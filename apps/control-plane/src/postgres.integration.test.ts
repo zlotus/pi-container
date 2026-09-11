@@ -4,7 +4,7 @@ import { hashOpaqueToken, hashPassword } from "@agent-runtime/auth";
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase2Repository,
+  createPhase3Repository,
   migrateDatabase,
   type DatabaseClient,
 } from "@agent-runtime/database";
@@ -16,11 +16,13 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithPostgres = databaseUrl === undefined ? describe.skip : describe;
 const NOW = new Date("2026-09-10T08:00:00.000Z");
 
-describeWithPostgres("Phase 1 and 2 PostgreSQL integration", () => {
+describeWithPostgres("Phase 1 through 3 PostgreSQL integration", () => {
   const userAId = randomUUID();
   const userBId = randomUUID();
+  const phase3UserId = randomUUID();
   const suffix = randomUUID();
   const workerId = `worker-${suffix}`;
+  const phase3WorkerId = `runtime-${suffix}`;
   let database!: DatabaseClient;
 
   beforeAll(async () => {
@@ -31,14 +33,14 @@ describeWithPostgres("Phase 1 and 2 PostgreSQL integration", () => {
   });
 
   afterAll(async () => {
-    await database`delete from workspaces where user_id in (${userAId}, ${userBId})`;
-    await database`delete from workers where id = ${workerId}`;
-    await database`delete from users where id in (${userAId}, ${userBId})`;
+    await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId})`;
+    await database`delete from workers where id in (${workerId}, ${phase3WorkerId})`;
+    await database`delete from users where id in (${userAId}, ${userBId}, ${phase3UserId})`;
     await database.end({ timeout: 5 });
   });
 
   it("logs in two persisted users and isolates their workspaces", async () => {
-    const repository = createPhase2Repository(database);
+    const repository = createPhase3Repository(database);
     await repository.createUser({
       id: userAId,
       email: `a-${suffix}@example.test`,
@@ -65,6 +67,11 @@ describeWithPostgres("Phase 1 and 2 PostgreSQL integration", () => {
       defaultRuntimeImage: "agent-runtime:integration-unassigned",
       workerOfflineAfterMs: 35_000,
       workerCommandTimeoutMs: 1_000,
+      workspaceResources: {
+        cpuCount: 2,
+        memoryBytes: 4 * 1024 ** 3,
+        pidsLimit: 512,
+      },
     });
 
     async function login(email: string, password: string) {
@@ -124,7 +131,7 @@ describeWithPostgres("Phase 1 and 2 PostgreSQL integration", () => {
   });
 
   it("persists a bound Worker credential and rotates it atomically", async () => {
-    const repository = createPhase2Repository(database);
+    const repository = createPhase3Repository(database);
     const originalToken = "originalworker0123456789abcdef0123456789abcdef";
     const rotatedToken = "rotatedworker0123456789abcdef0123456789abcdef";
     const originalHash = hashOpaqueToken(originalToken);
@@ -177,5 +184,104 @@ describeWithPostgres("Phase 1 and 2 PostgreSQL integration", () => {
     });
     expect((await repository.listWorkers()).find((worker) => worker.id === workerId))
       .toMatchObject({ status: "OFFLINE", lastHeartbeatAt: null });
+  });
+
+  it("persists minimal placement and lifecycle transitions atomically", async () => {
+    const repository = createPhase3Repository(database);
+    await repository.createUser({
+      id: phase3UserId,
+      email: `runtime-${suffix}@example.test`,
+      username: null,
+      passwordHash: await hashPassword("integration-runtime-password"),
+      role: "user",
+    });
+    const token = "phase3worker0123456789abcdef0123456789abcdef";
+    const credentialHash = hashOpaqueToken(token);
+    await repository.provisionWorker({
+      workerId: phase3WorkerId,
+      credentialHash,
+    });
+    expect(
+      await repository.recordWorkerHello({
+        credentialHash,
+        workerId: phase3WorkerId,
+        hostname: "runtime-worker.internal",
+        architecture: "arm64",
+        runtimeImage: "agent-runtime:phase3-minimal",
+        runtimeVersion: "phase-3",
+        capabilities: {
+          browser: false,
+          office: false,
+          ffmpeg: false,
+          python: true,
+          node: true,
+          rust: false,
+        },
+        maxWorkspaces: 2,
+        allocatedWorkspaces: 0,
+        systemResources: {
+          logicalCpuCount: 8,
+          memoryBytes: 16 * 1024 ** 3,
+        },
+        receivedAt: NOW,
+      }),
+    ).toBe(true);
+    const workspace = await repository.createWorkspace({
+      id: randomUUID(),
+      userId: phase3UserId,
+      name: "phase-3-lifecycle",
+      runtimeImage: "agent-runtime:phase3-minimal",
+    });
+
+    await expect(
+      repository.listEligibleWorkerIds({
+        workspaceId: workspace.id,
+        userId: phase3UserId,
+        heartbeatCutoff: new Date(NOW.getTime() - 35_000),
+      }),
+    ).resolves.toEqual([phase3WorkerId]);
+    await expect(
+      repository.beginWorkspaceStart({
+        workspaceId: workspace.id,
+        userId: phase3UserId,
+        workerId: phase3WorkerId,
+      }),
+    ).resolves.toMatchObject({
+      workerId: phase3WorkerId,
+      state: "STARTING",
+    });
+    await expect(
+      repository.finishWorkspaceStart({
+        workspaceId: workspace.id,
+        workerId: phase3WorkerId,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      repository.beginWorkspaceStop({
+        workspaceId: workspace.id,
+        userId: phase3UserId,
+        workerId: phase3WorkerId,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      repository.finishWorkspaceStop({
+        workspaceId: workspace.id,
+        workerId: phase3WorkerId,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      repository.beginWorkspaceDelete({
+        workspaceId: workspace.id,
+        userId: phase3UserId,
+        workerId: phase3WorkerId,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      repository.deleteConfirmedWorkspace({
+        workspaceId: workspace.id,
+        userId: phase3UserId,
+        workerId: phase3WorkerId,
+      }),
+    ).resolves.toBe(true);
   });
 });

@@ -40,3 +40,7 @@ export {
   type WorkerRecord,
   type WorkerStatus,
 } from "./phase2.js";
+export {
+  createPhase3Repository,
+  type Phase3Repository,
+} from "./phase3.js";

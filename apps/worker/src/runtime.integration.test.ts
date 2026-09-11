@@ -1,0 +1,174 @@
+import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import Docker from "dockerode";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { loadWorkerConfig } from "./config.js";
+import { DockerWorkspaceRuntime } from "./runtime.js";
+
+const runDockerIntegration = process.env.TEST_DOCKER_RUNTIME === "1";
+const describeWithDocker = runDockerIntegration ? describe : describe.skip;
+
+describeWithDocker("Phase 3 Docker Runtime integration", () => {
+  const workspaceId = randomUUID();
+  const isolationWorkspaceIds = [randomUUID(), randomUUID()] as const;
+  const containerName = `agent-runtime-${workspaceId}`;
+  const networkName = containerName;
+  const resources = {
+    cpuCount: 1,
+    memoryBytes: 1024 ** 3,
+    pidsLimit: 256,
+  };
+  let managedRoot = "";
+  let docker!: Docker;
+  let runtime!: DockerWorkspaceRuntime;
+
+  beforeAll(async () => {
+    managedRoot = await mkdtemp(join(tmpdir(), "agent-runtime-integration-"));
+    const config = loadWorkerConfig({
+      CONTROL_PLANE_URL: "ws://127.0.0.1:3000/api/workers/connect",
+      WORKER_ID: "integration-worker",
+      WORKER_TOKEN: "0123456789abcdef0123456789abcdef",
+      WORKER_MAX_WORKSPACES: "2",
+      WORKER_MANAGED_ROOT: managedRoot,
+      RUNTIME_IMAGE: "agent-runtime:phase3-minimal",
+      WORKSPACE_CPU_COUNT: String(resources.cpuCount),
+      WORKSPACE_MEMORY_BYTES: String(resources.memoryBytes),
+      WORKSPACE_PIDS_LIMIT: String(resources.pidsLimit),
+      WORKSPACE_START_TIMEOUT_MS: "60000",
+    });
+    docker = new Docker({ socketPath: config.DOCKER_SOCKET_PATH });
+    runtime = new DockerWorkspaceRuntime(config, docker);
+  });
+
+  afterAll(async () => {
+    if (runtime !== undefined) {
+      for (const cleanupWorkspaceId of [workspaceId, ...isolationWorkspaceIds]) {
+        try {
+          await runtime.delete(cleanupWorkspaceId);
+        } catch {
+          // The tests report the original failure; cleanup below remains scoped
+          // to random container/network names and the temporary managed root.
+        }
+      }
+    }
+    for (const cleanupWorkspaceId of [workspaceId, ...isolationWorkspaceIds]) {
+      const cleanupName = `agent-runtime-${cleanupWorkspaceId}`;
+      try {
+        await docker?.getContainer(cleanupName).remove({ force: true });
+      } catch {
+        // Already removed or never created.
+      }
+      try {
+        await docker?.getNetwork(cleanupName).remove();
+      } catch {
+        // Already removed or never created.
+      }
+    }
+    if (managedRoot !== "") {
+      await rm(managedRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("starts pi-web with the security baseline and keeps both mounts on restart", async () => {
+    await runtime.ensure(
+      workspaceId,
+      "agent-runtime:phase3-minimal",
+      resources,
+    );
+    expect((await runtime.start(workspaceId)).state).toBe("RUNNING");
+
+    const inspection = await docker.getContainer(containerName).inspect();
+    expect(inspection.Config.User).toBe("1000:1000");
+    expect(inspection.HostConfig.Privileged).toBe(false);
+    expect(inspection.HostConfig.NetworkMode).toBe(networkName);
+    expect(inspection.HostConfig.CapDrop).toContain("ALL");
+    expect(inspection.HostConfig.SecurityOpt).toContain(
+      "no-new-privileges:true",
+    );
+    expect(inspection.HostConfig.Memory).toBe(resources.memoryBytes);
+    expect(inspection.HostConfig.NanoCpus).toBe(1_000_000_000);
+    expect(inspection.HostConfig.PidsLimit).toBe(resources.pidsLimit);
+    expect(inspection.NetworkSettings.Ports["30141/tcp"]?.[0]?.HostIp).toBe(
+      "127.0.0.1",
+    );
+    expect(
+      inspection.Mounts.some(
+        (mount) => mount.Source === "/var/run/docker.sock",
+      ),
+    ).toBe(false);
+
+    const workspaceFile = join(
+      managedRoot,
+      "workspaces",
+      workspaceId,
+      "workspace",
+      "artifact.txt",
+    );
+    const piStateFile = join(
+      managedRoot,
+      "workspaces",
+      workspaceId,
+      "pi",
+      "session.jsonl",
+    );
+    await writeFile(workspaceFile, "artifact persists", "utf8");
+    await writeFile(piStateFile, "session persists", "utf8");
+
+    expect((await runtime.stop(workspaceId)).state).toBe("STOPPED");
+    expect((await runtime.start(workspaceId)).state).toBe("RUNNING");
+    expect(await readFile(workspaceFile, "utf8")).toBe("artifact persists");
+    expect(await readFile(piStateFile, "utf8")).toBe("session persists");
+
+    await runtime.delete(workspaceId);
+    expect(existsSync(join(managedRoot, "workspaces", workspaceId))).toBe(false);
+  }, 120_000);
+
+  it("keeps Workspace bridges isolated from each other and host loopback", async () => {
+    const [workspaceA, workspaceB] = isolationWorkspaceIds;
+    await runtime.ensure(workspaceA, "agent-runtime:phase3-minimal", resources);
+    await runtime.ensure(workspaceB, "agent-runtime:phase3-minimal", resources);
+    await runtime.start(workspaceA);
+    await runtime.start(workspaceB);
+
+    const containerA = docker.getContainer(`agent-runtime-${workspaceA}`);
+    const inspectionB = await docker
+      .getContainer(`agent-runtime-${workspaceB}`)
+      .inspect();
+    const networkB = `agent-runtime-${workspaceB}`;
+    const addressB = inspectionB.NetworkSettings.Networks[networkB]?.IPAddress;
+    const hostPortB =
+      inspectionB.NetworkSettings.Ports["30141/tcp"]?.[0]?.HostPort;
+    if (addressB === undefined || hostPortB === undefined) {
+      throw new Error("Workspace B network fixture is incomplete");
+    }
+
+    expect(await curlExitCode(containerA, `http://${addressB}:30141/`)).not.toBe(0);
+    expect(
+      await curlExitCode(containerA, `http://127.0.0.1:${hostPortB}/`),
+    ).not.toBe(0);
+
+    await runtime.delete(workspaceA);
+    await runtime.delete(workspaceB);
+  }, 120_000);
+});
+
+async function curlExitCode(
+  container: Docker.Container,
+  url: string,
+): Promise<number> {
+  const command = await container.exec({
+    AttachStderr: true,
+    AttachStdout: true,
+    Cmd: ["curl", "--fail", "--silent", "--max-time", "2", url],
+  });
+  const stream = await command.start({ hijack: true, stdin: false });
+  await once(stream, "end");
+  const inspection = await command.inspect();
+  return inspection.ExitCode ?? -1;
+}

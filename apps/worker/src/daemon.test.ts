@@ -15,7 +15,7 @@ const config = loadWorkerConfig({
 });
 
 describe("worker daemon messages", () => {
-  it("reports only Phase 2 capabilities and bounded host capacity", () => {
+  it("reports the Minimal Runtime capabilities and bounded host capacity", () => {
     const message = buildWorkerHello(config, {
       hostname: "worker-01.internal",
       architecture: "arm64",
@@ -32,8 +32,8 @@ describe("worker daemon messages", () => {
           browser: false,
           office: false,
           ffmpeg: false,
-          python: false,
-          node: false,
+          python: true,
+          node: true,
           rust: false,
         },
         maxWorkspaces: 8,
