@@ -275,6 +275,34 @@ describeWithPostgres("Phase 1 through 4 PostgreSQL integration", () => {
         workerId: phase3WorkerId,
       }),
     ).resolves.toBe(true);
+    await expect(repository.markWorkersOffline(NOW)).resolves.toBe(1);
+    await expect(
+      repository.findOwnedWorkspace(workspace.id, phase3UserId),
+    ).resolves.toMatchObject({
+      workerId: phase3WorkerId,
+      state: "WORKER_OFFLINE",
+    });
+    await expect(
+      repository.reconcileWorkerOfflineWorkspace({
+        workspaceId: workspace.id,
+        workerId: phase3WorkerId,
+        runtimeImage: "wrong-runtime-image",
+        state: "RUNNING",
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      repository.listWorkerOfflineWorkspaces(phase3WorkerId),
+    ).resolves.toEqual([
+      expect.objectContaining({ id: workspace.id, state: "WORKER_OFFLINE" }),
+    ]);
+    await expect(
+      repository.reconcileWorkerOfflineWorkspace({
+        workspaceId: workspace.id,
+        workerId: phase3WorkerId,
+        runtimeImage: phase3RuntimeImage,
+        state: "RUNNING",
+      }),
+    ).resolves.toBe(true);
     await expect(
       repository.beginWorkspaceStop({
         workspaceId: workspace.id,

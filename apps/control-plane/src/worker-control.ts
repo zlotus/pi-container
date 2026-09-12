@@ -34,6 +34,7 @@ export function registerWorkerControlChannel(
     store: WorkerControlStore;
     channel: WorkerChannel;
     now: () => Date;
+    onHelloAccepted?: (workerId: string) => void;
   },
 ): void {
   const identities = new WeakMap<FastifyRequest, WorkerConnectionIdentity>();
@@ -135,6 +136,7 @@ export function registerWorkerControlChannel(
               }
               helloAccepted = true;
               dependencies.channel.register(identity.workerId, socket);
+              dependencies.onHelloAccepted?.(identity.workerId);
               return;
             }
 

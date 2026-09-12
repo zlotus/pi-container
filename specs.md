@@ -1799,10 +1799,19 @@ orphan warning
 rm -rf
 ```
 
+Phase 4 稳定性范围包含一个受限的 reconnect state repair：Worker 完成 authenticated hello
+并重新注册 control channel 后，Control Plane 仅对数据库中仍绑定该 Worker 且状态为
+`WORKER_OFFLINE` 的 Workspace 逐个发送 `workspace.inspect`。在受管 Runtime 身份、runtime
+image 和实际状态得到确认前保持 `WORKER_OFFLINE`，Gateway 必须继续 fail-closed；确认运行或
+停止后分别恢复 `RUNNING` / `STOPPED`，Container 缺失或确定的 metadata/identity mismatch
+进入 `ERROR`，暂时无法确认则保持 `WORKER_OFFLINE`。该修复不得改变 `worker_id`、自动迁移、
+隐式 `ensure/start`，也不等同于完整 Worker inventory reconciliation。
+
 Phase 3 的 persistence 验收只覆盖 Worker 正常在线时，对同一 managed Container 的显式
-stop/start。Phase 6 才覆盖 Container 意外退出、Worker daemon/宿主机重启、Control
-Plane 重启后的 observed state 上报与 authoritative assignment reconciliation；两者不能
-用同一条“重启成功”测试重复计数。
+stop/start。Phase 6 才覆盖完整 managed container/directory inventory、orphan 处理、Container
+意外退出、Worker 宿主机重启、Control Plane 重启后的 observed state 上报与 authoritative
+assignment reconciliation；不能把 Phase 4 的定向 reconnect state repair 当作 Phase 6 的
+完整 persistence/recovery 验收。
 
 ---
 
@@ -2099,6 +2108,8 @@ Portal
 - streaming
 - Workspace Host 的单次 session exchange 与 host-only Cookie
 - Control Plane -> authenticated Worker Gateway data path
+- Worker daemon 短暂掉线后，对原 Worker 上 `WORKER_OFFLINE` Workspace 执行受限、fail-closed
+  的 `workspace.inspect` state repair，不迁移或隐式启动 Runtime
 
 验收：
 
@@ -2149,15 +2160,15 @@ Workspace B -> Host B
 完成：
 
 - Container restart
-- Worker restart
+- Worker 宿主机重启及完整 managed Runtime inventory
 - Control Plane restart
-- reconciliation
+- authoritative assignment / orphan reconciliation
 
 验收：
 
 - Workspace 文件不丢
 - Pi Session 不丢
-- Worker reconnect 正常
+- Worker/宿主机与 Control Plane restart 后完整恢复正常
 
 ---
 

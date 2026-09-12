@@ -83,6 +83,39 @@ export function createPhase3Repository(database: DatabaseClient) {
       return rows.map((row) => row.id);
     },
 
+    async listWorkerOfflineWorkspaces(
+      workerId: string,
+    ): Promise<WorkspaceRecord[]> {
+      const rows = await database<WorkspaceRow[]>`
+        select
+          id, user_id, name, worker_id, state, runtime_image,
+          created_at, updated_at, last_activity_at
+        from workspaces
+        where worker_id = ${workerId}
+          and state = 'WORKER_OFFLINE'
+        order by id asc
+      `;
+      return rows.map(mapWorkspace);
+    },
+
+    async reconcileWorkerOfflineWorkspace(input: {
+      workspaceId: string;
+      workerId: string;
+      runtimeImage: string;
+      state: "RUNNING" | "STOPPED" | "ERROR";
+    }): Promise<boolean> {
+      const rows = await database<{ id: string }[]>`
+        update workspaces
+        set state = ${input.state}, updated_at = now()
+        where id = ${input.workspaceId}
+          and worker_id = ${input.workerId}
+          and runtime_image = ${input.runtimeImage}
+          and state = 'WORKER_OFFLINE'
+        returning id
+      `;
+      return rows.length === 1;
+    },
+
     async beginWorkspaceStart(input: {
       workspaceId: string;
       userId: string;

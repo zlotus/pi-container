@@ -135,6 +135,13 @@ pnpm dev:worker
 同一 credential 不能在 `worker.hello` 中声明另一个 Worker ID。默认每 10 秒 heartbeat，
 35 秒未收到服务端认可的 hello/heartbeat 后 Admin 列表显示 `OFFLINE`。轮换凭证使用：
 
+Worker 超过 offline timeout 后，绑定其上的相关 Workspace 会持久化为 `WORKER_OFFLINE`，
+Gateway 保持拒绝访问。Worker daemon 重新完成 authenticated hello 后，Control Plane 会对这些
+Workspace 逐个发送 `workspace.inspect`：真实 Container 仍运行时自动恢复 `RUNNING`，已停止时
+恢复 `STOPPED`，Container 缺失或确定的 managed metadata/identity 错误进入 `ERROR`；检查超时、
+再次断线或 Docker 暂时不可用时继续保持 `WORKER_OFFLINE`。该流程不会改变原 `workerId`，不会
+迁移 Workspace，也不会隐式创建或启动 Runtime。
+
 ```bash
 export WORKER_ID=worker-a
 pnpm worker:rotate

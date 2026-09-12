@@ -24,7 +24,17 @@ const ADMIN_ID = "33333333-3333-4333-8333-333333333333";
 const WORKER_1_TOKEN = "worker1token0123456789abcdef0123456789abcdef";
 const WORKER_2_TOKEN = "worker2token0123456789abcdef0123456789abcdef";
 
-async function createTestDependencies(): Promise<ControlPlaneDependencies> {
+interface TestControlPlaneDependencies extends ControlPlaneDependencies {
+  testState: {
+    workspaces: WorkspaceRecord[];
+    workers: WorkerRecord[];
+    markWorkersOffline(cutoff: Date): number;
+  };
+}
+
+async function createTestDependencies(
+  initialWorkspaces: WorkspaceRecord[] = [],
+): Promise<TestControlPlaneDependencies> {
   const users: UserRecord[] = [
     {
       id: USER_A_ID,
@@ -55,7 +65,9 @@ async function createTestDependencies(): Promise<ControlPlaneDependencies> {
     string,
     { id: string; userId: string; expiresAt: Date; revoked: boolean }
   >();
-  const workspaces: WorkspaceRecord[] = [];
+  const workspaces: WorkspaceRecord[] = initialWorkspaces.map((workspace) => ({
+    ...workspace,
+  }));
   const workers: WorkerRecord[] = [WORKER_1_TOKEN, WORKER_2_TOKEN].map(
     (_token, index) => ({
       id: `worker-0${index + 1}`,
@@ -80,6 +92,38 @@ async function createTestDependencies(): Promise<ControlPlaneDependencies> {
   ]);
 
   return {
+    testState: {
+      workspaces,
+      workers,
+      markWorkersOffline(cutoff) {
+        const offlineWorkerIds = new Set(
+          workers
+            .filter(
+              (worker) =>
+                worker.enabled &&
+                worker.status === "ONLINE" &&
+                (worker.lastHeartbeatAt === null ||
+                  worker.lastHeartbeatAt <= cutoff),
+            )
+            .map((worker) => {
+              worker.status = "OFFLINE";
+              return worker.id;
+            }),
+        );
+        for (const workspace of workspaces) {
+          if (
+            workspace.workerId !== null &&
+            offlineWorkerIds.has(workspace.workerId) &&
+            ["STARTING", "RUNNING", "STOPPING", "STOPPED", "ERROR"].includes(
+              workspace.state,
+            )
+          ) {
+            workspace.state = "WORKER_OFFLINE";
+          }
+        }
+        return offlineWorkerIds.size;
+      },
+    },
     checkDatabase: vi.fn<() => Promise<void>>(),
     sessionSecret: "test-session-secret-that-is-at-least-32-characters",
     portalOrigin: ORIGIN,
@@ -201,6 +245,25 @@ async function createTestDependencies(): Promise<ControlPlaneDependencies> {
       },
       async listWorkspaces(userId) {
         return workspaces.filter((workspace) => workspace.userId === userId);
+      },
+      async listWorkerOfflineWorkspaces(workerId) {
+        return workspaces.filter(
+          (workspace) =>
+            workspace.workerId === workerId &&
+            workspace.state === "WORKER_OFFLINE",
+        );
+      },
+      async reconcileWorkerOfflineWorkspace(input) {
+        const workspace = workspaces.find(
+          (candidate) =>
+            candidate.id === input.workspaceId &&
+            candidate.workerId === input.workerId &&
+            candidate.runtimeImage === input.runtimeImage &&
+            candidate.state === "WORKER_OFFLINE",
+        );
+        if (workspace === undefined) return false;
+        workspace.state = input.state;
+        return true;
       },
       async createWorkspace(input) {
         const workspace: WorkspaceRecord = {
@@ -781,6 +844,269 @@ describe("Phase 3 Workspace Runtime lifecycle", () => {
     worker2.close();
     await app.close();
   });
+});
+
+describe("Worker reconnect reconciliation", () => {
+  it("keeps an offline Workspace closed until inspect confirms its Runtime is still running", async () => {
+    const dependencies = await createTestDependencies();
+    const app = buildControlPlane(dependencies);
+    await app.ready();
+    const firstWorker = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    firstWorker.on("message", (data) => {
+      const command = JSON.parse(data.toString()) as {
+        requestId: string;
+        type: "workspace.ensure" | "workspace.start";
+        payload: { workspaceId: string };
+      };
+      firstWorker.send(
+        JSON.stringify({
+          version: 1,
+          type: "response.ok",
+          requestId: command.requestId,
+          payload: {
+            requestType: command.type,
+            workspace: {
+              workspaceId: command.payload.workspaceId,
+              state: command.type === "workspace.start" ? "RUNNING" : "STOPPED",
+              runtimeImage: "agent-runtime:test-unassigned",
+              observedAt: NOW.toISOString(),
+            },
+          },
+        }),
+      );
+    });
+    firstWorker.send(JSON.stringify(workerHello("worker-01")));
+    await vi.waitFor(() => {
+      expect(dependencies.testState.workers[0]?.status).toBe("ONLINE");
+    });
+
+    const owner = await login(app, "user-a", "password-for-user-a");
+    const create = await app.inject({
+      method: "POST",
+      url: "/api/workspaces",
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+      payload: { name: "reconnect-running" },
+    });
+    const workspaceId = create.json<{ workspace: WorkspaceRecord }>().workspace.id;
+    const start = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${workspaceId}/start`,
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+      payload: {},
+    });
+    expect(start.json()).toMatchObject({ workspace: { state: "RUNNING" } });
+
+    const firstClosed = once(firstWorker, "close");
+    firstWorker.close();
+    await firstClosed;
+    expect(dependencies.testState.markWorkersOffline(NOW)).toBe(1);
+    expect(dependencies.testState.workspaces[0]?.state).toBe("WORKER_OFFLINE");
+
+    const reconnectedWorker = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    let inspectCommand:
+      | { requestId: string; type: "workspace.inspect"; workspaceId: string }
+      | undefined;
+    const reconnectCommands: string[] = [];
+    reconnectedWorker.on("message", (data) => {
+      const command = JSON.parse(data.toString()) as {
+        requestId: string;
+        type: "workspace.inspect";
+        payload: { workspaceId: string };
+      };
+      reconnectCommands.push(command.type);
+      inspectCommand = {
+        requestId: command.requestId,
+        type: command.type,
+        workspaceId: command.payload.workspaceId,
+      };
+    });
+    reconnectedWorker.send(JSON.stringify(workerHello("worker-01")));
+    await vi.waitFor(() => {
+      expect(inspectCommand?.workspaceId).toBe(workspaceId);
+    });
+
+    const whileReconciling = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${workspaceId}/open`,
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+      payload: {},
+    });
+    expect(whileReconciling.statusCode).toBe(409);
+    expect(dependencies.testState.workspaces[0]?.state).toBe("WORKER_OFFLINE");
+
+    if (inspectCommand === undefined) throw new Error("inspect command missing");
+    reconnectedWorker.send(
+      JSON.stringify({
+        version: 1,
+        type: "response.ok",
+        requestId: inspectCommand.requestId,
+        payload: {
+          requestType: "workspace.inspect",
+          workspace: {
+            workspaceId,
+            state: "RUNNING",
+            runtimeImage: "agent-runtime:test-unassigned",
+            observedAt: NOW.toISOString(),
+          },
+        },
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(dependencies.testState.workspaces[0]?.state).toBe("RUNNING");
+    });
+
+    const afterReconciliation = await app.inject({
+      method: "GET",
+      url: "/api/workspaces",
+      headers: { cookie: owner.cookie },
+    });
+    expect(afterReconciliation.json()).toMatchObject({
+      workspaces: [{ id: workspaceId, state: "RUNNING" }],
+    });
+    expect(reconnectCommands).toEqual(["workspace.inspect"]);
+
+    reconnectedWorker.close();
+    await app.close();
+  });
+
+  it.each([
+    ["STOPPED", "STOPPED"],
+    ["CREATED", "ERROR"],
+  ] as const)(
+    "maps a confirmed %s Runtime without ever reporting it RUNNING",
+    async (observedState, expectedState) => {
+      const workspaceId = randomUUID();
+      const dependencies = await createTestDependencies([
+        {
+          id: workspaceId,
+          userId: USER_A_ID,
+          name: `reconcile-${observedState.toLowerCase()}`,
+          workerId: "worker-01",
+          state: "WORKER_OFFLINE",
+          runtimeImage: "agent-runtime:test-unassigned",
+          createdAt: NOW,
+          updatedAt: NOW,
+          lastActivityAt: NOW,
+        },
+      ]);
+      const app = buildControlPlane(dependencies);
+      await app.ready();
+      const worker = await app.injectWS("/api/workers/connect", {
+        headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+      });
+      worker.on("message", (data) => {
+        const command = JSON.parse(data.toString()) as {
+          requestId: string;
+          type: "workspace.inspect";
+        };
+        worker.send(
+          JSON.stringify({
+            version: 1,
+            type: "response.ok",
+            requestId: command.requestId,
+            payload: {
+              requestType: command.type,
+              workspace: {
+                workspaceId,
+                state: observedState,
+                runtimeImage: "agent-runtime:test-unassigned",
+                observedAt: NOW.toISOString(),
+              },
+            },
+          }),
+        );
+      });
+      worker.send(JSON.stringify(workerHello("worker-01")));
+
+      await vi.waitFor(() => {
+        expect(dependencies.testState.workspaces[0]?.state).toBe(expectedState);
+      });
+      expect(dependencies.testState.workspaces[0]?.state).not.toBe("RUNNING");
+
+      worker.close();
+      await app.close();
+    },
+  );
+
+  it.each([
+    {
+      code: "RUNTIME_ENGINE_ERROR",
+      retryable: true,
+      expectedState: "WORKER_OFFLINE",
+    },
+    {
+      code: "WORKSPACE_METADATA_MISMATCH",
+      retryable: false,
+      expectedState: "ERROR",
+    },
+  ] as const)(
+    "maps inspect error $code to $expectedState",
+    async ({ code, retryable, expectedState }) => {
+      const workspaceId = randomUUID();
+      const dependencies = await createTestDependencies([
+        {
+          id: workspaceId,
+          userId: USER_A_ID,
+          name: "reconcile-unconfirmed",
+          workerId: "worker-01",
+          state: "WORKER_OFFLINE",
+          runtimeImage: "agent-runtime:test-unassigned",
+          createdAt: NOW,
+          updatedAt: NOW,
+          lastActivityAt: NOW,
+        },
+      ]);
+      const app = buildControlPlane(dependencies);
+      await app.ready();
+      const worker = await app.injectWS("/api/workers/connect", {
+        headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+      });
+      worker.on("message", (data) => {
+        const command = JSON.parse(data.toString()) as {
+          requestId: string;
+          type: "workspace.inspect";
+        };
+        worker.send(
+          JSON.stringify({
+            version: 1,
+            type: "response.error",
+            requestId: command.requestId,
+            payload: {
+              requestType: command.type,
+              code,
+              message: retryable
+                ? "Docker is temporarily unavailable"
+                : "Managed metadata does not match",
+              retryable,
+            },
+          }),
+        );
+      });
+      worker.send(JSON.stringify(workerHello("worker-01")));
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      expect(dependencies.testState.workspaces[0]?.state).toBe(expectedState);
+
+      worker.close();
+      await app.close();
+    },
+  );
 });
 
 function workerHello(workerId: string) {

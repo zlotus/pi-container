@@ -73,6 +73,8 @@ type Phase1Store = Pick<
   | "beginWorkspaceDelete"
   | "deleteConfirmedWorkspace"
   | "markWorkspaceRuntimeFailure"
+  | "listWorkerOfflineWorkspaces"
+  | "reconcileWorkerOfflineWorkspace"
 >;
 
 type WorkerAdminStore = Pick<
@@ -207,13 +209,6 @@ export function buildControlPlane(
   void app.register(websocket, {
     options: { maxPayload: 256 * 1024, perMessageDeflate: false },
   });
-  void app.register(async (workerControlScope) => {
-    registerWorkerControlChannel(workerControlScope, {
-      store: dependencies.workerStore,
-      channel: workerChannel,
-      now,
-    });
-  });
   const cookieName = dependencies.secureCookies
     ? "__Host-platform-session"
     : "platform-session";
@@ -281,6 +276,70 @@ export function buildControlPlane(
       };
     }
   }
+
+  async function reconcileWorkerWorkspaces(workerId: string): Promise<void> {
+    const workspaces =
+      await dependencies.store.listWorkerOfflineWorkspaces(workerId);
+    for (const workspace of workspaces) {
+      const result = await dispatchRuntimeCommand(workerId, {
+        version: 1,
+        type: "workspace.inspect",
+        requestId: randomUUID(),
+        payload: { workspaceId: workspace.id },
+      });
+      if (!result.ok) {
+        if (!result.workerOffline && result.statusCode === 409) {
+          await dependencies.store.reconcileWorkerOfflineWorkspace({
+            workspaceId: workspace.id,
+            workerId,
+            runtimeImage: workspace.runtimeImage,
+            state: "ERROR",
+          });
+        }
+        continue;
+      }
+      if (result.workspace.runtimeImage !== workspace.runtimeImage) {
+        await dependencies.store.reconcileWorkerOfflineWorkspace({
+          workspaceId: workspace.id,
+          workerId,
+          runtimeImage: workspace.runtimeImage,
+          state: "ERROR",
+        });
+        continue;
+      }
+      const reconciledState =
+        result.workspace.state === "RUNNING"
+          ? "RUNNING"
+          : result.workspace.state === "STOPPED"
+            ? "STOPPED"
+            : result.workspace.state === "CREATED"
+              ? "ERROR"
+              : null;
+      if (reconciledState === null || !workerChannel.isConnected(workerId)) {
+        continue;
+      }
+      await dependencies.store.reconcileWorkerOfflineWorkspace({
+        workspaceId: workspace.id,
+        workerId,
+        runtimeImage: workspace.runtimeImage,
+        state: reconciledState,
+      });
+    }
+  }
+
+  void app.register(async (workerControlScope) => {
+    registerWorkerControlChannel(workerControlScope, {
+      store: dependencies.workerStore,
+      channel: workerChannel,
+      now,
+      onHelloAccepted: (workerId) => {
+        void reconcileWorkerWorkspaces(workerId).catch(() => {
+          // The Workspace stays WORKER_OFFLINE when reconciliation cannot be
+          // completed. A later Worker reconnect can safely try again.
+        });
+      },
+    });
+  });
 
   async function markRuntimeFailure(
     workspaceId: string,

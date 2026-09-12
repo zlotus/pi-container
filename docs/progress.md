@@ -4,10 +4,10 @@ Last reviewed: 2026-09-12
 
 ## Current Milestone
 
-Phase 1～3 已完成人工验收。Phase 4 Authenticated Gateway 的真实 Firefox redirect-chain
-入口阻断已修复，并已用 Firefox 140.14 验证新的 bootstrap 浏览器语义；当前等待在实际
-Portal/Worker/pi-web 栈、真实模型凭据和目标 LAN/TLS 拓扑中继续人工验收。Phase 5 Scheduler
-尚未开始。
+Phase 1～3 已完成人工验收，Phase 4 Authenticated Gateway 核心功能已完成人工验收。真实
+Firefox redirect-chain 入口阻断已修复并通过 Firefox 140.14 验证；后续人工验收发现的 Worker
+重连后 Workspace 长期停留在 `WORKER_OFFLINE` 问题也已修复，等待按真实 daemon 重启路径复验。
+Phase 5 Scheduler 尚未开始。
 
 ## Current Baseline
 
@@ -48,18 +48,24 @@ Portal/Worker/pi-web 栈、真实模型凭据和目标 LAN/TLS 拓扑中继续�
   无 Docker socket，pi-web 只发布到动态 loopback port。
 - Phase 3/4 仍只在恰好一个 eligible Worker 时自动绑定；没有 Phase 5 的评分、随机选择、
   跨 Worker 迁移或 persistent control-WebSocket byte tunnel。
+- Worker 重新完成 authenticated hello 后，Control Plane 会仅对仍绑定该 Worker 的
+  `WORKER_OFFLINE` Workspace 逐个发送既有 `workspace.inspect`。只有受管 Runtime 身份、镜像和
+  实际状态得到确认后才条件更新：运行中恢复 `RUNNING`，已停止恢复 `STOPPED`，受管目录存在但
+  Container 缺失或确定的 metadata/identity 错误进入 `ERROR`；临时无法确认则保持
+  `WORKER_OFFLINE`。整个 reconciliation 过程不重新调度、不改变 `workerId`，Gateway 继续
+  fail-closed。
 
 ## In Progress
 
-Phase 4 人工验收：从 Firefox 中重新点击 RUNNING Workspace，确认修复后的 Workspace-origin
-bootstrap 可以进入真实 pi-web；再使用 User A/B 验证 ownership，并继续验证 Prompt SSE
-streaming、Workspace Terminal、文件上传/下载和浏览器断开/重连。多主机部署还需验证 Control
-Plane 到 Worker Gateway 的受保护 LAN/VPN 可达性、TLS certificate 和 WebSocket upgrade。
+Phase 4 人工复验：保持 Docker Runtime 运行、停止 Worker daemon 至 offline timeout，再启动
+Worker，确认 Workspace 无需手工点击“启动”即可从 `WORKER_OFFLINE` 自动恢复 `RUNNING`，随后
+通过 Portal 打开真实 pi-web。多主机部署仍需验证 Control Plane 到 Worker Gateway 的受保护
+LAN/VPN 可达性、TLS certificate 和 WebSocket upgrade。
 
 ## Next
 
-1. 按 README 配置现有 Worker 的 `gateway_base_url`、独立 Gateway token 与 Workspace wildcard
-   Host，完成人工 Phase 4 单机浏览器验收。
+1. 在现有单机环境复验 Worker daemon 重连 reconciliation，并确认恢复过程中 Gateway 拒绝、
+   恢复后 HTTP/SSE/Terminal 能力继续正常。
 2. 在目标 LAN/Tailscale 或等价私网中完成真实跨主机 TLS/HTTP/WebSocket 联调，并记录实际
    certificate、DNS 与防火墙边界；不暴露 Worker Gateway 或 pi-web loopback endpoint。
 3. Phase 4 完整 Demo 稳定后再进入 Phase 5；此前不加入多 Worker score/capability Scheduler。
@@ -84,9 +90,10 @@ Plane 到 Worker Gateway 的受保护 LAN/VPN 可达性、TLS certificate 和 We
 - 2026-09-12：核对 pinned upstream `@agegr/pi-web@0.9.0` tag 对应 commit `0d1df12`；确认
   页面/API 使用根路径，Prompt/Terminal 使用 EventSource/SSE，Host/Origin 校验支持可信 proxy
   场景，且无需修改或 fork pi-web。
-- 2026-09-12：`pnpm install --offline`、`pnpm lint`、`pnpm typecheck`、`pnpm test` 和
-  `pnpm build:web` 通过；常规测试共 53 passed，5 个 PostgreSQL/真实 Docker 条件测试按设计
-  跳过。
+- 2026-09-12：`pnpm lint`、`pnpm typecheck`、`pnpm test` 和 `pnpm build:web` 通过；常规测试
+  共 58 passed，5 个 PostgreSQL/真实 Docker 条件测试按设计跳过。新增重连回归覆盖
+  `RUNNING -> WORKER_OFFLINE -> inspect -> RUNNING`、reconciliation 期间拒绝打开、STOPPED、
+  Container 缺失及暂时无法确认，不发送隐式 `ensure/start`。
 - 2026-09-12：Gateway loopback 测试覆盖 HTTP body/response streaming、SSE、WebSocket
   upgrade/双向 bytes、单次 exchange、Workspace-origin bootstrap、host-only Cookie、logout/
   session 失效基础、ownership、RUNNING/Worker route、Origin、Fetch Metadata、header/cookie
@@ -94,10 +101,10 @@ Plane 到 Worker Gateway 的受保护 LAN/VPN 可达性、TLS certificate 和 We
 - 2026-09-12：Firefox 140.14.0esr 临时 loopback 浏览器探针实测 Portal 跨站 POST 为
   `cross-site/navigate/document`，bootstrap 的 `location.replace("/")` 后 GET 为
   `same-origin/navigate/document`，host-only `SameSite=Lax` Cookie 正常携带且无 Referer。
-- 2026-09-12：连接本机 PostgreSQL 17.6 后 Control Plane 30/30 通过；3 个数据库集成测试覆盖
-  Phase 1～4 migration/repository、两个用户隔离、Worker credential、Gateway route 和 Workspace
-  lifecycle；Runtime image 夹具使用随机唯一值，不受开发库中真实 ONLINE Worker 干扰，随机数据
-  已清理。
+- 2026-09-12：连接本机 PostgreSQL 17.6 后 Control Plane 35/35 通过；3 个数据库集成测试覆盖
+  Phase 1～4 migration/repository、两个用户隔离、Worker credential、Gateway route、Workspace
+  lifecycle、offline sweep 与带 worker/runtime/state 前置条件的 reconciliation 更新；Runtime image
+  夹具使用随机唯一值，不受开发库中真实 ONLINE Worker 干扰，随机数据已清理。
 - 2026-09-12：启用真实 Docker 条件集后 Worker 13/13 通过；2 个 Docker integration tests
   覆盖 Runtime create/start/stop/restart/delete、安全/资源/mount/network 基线与持久化，并
   实际通过 authenticated Worker Gateway 访问 pinned pi-web HTTP；随机容器、网络和临时目录

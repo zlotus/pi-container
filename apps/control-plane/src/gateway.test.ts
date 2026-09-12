@@ -456,6 +456,15 @@ describe("authenticated Workspace Gateway", () => {
         "sec-fetch-dest": "document",
       },
     });
+    ownedWorkspace.state = "WORKER_OFFLINE";
+    const reconciling = await request({
+      port: gatewayPort,
+      path: "/",
+      headers: {
+        host: PUBLIC_HOST,
+        cookie: `platform-session=${SESSION_A}`,
+      },
+    });
     ownedWorkspace.state = "STOPPED";
     const stopped = await request({
       port: gatewayPort,
@@ -482,6 +491,7 @@ describe("authenticated Workspace Gateway", () => {
     expect(crossSiteSubresource.statusCode).toBe(404);
     expect(crossSiteIframe.statusCode).toBe(404);
     expect(noCookie.statusCode).toBe(404);
+    expect(reconciling.statusCode).toBe(404);
     expect(stopped.statusCode).toBe(404);
   });
 
