@@ -20,6 +20,7 @@ import type {
   ControlToWorkerMessage,
   WorkspaceResources,
 } from "@agent-runtime/protocol";
+import { parseWorkspaceBaseUrl, workspaceOrigin } from "@agent-runtime/gateway";
 import websocket from "@fastify/websocket";
 import Fastify, {
   type FastifyInstance,
@@ -33,6 +34,7 @@ import {
   registerWorkerControlChannel,
   type WorkerControlStore,
 } from "./worker-control.js";
+import type { WorkspaceSessionExchange } from "./session-exchange.js";
 
 const LoginBodySchema = z
   .object({
@@ -90,6 +92,8 @@ export interface ControlPlaneDependencies {
   workerOfflineAfterMs: number;
   workerCommandTimeoutMs: number;
   workspaceResources: WorkspaceResources;
+  workspaceBaseUrl: string;
+  sessionExchanges: WorkspaceSessionExchange;
   now?: () => Date;
 }
 
@@ -198,6 +202,7 @@ export function buildControlPlane(
 ): FastifyInstance {
   const app = Fastify({ logger: false });
   const now = dependencies.now ?? (() => new Date());
+  const workspaceBaseUrl = parseWorkspaceBaseUrl(dependencies.workspaceBaseUrl);
   const workerChannel = new WorkerChannel(dependencies.workerCommandTimeoutMs);
   void app.register(websocket, {
     options: { maxPayload: 256 * 1024, perMessageDeflate: false },
@@ -779,6 +784,48 @@ export function buildControlPlane(
         .send(errorBody("WORKSPACE_NOT_FOUND", "Workspace was not found"));
     }
     return { workspace: publicWorkspace(current) };
+  });
+
+  app.post("/api/workspaces/:id/open", async (request, reply) => {
+    const auth = await authenticate(request, reply);
+    if (auth === null) return reply;
+    if (
+      !validateOrigin(request, reply) ||
+      !validateCsrf(request, reply, auth.rawToken)
+    ) {
+      return reply;
+    }
+    const params = WorkspaceParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(404)
+        .send(errorBody("WORKSPACE_NOT_FOUND", "Workspace was not found"));
+    }
+    const workspace = await dependencies.store.findOwnedWorkspace(
+      params.data.id,
+      auth.session.user.id,
+    );
+    if (workspace === null) {
+      return reply
+        .code(404)
+        .send(errorBody("WORKSPACE_NOT_FOUND", "Workspace was not found"));
+    }
+    if (workspace.state !== "RUNNING" || workspace.workerId === null) {
+      return reply
+        .code(409)
+        .send(errorBody("WORKSPACE_NOT_RUNNING", "Workspace is not running"));
+    }
+    const code = dependencies.sessionExchanges.issue({
+      rawSessionToken: auth.rawToken,
+      userId: auth.session.user.id,
+      workspaceId: workspace.id,
+      now: now(),
+    });
+    reply.header("cache-control", "no-store");
+    return {
+      exchangeUrl: `${workspaceOrigin(workspace.id, workspaceBaseUrl)}/_platform/session`,
+      code,
+    };
   });
 
   app.delete("/api/workspaces/:id", async (request, reply) => {

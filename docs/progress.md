@@ -1,98 +1,95 @@
 # Project Progress
 
-Last reviewed: 2026-09-11
+Last reviewed: 2026-09-12
 
 ## Current Milestone
 
-Phase 3 Minimal Runtime + pi-web 的工程实现与自动验证已完成，等待人工验收真实 pi-web
-交互、Pi Session 创建/续接和 Portal 到单 Worker 的完整操作流。Phase 4 Gateway 与 Phase 5
-Scheduler 均未开始。
+Phase 1～3 已完成人工验收。Phase 4 Authenticated Gateway 的工程实现和自动验证已完成，
+当前等待在真实浏览器、真实模型凭据和目标 LAN/TLS 拓扑中人工验收 Portal 到 pi-web 的
+完整交互。Phase 5 Scheduler 尚未开始。
 
 ## Current Baseline
 
 - `packages/auth` 使用 Node.js scrypt、随机 salt、opaque session token hash 和
-  session-bound HMAC CSRF token，不保存明文密码或 session token。
-- `packages/database` 提供幂等 migration，以及 users、server-side sessions、workspaces
-  的 PostgreSQL repository；Workspace UUID 由服务端生成。
-- `apps/control-plane` 提供本地登录/注销、`/api/me`、Workspace list/create/get/delete；
-  state-changing API 校验精确 Origin 和 CSRF，跨用户资源统一返回 404。
-- `apps/web` 提供 React/Vite 登录和 Workspace Portal；不复制 pi-web Chat UI。
-- `workers` registry 持久化 credential hash、主机/架构、Runtime 声明、容量和最后心跳；
-  原始 Worker token 只在 provision/rotation CLI 中输出一次。
-- `runtime/Dockerfile` 基于 digest-pinned Node.js 22.20.0，精确安装 pi-web 0.9.0、Pi
-  0.85.1 和 pnpm 11.24.0；最终镜像仅包含 Phase 3 所需 shell/core CLI、Git、Python、
-  Node 与 Pi，不含 Phase 7 的 Rust、Office、ffmpeg 或 Chromium。
-- `apps/worker` 通过本机 Docker Engine API 实现 `workspace.ensure/start/stop/delete/inspect`；
-  Runtime 使用 UID/GID 1000、非 privileged、drop all capabilities、no-new-privileges、
-  CPU/memory/PID limit、两个 managed bind mount 和每 Workspace 独立 bridge。
-- pi-web 只发布到动态 `127.0.0.1` host port；`/workspace` 与
-  `PI_CODING_AGENT_DIR=/agent/pi` 位于 Worker managed root，Container 不挂 Docker socket。
-- Worker 以受 schema 约束的 response 回报命令结果，心跳按真实 managed Container 数量
-  上报 allocation；Docker 不可用时不把 Worker 宣告为可用 Runtime。
-- Control Plane 增加 ownership/CSRF 保护的 start/stop；首次启动仅在恰好一个在线、容量
-  未满且 Runtime/架构/capability 兼容的 Worker 时绑定。多个 eligible Worker 明确拒绝，
-  没有评分、随机选择或其他 Phase 5 Scheduler 行为。
-- assigned Workspace 的 delete 只有在 Worker 确认 managed Container、network 和持久目录
-  删除后才删除 metadata；Worker offline 时拒绝 destructive delete。
-- Portal 可启动/停止/删除 Runtime；“打开”保持禁用，因为 authenticated HTTP/WebSocket
-  Gateway 属于 Phase 4。
-- Control Plane 在握手及后续每条消息校验 credential -> worker ID 绑定，并按服务端
-  接收时间判定心跳；credential rotation 后旧连接最迟在下一条消息时关闭。
-- `GET /api/admin/workers` 仅允许 admin 访问；Portal 提供自动刷新的 Worker 表格，默认
-  35 秒无心跳即显示 Offline。
-- Control channel command 每次只发送一次，不做隐式 retry；timeout 失败，迟到/重复
-  response 忽略，Worker/request type 不匹配不能完成 pending request。
-- 未分配且为 `CREATED` 的 Workspace 可以删除；任何已分配/已进入运行生命周期的
-  Workspace 都拒绝纯 metadata 删除，等待后续 Worker 确认协议。
-- `deploy/compose.dev.yml` 提供仅绑定 loopback 的 PostgreSQL 17.6 开发服务。
+  session-bound HMAC CSRF token，不保存明文密码或 Portal session token。
+- `packages/database` 提供幂等 migration 和 Phase 1～4 repository；users、server-side
+  sessions、workspaces、workers 与预注册 `gateway_base_url` 均持久化到 PostgreSQL。
+- `apps/control-plane` 提供本地登录/注销、Workspace CRUD/start/stop/open、Worker control
+  channel 与 Admin Worker 页面；state-changing API 校验精确 Portal Origin 和 CSRF，跨用户
+  API/Proxy 访问统一按不可见资源拒绝。
+- `apps/web` 提供 Portal；RUNNING Workspace 的“打开”会请求短时 exchange code，再以
+  top-level form POST 到 Workspace Host，不使用 query string、iframe 或宽域 Cookie。
+- Portal 与 Workspace Host 使用同一条 server-side session 的不同 host-only Cookie 副本；
+  exchange code 仅在单 Control Plane 进程内保存 hash 索引及短时绑定，60 秒过期、单次消费，
+  并绑定 user/workspace。Portal logout/revoke 后 Workspace Host Cookie 不能继续通过认证。
+- `apps/control-plane` 的独立 Workspace Gateway listener 严格解析
+  `<workspace-id>.<WORKSPACE_BASE_URL host>`，每个 HTTP 请求和 WebSocket handshake 都重新
+  校验 session、ownership、RUNNING、Worker heartbeat、预注册 route 与 per-Worker token。
+- Control Plane 只路由到数据库中该 Worker 的 `gateway_base_url`，并使用
+  `WORKER_GATEWAY_TOKENS_JSON` 中按 Worker ID 绑定、与 control credential 分离的 data-plane
+  credential；浏览器不能指定 target host/port、Worker ID 或可信平台头。
+- `apps/worker` 提供可配置 host/port、可选原生 TLS 的 Worker Gateway。它再次校验独立
+  credential、Workspace ID、公共 Host/proto 与本机 managed metadata/container labels，且
+  只把一个 RUNNING 容器的精确 `127.0.0.1:<workspace-port>` 作为上游。
+- `packages/gateway` 使用 Node HTTP 流和透明 WebSocket upgrade/tunnel，不解析 Pi RPC，支持
+  SSE、上传/下载和长连接；两级代理剥离 hop-by-hop/Connection 指定头、平台 Cookie、浏览器
+  伪造的 Authorization/Workspace 头，并阻止 upstream 覆盖平台 Cookie。
+- Worker 到 pi-web 的 Host/Origin 会在完成外部 Host/Origin 校验后重写为受管 loopback
+  endpoint，兼容已存在的 Phase 3 容器；新容器同时显式设置该 Workspace 的
+  `PI_WEB_ALLOWED_HOSTS`。绝对 upstream redirect 会改写回公共 Workspace origin。
+- Runtime 仍为 Phase 3 Minimal Image：digest-pinned Node.js 22.20.0、pi-web 0.9.0、Pi
+  0.85.1、pnpm 11.24.0，以及 shell/core CLI、Git、Python、Node；Phase 7 Toolchain 未提前加入。
+- Worker 的 Docker 基线保持不变：UID/GID 1000、非 privileged、drop all capabilities、
+  no-new-privileges、CPU/memory/PID limit、两个 managed bind mount、每 Workspace 独立 bridge、
+  无 Docker socket，pi-web 只发布到动态 loopback port。
+- Phase 3/4 仍只在恰好一个 eligible Worker 时自动绑定；没有 Phase 5 的评分、随机选择、
+  跨 Worker 迁移或 persistent control-WebSocket byte tunnel。
 
 ## In Progress
 
-Phase 3 人工验收：使用一个 eligible Worker，从 Portal 启动 Workspace，在本机 loopback
-测试入口验证 pi-web Terminal、真实 Pi Session、Prompt/streaming，以及 stop/start 后同一
-Session 可继续。该入口不是最终用户访问路径。
+Phase 4 人工验收：在真实 Portal/Workspace wildcard Host 下，分别使用 User A/B 验证 host-only
+session exchange 与 ownership；在真实 pi-web 中验证页面、Prompt SSE streaming、Workspace
+Terminal、文件上传/下载和浏览器断开/重连。多主机部署还需验证 Control Plane 到 Worker
+Gateway 的受保护 LAN/VPN 可达性、TLS certificate 和 WebSocket upgrade。
 
 ## Next
 
-1. 完成并记录 Phase 3 人工验收，尤其是真实 Pi Session restart continuity。
-2. 人工验收通过后再进入 Phase 4 Authenticated Gateway；不要将 loopback 测试入口产品化。
-3. Phase 5 前保持单 eligible Worker 或管理员预先 assignment，不加入调度评分。
+1. 按 README 配置现有 Worker 的 `gateway_base_url`、独立 Gateway token 与 Workspace wildcard
+   Host，完成人工 Phase 4 单机浏览器验收。
+2. 在目标 LAN/Tailscale 或等价私网中完成真实跨主机 TLS/HTTP/WebSocket 联调，并记录实际
+   certificate、DNS 与防火墙边界；不暴露 Worker Gateway 或 pi-web loopback endpoint。
+3. Phase 4 完整 Demo 稳定后再进入 Phase 5；此前不加入多 Worker score/capability Scheduler。
 
 ## Risks And Blockers
 
-- Worker Gateway 的 TLS/认证具体机制仍需结合真实 LAN/Tailscale 部署验证，但规范已要求
-  per-worker identity binding、预注册 endpoint 与独立 data-plane credential。
-- 当前镜像只在 arm64 构建和运行；虽然 base image digest 是 multi-platform manifest，amd64
-  仍必须实际构建和测试后才能声明支持。
-- 自动测试验证了 pi-web HTTP health 和普通文件形式的 `/agent/pi` 持久化，但没有模型
-  credential，尚未代替人工完成真实 Prompt/streaming/Pi Session continuity 验收。
-- Phase 4 尚未实现，因此不存在经过最终用户 authentication/authorization 的 pi-web
-  data path；当前 loopback 端口只能用于 Worker 宿主机开发验收。
+- pinned pi-web 0.9.0 的 Prompt 与 Terminal 实际使用 HTTP + SSE；当前代理已用真实 chunked
+  SSE 和独立 WebSocket echo upstream 验证两种传输，但仍需带模型 credential 的真实 Prompt/
+  Terminal 浏览器验收，自动测试不能替代该结果。
+- Worker Gateway 的可选原生 TLS 已实现，公开 Workspace Gateway 预期由受信反向代理终止
+  wildcard TLS；真实 LAN/VPN、DNS、certificate、proxy timeout 和防火墙尚未在目标拓扑验证。
+- session exchange 存储是单 Control Plane 进程内、短时且 fail-closed；Control Plane restart
+  会使尚未消费的 code 失效。Phase 4 单实例不引入 Redis/多实例共享状态。
+- `*.agent.localhost` 是开发等价 host 配置；若目标浏览器/系统不解析子域 localhost，需要人工
+  配置 wildcard DNS 或等价本地域名，不能回退到 `/w/<id>/` base-path rewrite。
+- 当前 Runtime 镜像和真实 Docker 验证仅覆盖 arm64；amd64 仍需实际构建测试后才能声明支持。
 
 ## Verification
 
-- 2026-09-10：用户确认 Phase 1 已人工验收 ownership、CSRF、logout/session 失效和
-  PostgreSQL persistence，并已提交 async form target 修复。
-- 2026-09-10：当前工具版本为 Node.js v24.20.0、pnpm 11.24.0、Docker 29.7.2、Docker
-  Compose 5.5.0；PostgreSQL 17.6-alpine Compose 服务实查为 healthy。
-- 2026-09-10：Phase 2 `pnpm typecheck`、`pnpm lint`、`pnpm test` 和 `pnpm build:web`
-  通过；常规测试中的 PostgreSQL 用例在未设置 `TEST_DATABASE_URL` 时按设计跳过。
-- 2026-09-10：在临时 PostgreSQL database 从零执行 0001/0002 migration 与真实集成测试，
-  Control Plane 测试 20/20 通过，包含 credential 持久化、hello 和 rotation；临时
-  database 已删除。
-- 2026-09-10：使用真实 Control Plane 与两个真实 Worker daemon 完成同机联调：两者同时
-  为 ONLINE；终止 Worker B 后，在缩短为 5 秒的验收阈值下得到 A=ONLINE、B=OFFLINE。
-  测试进程及临时 Worker 记录均已清理。
-- 2026-09-11：用户确认 Phase 2 双 Worker、offline/reconnect、credential identity binding、
-  impersonation rejection 与 credential rotation 人工验收全部通过。
-- 2026-09-11：`pnpm install --frozen-lockfile`、`pnpm typecheck`、`pnpm lint`、`pnpm test`
-  与 `pnpm build:web` 通过；常规测试为 39 passed，3 个 PostgreSQL/真实 Docker 条件测试
-  按设计跳过。
-- 2026-09-11：对本机 PostgreSQL 17.6 运行 Phase 1-3 repository 集成测试，3/3 通过，
-  覆盖 eligible Worker 查询和 Workspace lifecycle 原子状态转换；随机测试数据已清理。
-- 2026-09-11：在 arm64 实际构建 `agent-runtime:phase3-minimal`，确认运行用户为
-  `agent(1000:1000)`，Git 2.39.5、Python 3.11.2、Node 22.20.0、pnpm 11.24.0、Pi
-  0.85.1 与 pi-web 0.9.0 CLI 可用，pi-web HTTP health 为 healthy。
-- 2026-09-11：真实 Docker Runtime integration 2/2 通过，覆盖 create/start/stop/restart/
-  delete、资源和 privilege/label/mount/loopback port 基线、Workspace/Pi 文件持久化，以及
-  两个 Workspace bridge 互访和从 Container 访问宿主机 loopback 映射均失败；测试资源已清理。
+- 2026-09-12：核对 pinned upstream `@agegr/pi-web@0.9.0` tag 对应 commit `0d1df12`；确认
+  页面/API 使用根路径，Prompt/Terminal 使用 EventSource/SSE，Host/Origin 校验支持可信 proxy
+  场景，且无需修改或 fork pi-web。
+- 2026-09-12：`pnpm install --offline`、`pnpm lint`、`pnpm typecheck`、`pnpm test` 和
+  `pnpm build:web` 通过；常规测试共 52 passed，5 个 PostgreSQL/真实 Docker 条件测试按设计
+  跳过。
+- 2026-09-12：Gateway loopback 测试覆盖 HTTP body/response streaming、SSE、WebSocket
+  upgrade/双向 bytes、单次 exchange、host-only Cookie、logout/session 失效基础、ownership、
+  RUNNING/Worker route、Origin、header/cookie stripping 和固定 Workspace target。
+- 2026-09-12：连接本机 PostgreSQL 17.6 后 Control Plane 29/29 通过；3 个数据库集成测试覆盖
+  Phase 1～4 migration/repository、两个用户隔离、Worker credential、Gateway route 和 Workspace
+  lifecycle，随机数据已清理。
+- 2026-09-12：启用真实 Docker 条件集后 Worker 13/13 通过；2 个 Docker integration tests
+  覆盖 Runtime create/start/stop/restart/delete、安全/资源/mount/network 基线与持久化，并
+  实际通过 authenticated Worker Gateway 访问 pinned pi-web HTTP；随机容器、网络和临时目录
+  已清理。
+- 尚未声明完成：真实模型 Prompt、Terminal SSE、浏览器 session exchange、外部 wildcard
+  DNS/TLS、跨主机 Worker Gateway 和真实 upstream WebSocket（pi-web 0.9.0 当前无该业务路径）。

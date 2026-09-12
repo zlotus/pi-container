@@ -38,6 +38,9 @@ importers:
       '@agent-runtime/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@agent-runtime/gateway':
+        specifier: workspace:*
+        version: link:../../packages/gateway
       '@agent-runtime/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -47,6 +50,9 @@ importers:
       fastify:
         specifier: 5.12.3
         version: 5.12.3
+      ws:
+        specifier: 8.21.3
+        version: 8.21.3
       zod:
         specifier: 4.5.4
         version: 4.5.4
@@ -82,6 +88,12 @@ importers:
 
   apps/worker:
     dependencies:
+      '@agent-runtime/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
+      '@agent-runtime/gateway':
+        specifier: workspace:*
+        version: link:../../packages/gateway
       '@agent-runtime/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -122,6 +134,12 @@ importers:
       tsx:
         specifier: 4.23.13
         version: 4.23.13
+
+  packages/gateway:
+    dependencies:
+      '@agent-runtime/protocol':
+        specifier: workspace:*
+        version: link:../protocol
 
   packages/protocol:
     dependencies:

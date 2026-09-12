@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
+import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,6 +12,7 @@ import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { loadWorkerConfig } from "./config.js";
+import { buildWorkerGateway } from "./gateway.js";
 import { DockerWorkspaceRuntime } from "./runtime.js";
 
 const runDockerIntegration = process.env.TEST_DOCKER_RUNTIME === "1";
@@ -27,6 +31,7 @@ describeWithDocker("Phase 3 Docker Runtime integration", () => {
   let managedRoot = "";
   let docker!: Docker;
   let runtime!: DockerWorkspaceRuntime;
+  let workerGateway: Server | undefined;
 
   beforeAll(async () => {
     managedRoot = await mkdtemp(join(tmpdir(), "agent-runtime-integration-"));
@@ -34,6 +39,8 @@ describeWithDocker("Phase 3 Docker Runtime integration", () => {
       CONTROL_PLANE_URL: "ws://127.0.0.1:3000/api/workers/connect",
       WORKER_ID: "integration-worker",
       WORKER_TOKEN: "0123456789abcdef0123456789abcdef",
+      WORKER_GATEWAY_TOKEN: "gateway0123456789abcdef0123456789abcdef",
+      WORKSPACE_BASE_URL: "https://agent.example.internal",
       WORKER_MAX_WORKSPACES: "2",
       WORKER_MANAGED_ROOT: managedRoot,
       RUNTIME_IMAGE: "agent-runtime:phase3-minimal",
@@ -47,6 +54,9 @@ describeWithDocker("Phase 3 Docker Runtime integration", () => {
   });
 
   afterAll(async () => {
+    if (workerGateway !== undefined) {
+      await new Promise<void>((resolve) => workerGateway?.close(() => resolve()));
+    }
     if (runtime !== undefined) {
       for (const cleanupWorkspaceId of [workspaceId, ...isolationWorkspaceIds]) {
         try {
@@ -125,6 +135,21 @@ describeWithDocker("Phase 3 Docker Runtime integration", () => {
     expect(await readFile(workspaceFile, "utf8")).toBe("artifact persists");
     expect(await readFile(piStateFile, "utf8")).toBe("session persists");
 
+    workerGateway = buildWorkerGateway({
+      gatewayToken: "gateway0123456789abcdef0123456789abcdef",
+      workspaceBaseUrl: "https://agent.example.internal",
+      resolveWorkspaceTarget: (id) => runtime.gatewayTarget(id),
+    });
+    workerGateway.listen(0, "127.0.0.1");
+    await once(workerGateway, "listening");
+    const gatewayPort = (workerGateway.address() as AddressInfo).port;
+    const gatewayResponse = await requestWorkerGateway(gatewayPort, workspaceId);
+    expect(gatewayResponse.statusCode).toBe(200);
+    expect(gatewayResponse.contentType).toContain("text/html");
+    expect(gatewayResponse.body).toContain("<!DOCTYPE html");
+    await new Promise<void>((resolve) => workerGateway?.close(() => resolve()));
+    workerGateway = undefined;
+
     await runtime.delete(workspaceId);
     expect(existsSync(join(managedRoot, "workspaces", workspaceId))).toBe(false);
   }, 120_000);
@@ -157,6 +182,46 @@ describeWithDocker("Phase 3 Docker Runtime integration", () => {
     await runtime.delete(workspaceB);
   }, 120_000);
 });
+
+function requestWorkerGateway(port: number, workspaceId: string) {
+  const host = `${workspaceId}.agent.example.internal`;
+  return new Promise<{
+    statusCode: number;
+    contentType: string;
+    body: string;
+  }>((resolve, reject) => {
+    const request = httpRequest(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: "/",
+        headers: {
+          authorization:
+            "Bearer gateway0123456789abcdef0123456789abcdef",
+          host,
+          origin: `https://${host}`,
+          "x-forwarded-host": host,
+          "x-forwarded-proto": "https",
+          "x-platform-workspace-id": workspaceId,
+        },
+      },
+      (response) => {
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => (body += chunk));
+        response.on("end", () =>
+          resolve({
+            statusCode: response.statusCode ?? 0,
+            contentType: response.headers["content-type"] ?? "",
+            body,
+          }),
+        );
+      },
+    );
+    request.on("error", reject);
+    request.end();
+  });
+}
 
 async function curlExitCode(
   container: Docker.Container,

@@ -4,19 +4,20 @@ import { hashOpaqueToken, hashPassword } from "@agent-runtime/auth";
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase3Repository,
+  createPhase4Repository,
   migrateDatabase,
   type DatabaseClient,
 } from "@agent-runtime/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildControlPlane } from "./app.js";
+import { WorkspaceSessionExchange } from "./session-exchange.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithPostgres = databaseUrl === undefined ? describe.skip : describe;
 const NOW = new Date("2026-09-10T08:00:00.000Z");
 
-describeWithPostgres("Phase 1 through 3 PostgreSQL integration", () => {
+describeWithPostgres("Phase 1 through 4 PostgreSQL integration", () => {
   const userAId = randomUUID();
   const userBId = randomUUID();
   const phase3UserId = randomUUID();
@@ -40,7 +41,7 @@ describeWithPostgres("Phase 1 through 3 PostgreSQL integration", () => {
   });
 
   it("logs in two persisted users and isolates their workspaces", async () => {
-    const repository = createPhase3Repository(database);
+    const repository = createPhase4Repository(database);
     await repository.createUser({
       id: userAId,
       email: `a-${suffix}@example.test`,
@@ -64,6 +65,8 @@ describeWithPostgres("Phase 1 through 3 PostgreSQL integration", () => {
       portalOrigin: "http://portal.test",
       secureCookies: false,
       sessionTtlMs: 60 * 60 * 1_000,
+      workspaceBaseUrl: "http://agent.test:3001",
+      sessionExchanges: new WorkspaceSessionExchange(60_000),
       defaultRuntimeImage: "agent-runtime:integration-unassigned",
       workerOfflineAfterMs: 35_000,
       workerCommandTimeoutMs: 1_000,
@@ -131,7 +134,7 @@ describeWithPostgres("Phase 1 through 3 PostgreSQL integration", () => {
   });
 
   it("persists a bound Worker credential and rotates it atomically", async () => {
-    const repository = createPhase3Repository(database);
+    const repository = createPhase4Repository(database);
     const originalToken = "originalworker0123456789abcdef0123456789abcdef";
     const rotatedToken = "rotatedworker0123456789abcdef0123456789abcdef";
     const originalHash = hashOpaqueToken(originalToken);
@@ -187,7 +190,7 @@ describeWithPostgres("Phase 1 through 3 PostgreSQL integration", () => {
   });
 
   it("persists minimal placement and lifecycle transitions atomically", async () => {
-    const repository = createPhase3Repository(database);
+    const repository = createPhase4Repository(database);
     await repository.createUser({
       id: phase3UserId,
       email: `runtime-${suffix}@example.test`,
@@ -226,6 +229,21 @@ describeWithPostgres("Phase 1 through 3 PostgreSQL integration", () => {
         receivedAt: NOW,
       }),
     ).toBe(true);
+    expect(
+      await repository.configureWorkerGateway({
+        workerId: phase3WorkerId,
+        gatewayBaseUrl: "https://runtime-worker.internal:3100",
+      }),
+    ).toBe(true);
+    await expect(
+      repository.findWorkerGatewayRoute({
+        workerId: phase3WorkerId,
+        heartbeatCutoff: new Date(NOW.getTime() - 35_000),
+      }),
+    ).resolves.toEqual({
+      workerId: phase3WorkerId,
+      gatewayBaseUrl: "https://runtime-worker.internal:3100",
+    });
     const workspace = await repository.createWorkspace({
       id: randomUUID(),
       userId: phase3UserId,

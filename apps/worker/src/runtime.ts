@@ -16,6 +16,7 @@ import {
   type WorkspaceResources,
   type WorkspaceState,
 } from "@agent-runtime/protocol";
+import { parseWorkspaceBaseUrl } from "@agent-runtime/gateway";
 import Docker from "dockerode";
 import { z } from "zod";
 
@@ -110,6 +111,7 @@ export class DockerWorkspaceRuntime {
   readonly #workerId: string;
   readonly #runtimeImage: string;
   readonly #workspaceResources: WorkspaceResources;
+  readonly #workspaceBaseUrl: ReturnType<typeof parseWorkspaceBaseUrl>;
   readonly #readinessProbe: (port: string) => Promise<boolean>;
   #initialized = false;
 
@@ -141,6 +143,7 @@ export class DockerWorkspaceRuntime {
       memoryBytes: config.WORKSPACE_MEMORY_BYTES,
       pidsLimit: config.WORKSPACE_PIDS_LIMIT,
     };
+    this.#workspaceBaseUrl = parseWorkspaceBaseUrl(config.WORKSPACE_BASE_URL);
     this.#readinessProbe = readinessProbe;
   }
 
@@ -169,6 +172,7 @@ export class DockerWorkspaceRuntime {
             "PI_WEB_NO_OPEN=1",
             "PI_WEB_SKIP_VERSION_CHECK=1",
             "PI_WEB_IDLE_TIMEOUT_MS=0",
+            `PI_WEB_ALLOWED_HOSTS=${workspaceId}.${this.#workspaceBaseUrl.hostname}`,
             "PORT=30141",
           ],
           ExposedPorts: { [PI_WEB_PORT]: {} },
@@ -353,6 +357,45 @@ export class DockerWorkspaceRuntime {
     } catch (error) {
       throw this.#engineError(error, "count managed Workspace containers");
     }
+  }
+
+  async gatewayTarget(workspaceId: string): Promise<URL> {
+    const paths = await this.#requireWorkspacePaths(workspaceId);
+    const container = await this.#requireManagedContainer(workspaceId);
+    const inspection = await container.inspect();
+    this.#verifyContainerIdentity(
+      inspection,
+      workspaceId,
+      paths,
+      this.#networkName(workspaceId),
+    );
+    if (!inspection.State.Running) {
+      throw new WorkspaceRuntimeError(
+        "RUNTIME_NOT_READY",
+        "Workspace Runtime is not running",
+        true,
+      );
+    }
+    const bindings = inspection.NetworkSettings.Ports[PI_WEB_PORT];
+    const binding = bindings?.length === 1 ? bindings[0] : undefined;
+    if (
+      binding?.HostIp !== "127.0.0.1" ||
+      binding.HostPort === undefined ||
+      !/^\d{1,5}$/.test(binding.HostPort)
+    ) {
+      throw new WorkspaceRuntimeError(
+        "RUNTIME_CONFIGURATION_MISMATCH",
+        "Workspace Runtime does not have one managed loopback endpoint",
+      );
+    }
+    const port = Number.parseInt(binding.HostPort, 10);
+    if (port < 1 || port > 65_535) {
+      throw new WorkspaceRuntimeError(
+        "RUNTIME_CONFIGURATION_MISMATCH",
+        "Workspace Runtime has an invalid loopback endpoint",
+      );
+    }
+    return new URL(`http://127.0.0.1:${port}`);
   }
 
   async #initialize(): Promise<void> {

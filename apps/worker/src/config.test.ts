@@ -9,6 +9,8 @@ describe("worker configuration", () => {
         CONTROL_PLANE_URL: "https://control.internal/worker",
         WORKER_ID: "worker-01",
         WORKER_TOKEN: "short",
+        WORKER_GATEWAY_TOKEN: "gateway0123456789abcdef0123456789abcdef",
+        WORKSPACE_BASE_URL: "https://agent.example.internal",
         WORKER_MAX_WORKSPACES: "4",
       }),
     ).toThrow();
@@ -19,6 +21,8 @@ describe("worker configuration", () => {
       CONTROL_PLANE_URL: "wss://control.internal/worker",
       WORKER_ID: "worker-arm64-01",
       WORKER_TOKEN: "0123456789abcdef0123456789abcdef",
+      WORKER_GATEWAY_TOKEN: "gateway0123456789abcdef0123456789abcdef",
+      WORKSPACE_BASE_URL: "https://agent.example.internal",
       WORKER_MAX_WORKSPACES: "4",
     });
 
@@ -32,10 +36,26 @@ describe("worker configuration", () => {
         CONTROL_PLANE_URL: "wss://control.internal/api/workers/connect",
         WORKER_ID: "worker-01",
         WORKER_TOKEN: "0123456789abcdef0123456789abcdef",
+        WORKER_GATEWAY_TOKEN: "gateway0123456789abcdef0123456789abcdef",
+        WORKSPACE_BASE_URL: "https://agent.example.internal",
         WORKER_MAX_WORKSPACES: "4",
         WORKER_RECONNECT_INITIAL_MS: "5000",
         WORKER_RECONNECT_MAX_MS: "1000",
       }),
     ).toThrow();
+  });
+
+  it("rejects reuse of the control credential for the data plane", () => {
+    const shared = "shared0123456789abcdef0123456789abcdef";
+    expect(() =>
+      loadWorkerConfig({
+        CONTROL_PLANE_URL: "wss://control.internal/api/workers/connect",
+        WORKER_ID: "worker-01",
+        WORKER_TOKEN: shared,
+        WORKER_GATEWAY_TOKEN: shared,
+        WORKER_MAX_WORKSPACES: "4",
+        WORKSPACE_BASE_URL: "https://agent.example.internal",
+      }),
+    ).toThrow("must be different");
   });
 });

@@ -196,6 +196,8 @@ async function fixture() {
     CONTROL_PLANE_URL: "wss://control.internal/api/workers/connect",
     WORKER_ID: "worker-01",
     WORKER_TOKEN: "0123456789abcdef0123456789abcdef",
+    WORKER_GATEWAY_TOKEN: "gateway0123456789abcdef0123456789abcdef",
+    WORKSPACE_BASE_URL: "https://agent.example.internal",
     WORKER_MAX_WORKSPACES: "8",
     WORKER_MANAGED_ROOT: root,
   });
@@ -243,6 +245,9 @@ describe("Docker Workspace Runtime", () => {
         },
       },
     });
+    expect(docker.createdOptions?.Env).toContain(
+      `PI_WEB_ALLOWED_HOSTS=${WORKSPACE_ID}.agent.example.internal`,
+    );
     const workspaceFile = join(
       root,
       "workspaces",
@@ -261,7 +266,13 @@ describe("Docker Workspace Runtime", () => {
     await writeFile(sessionFile, "session", "utf8");
 
     expect((await runtime.start(WORKSPACE_ID)).state).toBe("RUNNING");
+    await expect(runtime.gatewayTarget(WORKSPACE_ID)).resolves.toEqual(
+      new URL("http://127.0.0.1:30199"),
+    );
     expect((await runtime.stop(WORKSPACE_ID)).state).toBe("STOPPED");
+    await expect(runtime.gatewayTarget(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "RUNTIME_NOT_READY" });
     expect((await runtime.start(WORKSPACE_ID)).state).toBe("RUNNING");
     expect(existsSync(workspaceFile)).toBe(true);
     expect(existsSync(sessionFile)).toBe(true);

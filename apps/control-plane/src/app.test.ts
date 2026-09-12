@@ -14,6 +14,7 @@ import {
   buildControlPlane,
   type ControlPlaneDependencies,
 } from "./app.js";
+import { WorkspaceSessionExchange } from "./session-exchange.js";
 
 const ORIGIN = "http://portal.test";
 const NOW = new Date("2026-09-10T08:00:00.000Z");
@@ -84,6 +85,8 @@ async function createTestDependencies(): Promise<ControlPlaneDependencies> {
     portalOrigin: ORIGIN,
     secureCookies: false,
     sessionTtlMs: 12 * 60 * 60 * 1_000,
+    workspaceBaseUrl: "http://agent.test:3001",
+    sessionExchanges: new WorkspaceSessionExchange(60_000),
     defaultRuntimeImage: "agent-runtime:test-unassigned",
     workerOfflineAfterMs: 35_000,
     workerCommandTimeoutMs: 1_000,
@@ -564,7 +567,8 @@ describe("workspace ownership", () => {
 
 describe("Phase 3 Workspace Runtime lifecycle", () => {
   it("binds only one eligible Worker and drives ensure, start, stop, and delete", async () => {
-    const app = buildControlPlane(await createTestDependencies());
+    const dependencies = await createTestDependencies();
+    const app = buildControlPlane(dependencies);
     await app.ready();
     const worker = await app.injectWS("/api/workers/connect", {
       headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
@@ -648,6 +652,34 @@ describe("Phase 3 Workspace Runtime lifecycle", () => {
       workspace: { workerId: "worker-01", state: "RUNNING" },
     });
 
+    const foreignOpen = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${workspaceId}/open`,
+      headers: {
+        cookie: other.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": other.csrfToken,
+      },
+      payload: {},
+    });
+    expect(foreignOpen.statusCode).toBe(404);
+
+    const open = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${workspaceId}/open`,
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+      payload: {},
+    });
+    expect(open.statusCode).toBe(200);
+    expect(open.json()).toMatchObject({
+      exchangeUrl: `http://${workspaceId}.agent.test:3001/_platform/session`,
+    });
+    expect(open.json<{ code: string }>().code).toHaveLength(43);
+
     const foreignStop = await app.inject({
       method: "POST",
       url: `/api/workspaces/${workspaceId}/stop`,
@@ -672,6 +704,18 @@ describe("Phase 3 Workspace Runtime lifecycle", () => {
     });
     expect(stop.statusCode).toBe(200);
     expect(stop.json()).toMatchObject({ workspace: { state: "STOPPED" } });
+
+    const stoppedOpen = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${workspaceId}/open`,
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+      payload: {},
+    });
+    expect(stoppedOpen.statusCode).toBe(409);
 
     const deletion = await app.inject({
       method: "DELETE",

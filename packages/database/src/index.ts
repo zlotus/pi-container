@@ -44,3 +44,8 @@ export {
   createPhase3Repository,
   type Phase3Repository,
 } from "./phase3.js";
+export {
+  createPhase4Repository,
+  type Phase4Repository,
+  type WorkerGatewayRoute,
+} from "./phase4.js";

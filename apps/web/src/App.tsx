@@ -31,6 +31,11 @@ interface SessionResponse {
   csrfToken: string;
 }
 
+interface WorkspaceOpenResponse {
+  exchangeUrl: string;
+  code: string;
+}
+
 class ApiError extends Error {
   constructor(
     message: string,
@@ -191,6 +196,36 @@ export function App() {
     }
   }
 
+  async function openWorkspace(workspace: Workspace) {
+    if (session === null || workspace.state !== "RUNNING") return;
+    setError(null);
+    setPendingWorkspaceId(workspace.id);
+    try {
+      const exchange = await api<WorkspaceOpenResponse>(
+        `/api/workspaces/${workspace.id}/open`,
+        {
+          method: "POST",
+          headers: { "x-csrf-token": session.csrfToken },
+          body: "{}",
+        },
+      );
+      const form = document.createElement("form");
+      form.method = "POST";
+      form.action = exchange.exchangeUrl;
+      const code = document.createElement("input");
+      code.type = "hidden";
+      code.name = "code";
+      code.value = exchange.code;
+      form.append(code);
+      document.body.append(form);
+      form.submit();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to open Workspace");
+      setPendingWorkspaceId(null);
+      await loadWorkspaces();
+    }
+  }
+
   async function logout() {
     if (session === null) return;
     await api("/api/auth/logout", {
@@ -328,7 +363,14 @@ export function App() {
                       onClick={() => void changeWorkspaceRuntime(workspace, "start")}
                     >启动</button>
                   )}
-                  <button disabled title="Phase 4 Authenticated Gateway 完成后开放">打开</button>
+                  <button
+                    disabled={
+                      workspace.state !== "RUNNING" ||
+                      pendingWorkspaceId === workspace.id
+                    }
+                    title={workspace.state === "RUNNING" ? "打开 pi-web" : "请先启动 Workspace"}
+                    onClick={() => void openWorkspace(workspace)}
+                  >打开</button>
                   <button
                     className="danger"
                     disabled={pendingWorkspaceId === workspace.id}

@@ -16,6 +16,7 @@
     "user:create": "pnpm --filter @agent-runtime/control-plane user:create",
     "worker:provision": "pnpm --filter @agent-runtime/control-plane worker:provision",
     "worker:rotate": "pnpm --filter @agent-runtime/control-plane worker:rotate",
+    "worker:configure-gateway": "pnpm --filter @agent-runtime/control-plane worker:configure-gateway",
     "lint": "eslint .",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test"

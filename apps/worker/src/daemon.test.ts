@@ -11,6 +11,8 @@ const config = loadWorkerConfig({
   CONTROL_PLANE_URL: "wss://control.internal/api/workers/connect",
   WORKER_ID: "worker-01",
   WORKER_TOKEN: "0123456789abcdef0123456789abcdef",
+  WORKER_GATEWAY_TOKEN: "gateway0123456789abcdef0123456789abcdef",
+  WORKSPACE_BASE_URL: "https://agent.example.internal",
   WORKER_MAX_WORKSPACES: "8",
 });
 

@@ -1,4 +1,5 @@
 import { WorkerIdSchema, WorkerTokenSchema } from "@agent-runtime/protocol";
+import { parseWorkspaceBaseUrl } from "@agent-runtime/gateway";
 import { z } from "zod";
 
 const AbsolutePathSchema = z
@@ -14,6 +15,30 @@ export const WorkerConfigSchema = z
     ),
     WORKER_ID: WorkerIdSchema,
     WORKER_TOKEN: WorkerTokenSchema,
+    WORKER_GATEWAY_TOKEN: WorkerTokenSchema,
+    WORKER_GATEWAY_HOST: z.string().min(1).default("127.0.0.1"),
+    WORKER_GATEWAY_PORT: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(65_535)
+      .default(3_100),
+    WORKER_GATEWAY_TLS_CERT_PATH: AbsolutePathSchema.optional(),
+    WORKER_GATEWAY_TLS_KEY_PATH: AbsolutePathSchema.optional(),
+    WORKSPACE_BASE_URL: z
+      .string()
+      .transform((value, context) => {
+        try {
+          parseWorkspaceBaseUrl(value);
+          return value;
+        } catch {
+          context.addIssue({
+            code: "custom",
+            message: "WORKSPACE_BASE_URL must be an HTTP(S) origin",
+          });
+          return z.NEVER;
+        }
+      }),
     WORKER_MAX_WORKSPACES: z.coerce.number().int().positive().max(10_000),
     WORKER_HEARTBEAT_INTERVAL_MS: z.coerce
       .number()
@@ -62,6 +87,16 @@ export const WorkerConfigSchema = z
     (value) =>
       value.WORKER_RECONNECT_MAX_MS >= value.WORKER_RECONNECT_INITIAL_MS,
     "WORKER_RECONNECT_MAX_MS must be at least WORKER_RECONNECT_INITIAL_MS",
+  )
+  .refine(
+    (value) =>
+      (value.WORKER_GATEWAY_TLS_CERT_PATH === undefined) ===
+      (value.WORKER_GATEWAY_TLS_KEY_PATH === undefined),
+    "Worker Gateway TLS certificate and key must be configured together",
+  )
+  .refine(
+    (value) => value.WORKER_GATEWAY_TOKEN !== value.WORKER_TOKEN,
+    "Worker control and Gateway credentials must be different",
   )
   .passthrough();
 
