@@ -16,6 +16,7 @@ import {
   workspaceOrigin,
 } from "@agent-runtime/gateway";
 import { WorkerIdSchema, WorkerTokenSchema } from "@agent-runtime/protocol";
+import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
@@ -68,6 +69,41 @@ function sessionCookie(name: string, value: string, maxAgeSeconds: number, secur
   ];
   if (secure) attributes.push("Secure");
   return attributes.join("; ");
+}
+
+function sendWorkspaceBootstrap(
+  response: ServerResponse,
+  setCookie: string,
+): void {
+  const nonce = randomBytes(18).toString("base64");
+  const body = [
+    "<!doctype html>",
+    '<html lang="en"><head><meta charset="utf-8">',
+    '<meta name="referrer" content="no-referrer">',
+    "<title>Opening Workspace</title>",
+    `<script nonce="${nonce}">window.location.replace("/");</script>`,
+    "</head><body>",
+    '<p>Opening Workspace…</p><noscript><a href="/">Continue to Workspace</a></noscript>',
+    "</body></html>",
+  ].join("");
+  response.writeHead(200, {
+    "cache-control": "no-store",
+    "content-length": Buffer.byteLength(body),
+    "content-security-policy": [
+      "default-src 'none'",
+      `script-src 'nonce-${nonce}'`,
+      "base-uri 'none'",
+      "form-action 'none'",
+      "frame-ancestors 'none'",
+    ].join("; "),
+    "content-type": "text/html; charset=utf-8",
+    "cross-origin-opener-policy": "same-origin",
+    "referrer-policy": "no-referrer",
+    "set-cookie": setCookie,
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+  });
+  response.end(body);
 }
 
 async function readExchangeBody(request: IncomingMessage): Promise<unknown> {
@@ -186,7 +222,11 @@ async function handleExchange(
   if (
     request.method !== "POST" ||
     request.headers.origin !== dependencies.portalOrigin ||
-    contentType !== "application/x-www-form-urlencoded"
+    contentType !== "application/x-www-form-urlencoded" ||
+    (request.headers["sec-fetch-mode"] !== undefined &&
+      request.headers["sec-fetch-mode"] !== "navigate") ||
+    (request.headers["sec-fetch-dest"] !== undefined &&
+      request.headers["sec-fetch-dest"] !== "document")
   ) {
     sendJsonError(response, 400, "INVALID_EXCHANGE", "Invalid session exchange");
     return;
@@ -232,17 +272,15 @@ async function handleExchange(
   const cookieName = dependencies.secureCookies
     ? "__Host-platform-session"
     : "platform-session";
-  response.writeHead(303, {
-    "cache-control": "no-store",
-    location: "/",
-    "set-cookie": sessionCookie(
+  sendWorkspaceBootstrap(
+    response,
+    sessionCookie(
       cookieName,
       record.rawSessionToken,
       Math.floor(dependencies.sessionTtlMs / 1_000),
       dependencies.secureCookies,
     ),
-  });
-  response.end();
+  );
 }
 
 export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies) {

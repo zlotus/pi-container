@@ -24,6 +24,7 @@ describeWithPostgres("Phase 1 through 4 PostgreSQL integration", () => {
   const suffix = randomUUID();
   const workerId = `worker-${suffix}`;
   const phase3WorkerId = `runtime-${suffix}`;
+  const phase3RuntimeImage = `agent-runtime:integration-${suffix}`;
   let database!: DatabaseClient;
 
   beforeAll(async () => {
@@ -210,7 +211,7 @@ describeWithPostgres("Phase 1 through 4 PostgreSQL integration", () => {
         workerId: phase3WorkerId,
         hostname: "runtime-worker.internal",
         architecture: "arm64",
-        runtimeImage: "agent-runtime:phase3-minimal",
+        runtimeImage: phase3RuntimeImage,
         runtimeVersion: "phase-3",
         capabilities: {
           browser: false,
@@ -248,7 +249,7 @@ describeWithPostgres("Phase 1 through 4 PostgreSQL integration", () => {
       id: randomUUID(),
       userId: phase3UserId,
       name: "phase-3-lifecycle",
-      runtimeImage: "agent-runtime:phase3-minimal",
+      runtimeImage: phase3RuntimeImage,
     });
 
     await expect(

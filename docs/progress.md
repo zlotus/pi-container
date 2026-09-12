@@ -4,9 +4,10 @@ Last reviewed: 2026-09-12
 
 ## Current Milestone
 
-Phase 1～3 已完成人工验收。Phase 4 Authenticated Gateway 的工程实现和自动验证已完成，
-当前等待在真实浏览器、真实模型凭据和目标 LAN/TLS 拓扑中人工验收 Portal 到 pi-web 的
-完整交互。Phase 5 Scheduler 尚未开始。
+Phase 1～3 已完成人工验收。Phase 4 Authenticated Gateway 的真实 Firefox redirect-chain
+入口阻断已修复，并已用 Firefox 140.14 验证新的 bootstrap 浏览器语义；当前等待在实际
+Portal/Worker/pi-web 栈、真实模型凭据和目标 LAN/TLS 拓扑中继续人工验收。Phase 5 Scheduler
+尚未开始。
 
 ## Current Baseline
 
@@ -22,6 +23,9 @@ Phase 1～3 已完成人工验收。Phase 4 Authenticated Gateway 的工程实�
 - Portal 与 Workspace Host 使用同一条 server-side session 的不同 host-only Cookie 副本；
   exchange code 仅在单 Control Plane 进程内保存 hash 索引及短时绑定，60 秒过期、单次消费，
   并绑定 user/workspace。Portal logout/revoke 后 Workspace Host Cookie 不能继续通过认证。
+- exchange 成功后返回带严格 CSP、禁止缓存/嵌入的最小 Workspace-origin bootstrap HTML，由其
+  `location.replace("/")` 发起新的同源导航；不使用会让 Firefox 保留 cross-site Fetch Metadata
+  的 HTTP redirect，普通 pi-web proxy 仍拒绝全部 cross-site 请求。
 - `apps/control-plane` 的独立 Workspace Gateway listener 严格解析
   `<workspace-id>.<WORKSPACE_BASE_URL host>`，每个 HTTP 请求和 WebSocket handshake 都重新
   校验 session、ownership、RUNNING、Worker heartbeat、预注册 route 与 per-Worker token。
@@ -47,10 +51,10 @@ Phase 1～3 已完成人工验收。Phase 4 Authenticated Gateway 的工程实�
 
 ## In Progress
 
-Phase 4 人工验收：在真实 Portal/Workspace wildcard Host 下，分别使用 User A/B 验证 host-only
-session exchange 与 ownership；在真实 pi-web 中验证页面、Prompt SSE streaming、Workspace
-Terminal、文件上传/下载和浏览器断开/重连。多主机部署还需验证 Control Plane 到 Worker
-Gateway 的受保护 LAN/VPN 可达性、TLS certificate 和 WebSocket upgrade。
+Phase 4 人工验收：从 Firefox 中重新点击 RUNNING Workspace，确认修复后的 Workspace-origin
+bootstrap 可以进入真实 pi-web；再使用 User A/B 验证 ownership，并继续验证 Prompt SSE
+streaming、Workspace Terminal、文件上传/下载和浏览器断开/重连。多主机部署还需验证 Control
+Plane 到 Worker Gateway 的受保护 LAN/VPN 可达性、TLS certificate 和 WebSocket upgrade。
 
 ## Next
 
@@ -65,6 +69,8 @@ Gateway 的受保护 LAN/VPN 可达性、TLS certificate 和 WebSocket upgrade�
 - pinned pi-web 0.9.0 的 Prompt 与 Terminal 实际使用 HTTP + SSE；当前代理已用真实 chunked
   SSE 和独立 WebSocket echo upstream 验证两种传输，但仍需带模型 credential 的真实 Prompt/
   Terminal 浏览器验收，自动测试不能替代该结果。
+- Workspace bootstrap 已在本机 Firefox 140.14 实测；Chromium 尚未运行同等真实浏览器探针，
+  但新导航不再继承跨站 HTTP redirect URL list，仍需在目标浏览器矩阵中确认实际 Portal 主链。
 - Worker Gateway 的可选原生 TLS 已实现，公开 Workspace Gateway 预期由受信反向代理终止
   wildcard TLS；真实 LAN/VPN、DNS、certificate、proxy timeout 和防火墙尚未在目标拓扑验证。
 - session exchange 存储是单 Control Plane 进程内、短时且 fail-closed；Control Plane restart
@@ -79,17 +85,23 @@ Gateway 的受保护 LAN/VPN 可达性、TLS certificate 和 WebSocket upgrade�
   页面/API 使用根路径，Prompt/Terminal 使用 EventSource/SSE，Host/Origin 校验支持可信 proxy
   场景，且无需修改或 fork pi-web。
 - 2026-09-12：`pnpm install --offline`、`pnpm lint`、`pnpm typecheck`、`pnpm test` 和
-  `pnpm build:web` 通过；常规测试共 52 passed，5 个 PostgreSQL/真实 Docker 条件测试按设计
+  `pnpm build:web` 通过；常规测试共 53 passed，5 个 PostgreSQL/真实 Docker 条件测试按设计
   跳过。
 - 2026-09-12：Gateway loopback 测试覆盖 HTTP body/response streaming、SSE、WebSocket
-  upgrade/双向 bytes、单次 exchange、host-only Cookie、logout/session 失效基础、ownership、
-  RUNNING/Worker route、Origin、header/cookie stripping 和固定 Workspace target。
-- 2026-09-12：连接本机 PostgreSQL 17.6 后 Control Plane 29/29 通过；3 个数据库集成测试覆盖
+  upgrade/双向 bytes、单次 exchange、Workspace-origin bootstrap、host-only Cookie、logout/
+  session 失效基础、ownership、RUNNING/Worker route、Origin、Fetch Metadata、header/cookie
+  stripping 和固定 Workspace target；cross-site XHR/subresource/iframe/redirect-chain GET 均拒绝。
+- 2026-09-12：Firefox 140.14.0esr 临时 loopback 浏览器探针实测 Portal 跨站 POST 为
+  `cross-site/navigate/document`，bootstrap 的 `location.replace("/")` 后 GET 为
+  `same-origin/navigate/document`，host-only `SameSite=Lax` Cookie 正常携带且无 Referer。
+- 2026-09-12：连接本机 PostgreSQL 17.6 后 Control Plane 30/30 通过；3 个数据库集成测试覆盖
   Phase 1～4 migration/repository、两个用户隔离、Worker credential、Gateway route 和 Workspace
-  lifecycle，随机数据已清理。
+  lifecycle；Runtime image 夹具使用随机唯一值，不受开发库中真实 ONLINE Worker 干扰，随机数据
+  已清理。
 - 2026-09-12：启用真实 Docker 条件集后 Worker 13/13 通过；2 个 Docker integration tests
   覆盖 Runtime create/start/stop/restart/delete、安全/资源/mount/network 基线与持久化，并
   实际通过 authenticated Worker Gateway 访问 pinned pi-web HTTP；随机容器、网络和临时目录
   已清理。
-- 尚未声明完成：真实模型 Prompt、Terminal SSE、浏览器 session exchange、外部 wildcard
-  DNS/TLS、跨主机 Worker Gateway 和真实 upstream WebSocket（pi-web 0.9.0 当前无该业务路径）。
+- 尚未声明完成：实际 Portal/Worker/pi-web 栈的 Firefox/Chromium 入口复验、真实模型 Prompt、
+  Terminal SSE、外部 wildcard DNS/TLS、跨主机 Worker Gateway 和真实 upstream WebSocket
+  （pi-web 0.9.0 当前无该业务路径）。

@@ -1141,8 +1141,10 @@ password
    的 `__Host-` host-only Cookie；
 2. Open Workspace 时，Portal 签发短时、单次使用且绑定 user/workspace 的 exchange code；
 3. 浏览器以 top-level POST 将 code 交给该 Workspace Host 上由 Gateway 截获的
-   `/_platform/session`；Gateway 校验后设置该 Host 自己的 `__Host-` Cookie，再 `303`
-   到 `/`；
+   `/_platform/session`；Gateway 校验后设置该 Host 自己的 `__Host-` Cookie，并返回禁止缓存、
+   禁止嵌入且只允许 nonce script 的最小 Workspace-origin bootstrap HTML；该页面以
+   `location.replace("/")` 发起新的同源导航，避免跨站 POST 的 redirect chain 污染后续
+   `Sec-Fetch-Site`；
 4. exchange code 不放入 query string，不进入 pi-web、访问日志或 Referer；
 5. Gateway 保留平台 Cookie 名称空间，不能允许 upstream `Set-Cookie` 覆盖平台 session；
 6. 平台 state-changing API 校验 CSRF token 与 `Origin`，WebSocket upgrade 校验

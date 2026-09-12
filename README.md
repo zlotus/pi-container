@@ -180,7 +180,10 @@ docker port agent-runtime-<workspace-uuid> 30141/tcp
 该地址只用于本机诊断，不是最终用户入口，不应暴露到 LAN。正常用户从 Portal 点击“打开”，
 Portal 会签发 60 秒内有效、单次使用且绑定 user/workspace 的 exchange code，并以 top-level
 POST 进入 Workspace Host。Gateway 随后为该 Host 设置 host-only session Cookie；原始 code
-不会进入 query string、pi-web 或 Referer。
+不会进入 query string、pi-web 或 Referer。exchange 响应是一个禁止缓存、禁止嵌入并带严格
+CSP 的最小 Workspace-origin bootstrap 页面；它使用 `location.replace("/")` 发起新的同源导航，
+而不是用 HTTP redirect 延续 Portal 发起的跨站导航链。Gateway 因此仍可拒绝所有进入 pi-web
+的 cross-site fetch、XHR、subresource 与 iframe 请求。
 
 生产部署需为 `WORKSPACE_BASE_URL` 配置内部 wildcard DNS 和 wildcard certificate，并把
 Workspace Host 原样保留 `Host` 转发到 `GATEWAY_HOST:GATEWAY_PORT`；前置代理还必须允许

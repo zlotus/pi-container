@@ -131,7 +131,7 @@ function rejectedWebSocketStatus(
 }
 
 describe("authenticated Workspace Gateway", () => {
-  it("exchanges a Portal session once into a host-only Workspace cookie", async () => {
+  it("exchanges a Portal session once into a host-only Workspace bootstrap", async () => {
     const exchanges = new WorkspaceSessionExchange(60_000);
     const active = new Map([
       [hashOpaqueToken(SESSION_A), session(USER_A_ID)],
@@ -166,6 +166,22 @@ describe("authenticated Workspace Gateway", () => {
       now: NOW,
     });
     const body = new URLSearchParams({ code }).toString();
+    const rejectedOrigin = await request({
+      port,
+      method: "POST",
+      path: "/_platform/session",
+      headers: {
+        host: PUBLIC_HOST,
+        origin: "http://attacker.test",
+        "content-type": "application/x-www-form-urlencoded",
+        "content-length": String(Buffer.byteLength(body)),
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+        "sec-fetch-user": "?1",
+      },
+      body,
+    });
     const first = await request({
       port,
       method: "POST",
@@ -175,6 +191,10 @@ describe("authenticated Workspace Gateway", () => {
         origin: "http://portal.test",
         "content-type": "application/x-www-form-urlencoded",
         "content-length": String(Buffer.byteLength(body)),
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+        "sec-fetch-user": "?1",
       },
       body,
     });
@@ -187,17 +207,145 @@ describe("authenticated Workspace Gateway", () => {
         origin: "http://portal.test",
         "content-type": "application/x-www-form-urlencoded",
         "content-length": String(Buffer.byteLength(body)),
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+        "sec-fetch-user": "?1",
       },
       body,
     });
+    const framedCode = exchanges.issue({
+      rawSessionToken: SESSION_A,
+      userId: USER_A_ID,
+      workspaceId: WORKSPACE_ID,
+      now: NOW,
+    });
+    const framedBody = new URLSearchParams({ code: framedCode }).toString();
+    const framedExchange = await request({
+      port,
+      method: "POST",
+      path: "/_platform/session",
+      headers: {
+        host: PUBLIC_HOST,
+        origin: "http://portal.test",
+        "content-type": "application/x-www-form-urlencoded",
+        "content-length": String(Buffer.byteLength(framedBody)),
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "iframe",
+      },
+      body: framedBody,
+    });
 
-    expect(first.statusCode).toBe(303);
-    expect(first.headers.location).toBe("/");
+    expect(rejectedOrigin.statusCode).toBe(400);
+    expect(first.statusCode).toBe(200);
+    expect(first.headers.location).toBeUndefined();
+    expect(first.headers["content-type"]).toBe("text/html; charset=utf-8");
+    expect(first.headers["cache-control"]).toBe("no-store");
+    expect(first.headers["content-security-policy"]).toContain(
+      "frame-ancestors 'none'",
+    );
+    expect(first.headers["x-frame-options"]).toBe("DENY");
+    expect(first.body).toContain('window.location.replace("/")');
+    expect(first.body).not.toContain(code);
+    expect(first.body).not.toContain(SESSION_A);
     expect(first.headers["set-cookie"]).toEqual([
       expect.stringContaining(`platform-session=${SESSION_A}; Path=/; HttpOnly; SameSite=Lax`),
     ]);
     expect(first.headers["set-cookie"]?.join(";")).not.toContain("Domain=");
     expect(replay.statusCode).toBe(401);
+    expect(framedExchange.statusCode).toBe(400);
+  });
+
+  it("starts a new same-origin navigation after a cross-site Portal exchange", async () => {
+    const upstream = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "text/html" });
+      response.end("pi-web root");
+    });
+    const upstreamPort = await listen(upstream);
+    const exchanges = new WorkspaceSessionExchange(60_000);
+    const store: WorkspaceGatewayStore = {
+      async findActiveSession(tokenHash) {
+        return tokenHash === hashOpaqueToken(SESSION_A) ? session(USER_A_ID) : null;
+      },
+      async findOwnedWorkspace(id, userId) {
+        return id === WORKSPACE_ID && userId === USER_A_ID ? workspace() : null;
+      },
+      async findWorkerGatewayRoute() {
+        return {
+          workerId: WORKER_ID,
+          gatewayBaseUrl: `http://127.0.0.1:${upstreamPort}`,
+        };
+      },
+    };
+    const gateway = buildWorkspaceGateway({
+      store,
+      exchanges,
+      portalOrigin: "http://portal.test",
+      workspaceBaseUrl: "http://agent.test",
+      secureCookies: false,
+      sessionTtlMs: 60_000,
+      workerOfflineAfterMs: 35_000,
+      workerGatewayTokens: { [WORKER_ID]: GATEWAY_TOKEN },
+      now: () => NOW,
+    });
+    const port = await listen(gateway);
+    const code = exchanges.issue({
+      rawSessionToken: SESSION_A,
+      userId: USER_A_ID,
+      workspaceId: WORKSPACE_ID,
+      now: NOW,
+    });
+    const body = new URLSearchParams({ code }).toString();
+    const exchange = await request({
+      port,
+      method: "POST",
+      path: "/_platform/session",
+      headers: {
+        host: PUBLIC_HOST,
+        origin: "http://portal.test",
+        referer: "http://portal.test/",
+        "content-type": "application/x-www-form-urlencoded",
+        "content-length": String(Buffer.byteLength(body)),
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+        "sec-fetch-user": "?1",
+      },
+      body,
+    });
+    const cookie = exchange.headers["set-cookie"]?.[0]?.split(";", 1)[0];
+    if (cookie === undefined) throw new Error("Workspace cookie is missing");
+
+    const workspaceNavigation = await request({
+      port,
+      path: "/",
+      headers: {
+        host: PUBLIC_HOST,
+        cookie,
+        "sec-fetch-site": "same-origin",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+      },
+    });
+    const redirectTaintedNavigation = await request({
+      port,
+      path: "/",
+      headers: {
+        host: PUBLIC_HOST,
+        cookie,
+        referer: "http://portal.test/",
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+        "sec-fetch-user": "?1",
+      },
+    });
+
+    expect(exchange.statusCode).toBe(200);
+    expect(workspaceNavigation.statusCode).toBe(200);
+    expect(workspaceNavigation.body).toBe("pi-web root");
+    expect(redirectTaintedNavigation.statusCode).toBe(404);
   });
 
   it("streams HTTP only for the owning active session and uses the registered Worker route", async () => {
@@ -264,7 +412,7 @@ describe("authenticated Workspace Gateway", () => {
         cookie: `platform-session=${SESSION_B}`,
       },
     });
-    const crossSite = await request({
+    const crossSiteFetch = await request({
       port: gatewayPort,
       path: "/",
       headers: {
@@ -272,6 +420,40 @@ describe("authenticated Workspace Gateway", () => {
         cookie: `platform-session=${SESSION_A}`,
         origin: "http://attacker.test",
         "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-dest": "empty",
+      },
+    });
+    const crossSiteSubresource = await request({
+      port: gatewayPort,
+      path: "/favicon.ico",
+      headers: {
+        host: PUBLIC_HOST,
+        cookie: `platform-session=${SESSION_A}`,
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "no-cors",
+        "sec-fetch-dest": "image",
+      },
+    });
+    const crossSiteIframe = await request({
+      port: gatewayPort,
+      path: "/",
+      headers: {
+        host: PUBLIC_HOST,
+        cookie: `platform-session=${SESSION_A}`,
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "iframe",
+      },
+    });
+    const noCookie = await request({
+      port: gatewayPort,
+      path: "/",
+      headers: {
+        host: PUBLIC_HOST,
+        "sec-fetch-site": "same-origin",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
       },
     });
     ownedWorkspace.state = "STOPPED";
@@ -296,7 +478,10 @@ describe("authenticated Workspace Gateway", () => {
     });
     expect(owner.headers["set-cookie"]).toEqual(["pi-theme=dark"]);
     expect(foreign.statusCode).toBe(404);
-    expect(crossSite.statusCode).toBe(404);
+    expect(crossSiteFetch.statusCode).toBe(404);
+    expect(crossSiteSubresource.statusCode).toBe(404);
+    expect(crossSiteIframe.statusCode).toBe(404);
+    expect(noCookie.statusCode).toBe(404);
     expect(stopped.statusCode).toBe(404);
   });
 
