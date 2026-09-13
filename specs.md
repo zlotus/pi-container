@@ -1226,6 +1226,7 @@ user_id uuid
 name text
 worker_id text nullable
 state text
+desired_state text
 runtime_image text
 required_architecture text nullable
 required_capabilities jsonb
@@ -1354,6 +1355,7 @@ Envelope：
 ```text
 worker.hello
 worker.heartbeat
+worker.reconcile
 
 workspace.ensure
 workspace.start
@@ -1844,6 +1846,23 @@ stop/start。Phase 6 才覆盖完整 managed container/directory inventory、orp
 assignment reconciliation；不能把 Phase 4 的定向 reconnect state repair 当作 Phase 6 的
 完整 persistence/recovery 验收。
 
+Phase 6 固定 recovery contract：Control Plane 将每个 Workspace 的 desired state 持久化；进程启动
+以及 Worker authenticated hello 后，已分配 Workspace 先进入 `WORKER_OFFLINE`，再由 Control Plane
+通过 `worker.reconcile` 下发该 Worker 的 authoritative assignments。Worker 只读扫描本机 managed
+Container、network 和 Workspace directory，验证 runtime image、metadata、labels、mount、network、
+security/resource baseline 与 pi-web readiness 后返回 observed state。状态恢复必须使用 Workspace ID、
+Worker ID、runtime image、desired state 和当前 `WORKER_OFFLINE` 的条件更新，不能覆盖并发 lifecycle。
+
+期望运行且确认运行才恢复 `RUNNING`；期望停止且确认停止才恢复 `STOPPED`。unexpected stop、相反状态、
+资源缺失或确定 mismatch 进入 `ERROR`；暂时 Docker/pi-web 错误、断线或不完整报告保持
+`WORKER_OFFLINE`。迁移前无法确定 intent 的 legacy `ERROR/WORKER_OFFLINE` 记录使用 `UNKNOWN` desired
+state，一次完整、有效的 observed state 可将其恢复为实际 `RUNNING/STOPPED`。
+
+不在 authoritative assignments 中的资源必须区分为当前 Worker 的 `MANAGED_ORPHAN`、其他 Worker
+identity 的 `FOREIGN_MANAGED_RESOURCE` 或不能证明 managed identity 的 `UNKNOWN_RESOURCE`。三者均只
+告警，不自动删除。唯一允许 recovery 补完成的删除，是数据库已持久化 `DELETED` intent，且完整
+inventory 明确确认 Container、network 与 managed directory 全部不存在的 Workspace metadata 删除。
+
 ---
 
 # 50. PostgreSQL
@@ -2197,6 +2216,9 @@ Worker A offline/reconnect -> 原 Workspace 仍绑定 Worker A
 - Worker 宿主机重启及完整 managed Runtime inventory
 - Control Plane restart
 - authoritative assignment / orphan reconciliation
+- persistent desired state 与 Control Plane 启动 fail-closed
+- 新建 Runtime 使用 `unless-stopped`，legacy Runtime 保持可管理且不自动改写
+- orphan/foreign/unknown resource 只告警、不删除
 
 验收：
 

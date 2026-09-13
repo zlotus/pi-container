@@ -6,6 +6,12 @@ import type { WorkerChannelError } from "./worker-channel.js";
 
 const REQUEST_ID = "0d17d4a0-c25a-43fd-a2eb-3d9ca7c5976c";
 const WORKSPACE_ID = "90b38efc-aa9a-4bc6-8eee-528b4e0c7c60";
+const WORKSPACE_OBSERVATION = {
+  workspaceId: WORKSPACE_ID,
+  state: "RUNNING" as const,
+  runtimeImage: "agent-runtime:test",
+  observedAt: "2026-09-10T08:00:00.000Z",
+};
 
 class FakeSocket {
   readyState = 1;
@@ -48,7 +54,10 @@ describe("worker command correlation", () => {
       version: 1 as const,
       type: "response.ok" as const,
       requestId: REQUEST_ID,
-      payload: { requestType: "workspace.inspect" as const },
+      payload: {
+        requestType: "workspace.inspect" as const,
+        workspace: WORKSPACE_OBSERVATION,
+      },
     };
 
     expect(channel.acceptResponse("worker-01", response)).toBe(true);
@@ -82,7 +91,10 @@ describe("worker command correlation", () => {
       version: 1 as const,
       type: "response.ok" as const,
       requestId: REQUEST_ID,
-      payload: { requestType: "workspace.inspect" as const },
+      payload: {
+        requestType: "workspace.inspect" as const,
+        workspace: WORKSPACE_OBSERVATION,
+      },
     };
 
     expect(channel.acceptResponse("worker-02", response)).toBe(false);
@@ -101,7 +113,10 @@ describe("worker command correlation", () => {
         version: 1,
         type: "response.ok",
         requestId: REQUEST_ID,
-        payload: { requestType: "workspace.start" },
+        payload: {
+          requestType: "workspace.start",
+          workspace: WORKSPACE_OBSERVATION,
+        },
       }),
     ).toBe(false);
     await expect(result).rejects.toMatchObject<Partial<WorkerChannelError>>({

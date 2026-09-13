@@ -5,6 +5,8 @@ import {
   ControlToWorkerMessageSchema,
   type Architecture,
   type ControlToWorkerMessage,
+  type WorkerReconcileAssignment,
+  type WorkerReconciliationReport,
   type WorkerToControlMessage,
   type WorkspaceResources,
 } from "@agent-runtime/protocol";
@@ -44,6 +46,9 @@ export interface WorkspaceRuntime {
   stop(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
   delete(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
   inspect(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
+  reconcile(
+    assignments: readonly WorkerReconcileAssignment[],
+  ): Promise<WorkerReconciliationReport>;
   allocatedWorkspaces(): Promise<number>;
 }
 
@@ -137,7 +142,7 @@ export class WorkerDaemon {
     const socket = new WebSocket(this.config.CONTROL_PLANE_URL, {
       headers: { authorization: `Bearer ${this.config.WORKER_TOKEN}` },
       perMessageDeflate: false,
-      maxPayload: 256 * 1024,
+      maxPayload: 8 * 1024 * 1024,
     });
     this.#socket = socket;
 
@@ -234,6 +239,18 @@ export class WorkerDaemon {
 
   async #handleCommand(message: ControlToWorkerMessage): Promise<void> {
     try {
+      if (message.type === "worker.reconcile") {
+        const reconciliation = await this.runtime.reconcile(
+          message.payload.assignments,
+        );
+        this.#send({
+          version: 1,
+          type: "response.ok",
+          requestId: message.requestId,
+          payload: { requestType: message.type, reconciliation },
+        });
+        return;
+      }
       let workspace: WorkspaceRuntimeObservation;
       switch (message.type) {
         case "workspace.ensure":

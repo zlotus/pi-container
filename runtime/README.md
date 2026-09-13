@@ -19,7 +19,10 @@ docker build --tag agent-runtime:phase3-minimal runtime
 
 The Worker starts this image as UID/GID 1000, binds `/workspace` and
 `/agent/pi` from its managed root, and publishes pi-web only to an ephemeral
-`127.0.0.1` host port. `PI_CODING_AGENT_DIR=/agent/pi` keeps Pi configuration,
+`127.0.0.1` host port. New Phase 6 allocations also use Docker's
+`unless-stopped` restart policy: a Runtime that was running before a host/Docker
+restart is restarted, while an explicitly stopped Runtime stays stopped.
+`PI_CODING_AGENT_DIR=/agent/pi` keeps Pi configuration,
 credentials, and sessions in the persistent Pi mount.
 
 Platform Workspace semantics fix the persistent project root at `/workspace`.
@@ -49,3 +52,5 @@ deletes and recreates the Workspace; the Worker never recreates it or removes
 persistent data automatically. Newly created containers must contain the current
 `PI_WEB_DEFAULT_CWD=/workspace` setting. An explicit conflicting value blocks
 ensure/start/proxy, while inspect/stop/delete remain available for safe cleanup.
+The same compatibility rule permits an older managed Container without the
+Phase 6 restart policy; recovery inventory does not mutate or rebuild it.

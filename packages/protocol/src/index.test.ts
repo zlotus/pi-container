@@ -113,6 +113,67 @@ describe("worker protocol", () => {
     expect(parsed.type).toBe("response.ok");
   });
 
+  it("accepts a bounded authoritative recovery command and typed inventory", () => {
+    expect(
+      ControlToWorkerMessageSchema.parse({
+        version: 1,
+        type: "worker.reconcile",
+        requestId,
+        payload: {
+          assignments: [
+            {
+              workspaceId,
+              runtimeImage: "agent-runtime:phase3-minimal",
+              desiredState: "RUNNING",
+            },
+          ],
+        },
+      }),
+    ).toMatchObject({ type: "worker.reconcile" });
+
+    expect(
+      WorkerToControlMessageSchema.parse({
+        version: 1,
+        type: "response.ok",
+        requestId,
+        payload: {
+          requestType: "worker.reconcile",
+          reconciliation: {
+            workspaces: [
+              {
+                status: "OBSERVED",
+                workspace: {
+                  workspaceId,
+                  state: "RUNNING",
+                  runtimeImage: "agent-runtime:phase3-minimal",
+                  observedAt: "2026-09-10T08:00:00.000Z",
+                },
+              },
+            ],
+            issues: [],
+            observedAt: "2026-09-10T08:00:00.000Z",
+          },
+        },
+      }),
+    ).toMatchObject({ type: "response.ok" });
+  });
+
+  it("rejects duplicate authoritative assignments", () => {
+    const assignment = {
+      workspaceId,
+      runtimeImage: "agent-runtime:phase3-minimal",
+      desiredState: "STOPPED",
+    };
+    expect(
+      ControlToWorkerMessageSchema.safeParse({
+        version: 1,
+        type: "worker.reconcile",
+        requestId,
+        payload: { assignments: [assignment, assignment] },
+      }).success,
+    ).toBe(false);
+  });
+
   it("rejects stack traces and arbitrary fields in protocol errors", () => {
     const result = WorkerToControlMessageSchema.safeParse({
       version: 1,

@@ -4,11 +4,11 @@
 [pi-web](https://github.com/agegr/pi-web) 与 Pi Coding Agent，自身只负责认证、
 Workspace、Worker、Docker 生命周期、调度和安全代理。
 
-当前仓库已实现 **Phase 5：Multi-host Scheduler**：在 Phase 4 Authenticated Gateway 主链上
-增加多 Worker eligibility、capacity、architecture/runtime/capability compatibility、负载评分、
-deterministic tie-break 和 sticky placement。HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理
-到原始 pi-web，不复制其 Chat、Terminal 或 streaming 实现。两台真实 Worker 的 Phase 5
-multi-host 人工验收已经通过；生产 TLS/wildcard certificate 仍是独立的部署验收项。
+当前仓库已实现 **Phase 6：Persistence / Recovery 的工程基线**：Control Plane 启动时先将已分配
+Workspace fail-closed，Worker authenticated hello 后接收 PostgreSQL authoritative assignments，
+只读扫描本机 managed Container、network 与 persistent directory，再按持久化 desired state 条件恢复。
+Phase 1～5 已完成人工验收；Phase 6 自动验证已通过，但真实宿主机/Control Plane 重启的人工验收尚未完成。
+HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其 Chat、Terminal 或 streaming 实现。
 
 ## Prerequisites
 
@@ -248,10 +248,26 @@ Control Plane 可达，不得把 Worker Gateway 作为用户入口。
 
 Worker 超过 offline timeout 后，绑定其上的相关 Workspace 会持久化为 `WORKER_OFFLINE`，
 Gateway 保持拒绝访问。Worker daemon 重新完成 authenticated hello 后，Control Plane 会对这些
-Workspace 逐个发送 `workspace.inspect`：真实 Container 仍运行时自动恢复 `RUNNING`，已停止时
-恢复 `STOPPED`，Container 缺失或确定的 managed metadata/identity 错误进入 `ERROR`；检查超时、
-再次断线或 Docker 暂时不可用时继续保持 `WORKER_OFFLINE`。该流程不会改变原 `workerId`，不会
-迁移 Workspace，也不会隐式创建或启动 Runtime。
+Workspace 下发 `worker.reconcile`，其中只含该 Worker 的 PostgreSQL authoritative assignments 和
+持久化 desired state。Worker 对 Docker 与 managed root 做完整只读 inventory；只有 Container、
+network、metadata、bind mount、安全/资源配置、runtime image 和运行状态均能确认时才返回 observed
+结果。Control Plane 在 reconciliation 开始前将该 Worker 的 Workspace 置为 `WORKER_OFFLINE`，并以
+Workspace ID、Worker ID、runtime image、desired state 和当前状态为条件更新：期望运行且确认运行时
+恢复 `RUNNING`，期望停止且确认停止时恢复 `STOPPED`；unexpected stop、状态相反、资源缺失或确定的
+identity/config mismatch 进入 `ERROR`；Docker 暂时不可用、pi-web 暂未 ready、断线或不完整响应继续
+保持 `WORKER_OFFLINE`。该流程不会改变原 `workerId`，不会迁移、隐式 ensure/start 或删除 Runtime。
+
+Worker 会把不在 authoritative assignments 中的本地资源分类为 `MANAGED_ORPHAN`、
+`FOREIGN_MANAGED_RESOURCE` 或 `UNKNOWN_RESOURCE` 并写入 Control Plane 结构化 warning；任何类别都只告警、
+不自动删除。只有先前已明确进入 destructive delete、且一次完整 inventory 明确确认对应 Container、
+network 和 managed directory 全部不存在时，Control Plane 才可补完成因响应丢失/重启中断的 metadata
+删除。新建 Container 使用 Docker `unless-stopped` restart policy，使宿主机恢复时原本运行的 Runtime
+自动恢复、原本显式停止的保持停止；Phase 5 及更早创建且缺少该 policy 的合法 legacy Container 仍可
+管理，不会被自动重建或修改。
+
+Control Plane 每次进程启动都会先把持久化为 ONLINE 的 Worker 及其已分配 Workspace 置为 offline，
+避免使用重启前的 heartbeat/state 放行 Gateway；Worker 重新 hello 并完成 inventory 后才恢复。已有
+session exchange code 仍是进程内短时状态，Control Plane restart 后失效，用户可重新点击“打开”。
 
 ```bash
 export WORKER_ID=worker-a

@@ -4,7 +4,7 @@ import { hashOpaqueToken, hashPassword } from "@agent-runtime/auth";
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase5Repository,
+  createPhase6Repository,
   migrateDatabase,
   type DatabaseClient,
 } from "@agent-runtime/database";
@@ -18,14 +18,16 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithPostgres = databaseUrl === undefined ? describe.skip : describe;
 const NOW = new Date("2026-09-10T08:00:00.000Z");
 
-describeWithPostgres("Phase 1 through 5 PostgreSQL integration", () => {
+describeWithPostgres("Phase 1 through 6 PostgreSQL integration", () => {
   const userAId = randomUUID();
   const userBId = randomUUID();
   const phase3UserId = randomUUID();
   const phase5UserId = randomUUID();
+  const phase6UserId = randomUUID();
   const suffix = randomUUID();
   const workerId = `worker-${suffix}`;
   const phase3WorkerId = `runtime-${suffix}`;
+  const phase6WorkerId = `recovery-${suffix}`;
   const phase5WorkerIds = ["a", "b", "arch", "cap", "image", "last"].map(
     (name) => `scheduler-${name}-${suffix}`,
   );
@@ -40,14 +42,14 @@ describeWithPostgres("Phase 1 through 5 PostgreSQL integration", () => {
   });
 
   afterAll(async () => {
-    await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId})`;
-    await database`delete from workers where id = ${workerId} or id = ${phase3WorkerId} or id = any(${phase5WorkerIds})`;
-    await database`delete from users where id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId})`;
+    await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId})`;
+    await database`delete from workers where id = ${workerId} or id = ${phase3WorkerId} or id = ${phase6WorkerId} or id = any(${phase5WorkerIds})`;
+    await database`delete from users where id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId})`;
     await database.end({ timeout: 5 });
   });
 
   it("logs in two persisted users and isolates their workspaces", async () => {
-    const repository = createPhase5Repository(database, selectWorker);
+    const repository = createPhase6Repository(database, selectWorker);
     await repository.createUser({
       id: userAId,
       email: `a-${suffix}@example.test`,
@@ -140,7 +142,7 @@ describeWithPostgres("Phase 1 through 5 PostgreSQL integration", () => {
   });
 
   it("persists a bound Worker credential and rotates it atomically", async () => {
-    const repository = createPhase5Repository(database, selectWorker);
+    const repository = createPhase6Repository(database, selectWorker);
     const originalToken = "originalworker0123456789abcdef0123456789abcdef";
     const rotatedToken = "rotatedworker0123456789abcdef0123456789abcdef";
     const originalHash = hashOpaqueToken(originalToken);
@@ -196,7 +198,7 @@ describeWithPostgres("Phase 1 through 5 PostgreSQL integration", () => {
   });
 
   it("persists minimal placement and lifecycle transitions atomically", async () => {
-    const repository = createPhase5Repository(database, selectWorker);
+    const repository = createPhase6Repository(database, selectWorker);
     await repository.createUser({
       id: phase3UserId,
       email: `runtime-${suffix}@example.test`,
@@ -350,8 +352,119 @@ describeWithPostgres("Phase 1 through 5 PostgreSQL integration", () => {
     ).toMatchObject({ assignedWorkspaces: 0 });
   });
 
+  it("persists desired state and conditionally recovers or finalizes deletion", async () => {
+    const repository = createPhase6Repository(database, selectWorker);
+    const runtimeImage = `agent-runtime:recovery-${suffix}`;
+    const credentialHash = hashOpaqueToken(
+      `recovery-${suffix}-credential-token`,
+    );
+    await repository.createUser({
+      id: phase6UserId,
+      email: `recovery-${suffix}@example.test`,
+      username: null,
+      passwordHash: await hashPassword("integration-recovery-password"),
+      role: "user",
+    });
+    await repository.provisionWorker({
+      workerId: phase6WorkerId,
+      credentialHash,
+    });
+    await repository.recordWorkerHello({
+      credentialHash,
+      workerId: phase6WorkerId,
+      hostname: "recovery-worker.internal",
+      architecture: "arm64",
+      runtimeImage,
+      runtimeVersion: "phase-6",
+      capabilities: {
+        browser: false,
+        office: false,
+        ffmpeg: false,
+        python: true,
+        node: true,
+        rust: false,
+      },
+      maxWorkspaces: 2,
+      allocatedWorkspaces: 1,
+      systemResources: {
+        logicalCpuCount: 8,
+        memoryBytes: 16 * 1024 ** 3,
+      },
+      receivedAt: NOW,
+    });
+    const workspace = await repository.createWorkspace({
+      id: randomUUID(),
+      userId: phase6UserId,
+      name: "phase-6-recovery",
+      runtimeImage,
+    });
+    await repository.beginWorkspaceStart({
+      workspaceId: workspace.id,
+      userId: phase6UserId,
+      workerId: phase6WorkerId,
+    });
+    await repository.finishWorkspaceStart({
+      workspaceId: workspace.id,
+      workerId: phase6WorkerId,
+    });
+
+    await expect(
+      repository.markAllWorkersOfflineForRecovery(
+        new Date(NOW.getTime() + 1),
+      ),
+    ).resolves.toBe(1);
+    const [recovering] =
+      await repository.beginWorkerReconciliation(phase6WorkerId);
+    expect(recovering).toMatchObject({
+      id: workspace.id,
+      state: "WORKER_OFFLINE",
+      desiredState: "RUNNING",
+    });
+    await expect(
+      repository.reconcileWorkspaceRecovery({
+        workspaceId: workspace.id,
+        workerId: phase6WorkerId,
+        runtimeImage,
+        desiredState: "STOPPED",
+        state: "RUNNING",
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      repository.reconcileWorkspaceRecovery({
+        workspaceId: workspace.id,
+        workerId: phase6WorkerId,
+        runtimeImage,
+        desiredState: "RUNNING",
+        state: "RUNNING",
+      }),
+    ).resolves.toBe(true);
+
+    await repository.beginWorkspaceDelete({
+      workspaceId: workspace.id,
+      userId: phase6UserId,
+      workerId: phase6WorkerId,
+    });
+    const [deleting] =
+      await repository.beginWorkerReconciliation(phase6WorkerId);
+    expect(deleting).toMatchObject({
+      state: "WORKER_OFFLINE",
+      desiredState: "DELETED",
+    });
+    await expect(
+      repository.deleteRecoveredWorkspace({
+        workspaceId: workspace.id,
+        userId: phase6UserId,
+        workerId: phase6WorkerId,
+        runtimeImage,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      repository.findOwnedWorkspace(workspace.id, phase6UserId),
+    ).resolves.toBeNull();
+  });
+
   it("schedules compatible Workers by authoritative load and reserves the final slot once", async () => {
-    const repository = createPhase5Repository(database, selectWorker);
+    const repository = createPhase6Repository(database, selectWorker);
     const runtimeImage = `agent-runtime:scheduler-${suffix}`;
     const finalSlotImage = `agent-runtime:last-slot-${suffix}`;
     await repository.createUser({

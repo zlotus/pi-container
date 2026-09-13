@@ -203,6 +203,7 @@ export function createPhase5Repository(
           set
             worker_id = ${workerId},
             state = 'STARTING',
+            desired_state = 'RUNNING',
             updated_at = now(),
             last_activity_at = now()
           where id = ${workspace.id}

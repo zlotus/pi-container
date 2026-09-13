@@ -4,18 +4,20 @@ Last reviewed: 2026-09-13
 
 ## Current Milestone
 
-Phase 1～5 已完成人工验收。Phase 5 已在两台真实 Worker 的 multi-host 拓扑验证 Scheduler、
-sticky/offline/reconnect 语义、跨主机 Gateway data path 与持久化。post-acceptance cleanup 已补充
-真实部署说明，并把新 Pi Session 的默认项目根固定为 `/workspace`；后续兼容性修复确保 cleanup
-前的合法 managed Container 不会因缺少新增 default-cwd 环境变量而失去生命周期管理能力。
-尚未进入 Phase 6 Persistence / Recovery。
+Phase 1～5 已完成人工验收。Phase 6 Persistence / Recovery 的工程实现与自动验证已完成，等待真实
+Control Plane、Worker daemon、Docker/宿主机 restart 人工验收。当前实现以 PostgreSQL desired state
+和 sticky assignment 为 authority，由 Worker 完整只读 inventory 恢复状态；orphan、foreign managed
+与 unknown resource 均 fail-closed 且不自动删除。Phase 7 Toolchain 尚未开始。
 
 ## Current Baseline
 
 - `packages/auth` 使用 Node.js scrypt、随机 salt、opaque session token hash 和
   session-bound HMAC CSRF token，不保存明文密码或 Portal session token。
-- `packages/database` 提供幂等 migration 和 Phase 1～5 repository；users、server-side
+- `packages/database` 提供幂等 migration 和 Phase 1～6 repository；users、server-side
   sessions、workspaces、workers 与预注册 `gateway_base_url` 均持久化到 PostgreSQL。
+- Phase 6 migration 为 Workspace 持久化 `RUNNING | STOPPED | DELETED | UNKNOWN` desired state；start、
+  stop、delete 在发 Worker 命令前先持久化 intent。Control Plane 启动会把旧 ONLINE/assigned state
+  统一 fail-closed 为 offline，避免重启前 heartbeat/state 继续放行 Gateway。
 - `apps/control-plane` 提供本地登录/注销、Workspace CRUD/start/stop/open、Worker control
   channel 与 Admin Worker 页面；state-changing API 校验精确 Portal Origin 和 CSRF，跨用户
   API/Proxy 访问统一按不可见资源拒绝。
@@ -62,25 +64,35 @@ sticky/offline/reconnect 语义、跨主机 Gateway data path 与持久化。pos
   `allocated_workspaces` 仅作为观测 telemetry；Admin Worker 表显示 authoritative assignment/max。
 - 首次 placement 在 PostgreSQL advisory-lock 保护的短事务内完成 count、selection 和
   `worker_id + STARTING` reservation，并发请求不能共同获得最后一个 `max_workspaces` slot。
-- 已有 `worker_id` 的 Workspace 不重新进入 Scheduler 候选选择。Worker offline/reconnect 仍只在
-  原 Worker 上执行 Phase 4 `workspace.inspect` state repair，不迁移、不隐式 ensure/start。
+- 已有 `worker_id` 的 Workspace 不重新进入 Scheduler 候选选择。Worker offline/reconnect 只在原
+  Worker 上执行 Phase 6 authoritative inventory reconciliation，不迁移、不隐式 ensure/start。
 - Worker 重新完成 authenticated hello 后，Control Plane 会仅对仍绑定该 Worker 的
-  `WORKER_OFFLINE` Workspace 逐个发送既有 `workspace.inspect`。只有受管 Runtime 身份、镜像和
-  实际状态得到确认后才条件更新：运行中恢复 `RUNNING`，已停止恢复 `STOPPED`，受管目录存在但
-  Container 缺失或确定的 metadata/identity 错误进入 `ERROR`；临时无法确认则保持
-  `WORKER_OFFLINE`。整个 reconciliation 过程不重新调度、不改变 `workerId`，Gateway 继续
-  fail-closed。
+  全部 sticky Workspace 先置为 `WORKER_OFFLINE`，再收到包含 authoritative assignment/desired state
+  的 `worker.reconcile`。Worker 扫描 Container、network 和 managed directory，验证 metadata、labels、
+  mount、安全/资源配置、legacy compatibility 与 running pi-web readiness 后返回完整 typed report。
+- Recovery 仅在 Workspace/Worker/runtime/desired/current-state 全部条件匹配时恢复：desired/observed
+  同为运行或停止才恢复 `RUNNING`/`STOPPED`；unexpected stop、缺失、相反状态和确定 mismatch 进入
+  `ERROR`；retryable Docker/pi-web 错误、断线或不完整报告保持 `WORKER_OFFLINE`。不重新调度、不改变
+  `workerId`，也不隐式 ensure/start。
+- Worker 将未分配本地资源分类为 `MANAGED_ORPHAN`、`FOREIGN_MANAGED_RESOURCE` 或
+  `UNKNOWN_RESOURCE` 并由 Control Plane 记录结构化 warning；三类都不自动删除。只有已持久化
+  `DELETED` intent 且完整 inventory 明确确认 Container、network、directory 均不存在时，才补完成
+  中断的 metadata 删除。
+- 新建 Runtime 配置 Docker `unless-stopped` restart policy；运行中的 Container 可随 Docker/宿主机
+  恢复，显式停止的保持停止。缺少该新增 policy 或 default-cwd 的合法 legacy Runtime 仍可管理，
+  recovery 不修改、不重建、不删除它。
 
 ## In Progress
 
-当前没有已启动的 Phase 6 实现。本轮停在 Phase 5 post-acceptance baseline；旧 managed Container
-的 default-cwd backward-compatibility regression 已修复并通过自动验证，等待真实旧 Workspace
-人工复验。
+Phase 6 工程实现已完成，当前只剩人工 acceptance；在人工验证前不标记 Phase 6 已完成人工验收。
 
 ## Next
 
-1. 等待明确开始 Phase 6 后，再按 `specs.md` 检查 Persistence / Recovery scope 与验收边界。
-2. 当前不加入完整 inventory/orphan/restart recovery，也不提前扩展 Scheduler 或 Runtime Toolchain。
+1. 在真实单机与 multi-host 拓扑分别重启 Control Plane、Worker daemon 和 Docker/Worker 宿主机，确认
+   原 RUNNING/STOPPED desired state、Gateway fail-closed 窗口、sticky assignment 与 pi-web readiness。
+2. 使用真实 Pi Session 和 `/workspace` 文件验证 Container/Docker restart 前后恢复；人工构造 managed
+   orphan 与 unknown name/label conflict，确认只告警且不会删除或迁移。
+3. 人工验收完成后再更新结论；Phase 7 Toolchain 继续保持未开始。
 
 ## Risks And Blockers
 
@@ -94,11 +106,26 @@ sticky/offline/reconnect 语义、跨主机 Gateway data path 与持久化。pos
 - `*.agent.localhost` 仅适合单机开发；跨主机验收已使用 `nip.io` wildcard 示例。生产必须配置
   受管内部 wildcard DNS，不能回退到 `/w/<id>/` base-path rewrite，也不能把 `nip.io` 当作生产依赖。
 - 当前 Runtime 镜像和真实 Docker 验证仅覆盖 arm64；amd64 仍需实际构建测试后才能声明支持。
+- Phase 5 及更早创建的合法 legacy Container 没有 `unless-stopped` policy；Phase 6 为保持兼容不会在
+  recovery 中自动修改它。此类 Runtime 在完整宿主机重启后可能被观察为 STOPPED/ERROR，需用户明确
+  start 或删除重建后才获得新 policy。
 - Phase 5 使用单 Control Plane 进程持有的 authenticated Worker channel 集合作为 connected
   eligibility；多 Control Plane 实例和共享 channel presence 不在 MVP 当前范围。
 
 ## Verification
 
+- 2026-09-13：Phase 6 工程门通过 `pnpm lint`、`pnpm typecheck`、`pnpm test` 与
+  `pnpm build:web`；Node.js 24.20.0 / pnpm 11.24.0 环境下默认测试 74 passed，5 个 PostgreSQL 与
+  4 个真实 Docker 条件测试按设计跳过。协议/Control Plane/Worker 单测覆盖 typed authoritative
+  inventory、desired/observed state、retryable fail-closed、unexpected stop、缺失/mismatch、orphan 与
+  unknown 分类、name/label 冲突不误判为空，以及中断 delete 只在完整缺失确认后补完成 metadata 删除。
+- 2026-09-13：连接本机 PostgreSQL 17.6 后 Control Plane 46/46 通过；另在新建的临时空数据库从零
+  执行全部 migration 并再次 46/46 通过，验证 startup offline、desired state、条件 recovery 与
+  interrupted-delete recovery，临时数据库已删除。
+- 2026-09-13：`TEST_DOCKER_RUNTIME=1 pnpm --filter @agent-runtime/worker test` 在 arm64 Docker Engine
+  29.7.2 上 20/20 通过；真实 Runtime 验证 `unless-stopped`、Docker Container restart、重建 Worker
+  Runtime 对象后的 inventory/recovery、`/workspace` 文件与 Pi Session JSONL 保留、legacy Container
+  管理、Gateway 和网络隔离。真实 Control Plane/Worker daemon/宿主机 restart 的人工验收仍待执行。
 - 2026-09-13：Phase 5 cleanup backward-compatibility regression 修复通过 `pnpm lint`、
   `pnpm typecheck`、`pnpm test` 和 `pnpm build:web`；默认测试 67 passed、8 个 PostgreSQL/真实
   Docker 条件测试按设计跳过。启用本机 PostgreSQL 后 Control Plane 42/42 通过，确认 destructive

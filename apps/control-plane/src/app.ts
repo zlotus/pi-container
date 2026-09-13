@@ -13,12 +13,15 @@ import type {
   Phase2Repository,
   Phase3Repository,
   Phase5Repository,
+  Phase6Repository,
   UserRecord,
   WorkerPlacementRecord,
   WorkspaceRecord,
 } from "@agent-runtime/database";
 import type {
   ControlToWorkerMessage,
+  WorkerRecoveryIssue,
+  WorkspaceObservation,
   WorkspaceResources,
 } from "@agent-runtime/protocol";
 import { parseWorkspaceBaseUrl, workspaceOrigin } from "@agent-runtime/gateway";
@@ -58,7 +61,7 @@ const INVALID_LOGIN_HASH =
   "scrypt$N=16384,r=8,p=1$MDEyMzQ1Njc4OWFiY2RlZg$91N6IibOCNGoJIaLSVpuW8f6Qg4lxDxxq0yCck7RYgnoDkMSGEYhoP9aqNjR08hwW6OkhlITEQoD_Hoq0k5wxQ";
 
 type Phase1Store = Pick<
-  Phase1Repository & Phase3Repository & Phase5Repository,
+  Phase1Repository & Phase3Repository & Phase5Repository & Phase6Repository,
   | "findUserByLogin"
   | "createSession"
   | "findActiveSession"
@@ -74,8 +77,9 @@ type Phase1Store = Pick<
   | "beginWorkspaceDelete"
   | "deleteConfirmedWorkspace"
   | "markWorkspaceRuntimeFailure"
-  | "listWorkerOfflineWorkspaces"
-  | "reconcileWorkerOfflineWorkspace"
+  | "beginWorkerReconciliation"
+  | "reconcileWorkspaceRecovery"
+  | "deleteRecoveredWorkspace"
 >;
 
 type WorkerAdminStore = Pick<
@@ -97,6 +101,9 @@ export interface ControlPlaneDependencies {
   workspaceResources: WorkspaceResources;
   workspaceBaseUrl: string;
   sessionExchanges: WorkspaceSessionExchange;
+  reportRecoveryIssue?: (
+    issue: WorkerRecoveryIssue & { workerId: string },
+  ) => void;
   now?: () => Date;
 }
 
@@ -104,6 +111,11 @@ interface AuthContext {
   rawToken: string;
   session: AuthenticatedSessionRecord;
 }
+
+type WorkspaceRuntimeCommand = Exclude<
+  ControlToWorkerMessage,
+  { type: "worker.reconcile" }
+>;
 
 function errorBody(code: string, message: string) {
   return { error: { code, message } };
@@ -209,7 +221,7 @@ export function buildControlPlane(
   const workspaceBaseUrl = parseWorkspaceBaseUrl(dependencies.workspaceBaseUrl);
   const workerChannel = new WorkerChannel(dependencies.workerCommandTimeoutMs);
   void app.register(websocket, {
-    options: { maxPayload: 256 * 1024, perMessageDeflate: false },
+    options: { maxPayload: 8 * 1024 * 1024, perMessageDeflate: false },
   });
   const cookieName = dependencies.secureCookies
     ? "__Host-platform-session"
@@ -218,12 +230,7 @@ export function buildControlPlane(
   type DispatchResult =
     | {
         ok: true;
-        workspace: NonNullable<
-          Extract<
-            Awaited<ReturnType<WorkerChannel["dispatch"]>>,
-            { type: "response.ok" }
-          >["payload"]["workspace"]
-        >;
+        workspace: WorkspaceObservation;
       }
     | {
         ok: false;
@@ -235,7 +242,7 @@ export function buildControlPlane(
 
   async function dispatchRuntimeCommand(
     workerId: string,
-    message: ControlToWorkerMessage,
+    message: WorkspaceRuntimeCommand,
   ): Promise<DispatchResult> {
     try {
       const response = await workerChannel.dispatch(workerId, message);
@@ -246,6 +253,15 @@ export function buildControlPlane(
           statusCode: response.payload.retryable ? 503 : 409,
           code: response.payload.code,
           message: response.payload.message,
+        };
+      }
+      if (response.payload.requestType === "worker.reconcile") {
+        return {
+          ok: false,
+          workerOffline: false,
+          statusCode: 502,
+          code: "INVALID_WORKER_RESPONSE",
+          message: "Worker returned an invalid Workspace result",
         };
       }
       const workspace = response.payload.workspace;
@@ -281,50 +297,98 @@ export function buildControlPlane(
 
   async function reconcileWorkerWorkspaces(workerId: string): Promise<void> {
     const workspaces =
-      await dependencies.store.listWorkerOfflineWorkspaces(workerId);
-    for (const workspace of workspaces) {
-      const result = await dispatchRuntimeCommand(workerId, {
+      await dependencies.store.beginWorkerReconciliation(workerId);
+    if (!workerChannel.isConnected(workerId)) return;
+    let response;
+    try {
+      response = await workerChannel.dispatch(workerId, {
         version: 1,
-        type: "workspace.inspect",
+        type: "worker.reconcile",
         requestId: randomUUID(),
-        payload: { workspaceId: workspace.id },
-      });
-      if (!result.ok) {
-        if (!result.workerOffline && result.statusCode === 409) {
-          await dependencies.store.reconcileWorkerOfflineWorkspace({
+        payload: {
+          assignments: workspaces.map((workspace) => ({
             workspaceId: workspace.id,
-            workerId,
             runtimeImage: workspace.runtimeImage,
-            state: "ERROR",
-          });
-        }
-        continue;
-      }
-      if (result.workspace.runtimeImage !== workspace.runtimeImage) {
-        await dependencies.store.reconcileWorkerOfflineWorkspace({
+            desiredState: workspace.desiredState,
+          })),
+        },
+      });
+    } catch {
+      return;
+    }
+    if (
+      response.type !== "response.ok" ||
+      response.payload.requestType !== "worker.reconcile"
+    ) {
+      return;
+    }
+
+    const report = response.payload.reconciliation;
+    const results = new Map(
+      report.workspaces.map((result) => [
+        result.status === "OBSERVED"
+          ? result.workspace.workspaceId
+          : result.workspaceId,
+        result,
+      ]),
+    );
+    if (
+      results.size !== workspaces.length ||
+      workspaces.some((workspace) => !results.has(workspace.id))
+    ) {
+      return;
+    }
+    for (const issue of report.issues) {
+      dependencies.reportRecoveryIssue?.({ workerId, ...issue });
+    }
+
+    for (const workspace of workspaces) {
+      if (!workerChannel.isConnected(workerId)) return;
+      const result = results.get(workspace.id);
+      if (result === undefined) return;
+      if (
+        result.status === "MISSING" &&
+        workspace.desiredState === "DELETED"
+      ) {
+        await dependencies.store.deleteRecoveredWorkspace({
           workspaceId: workspace.id,
+          userId: workspace.userId,
           workerId,
           runtimeImage: workspace.runtimeImage,
-          state: "ERROR",
         });
         continue;
       }
-      const reconciledState =
-        result.workspace.state === "RUNNING"
-          ? "RUNNING"
-          : result.workspace.state === "STOPPED"
-            ? "STOPPED"
-            : result.workspace.state === "CREATED"
-              ? "ERROR"
-              : null;
-      if (reconciledState === null || !workerChannel.isConnected(workerId)) {
-        continue;
+      if (result.status === "INVALID" && result.retryable) continue;
+
+      let state: "RUNNING" | "STOPPED" | "ERROR" = "ERROR";
+      if (
+        result.status === "OBSERVED" &&
+        result.workspace.runtimeImage === workspace.runtimeImage
+      ) {
+        if (
+          workspace.desiredState === "RUNNING" &&
+          result.workspace.state === "RUNNING"
+        ) {
+          state = "RUNNING";
+        } else if (
+          workspace.desiredState === "STOPPED" &&
+          result.workspace.state === "STOPPED"
+        ) {
+          state = "STOPPED";
+        } else if (
+          workspace.desiredState === "UNKNOWN" &&
+          (result.workspace.state === "RUNNING" ||
+            result.workspace.state === "STOPPED")
+        ) {
+          state = result.workspace.state;
+        }
       }
-      await dependencies.store.reconcileWorkerOfflineWorkspace({
+      await dependencies.store.reconcileWorkspaceRecovery({
         workspaceId: workspace.id,
         workerId,
         runtimeImage: workspace.runtimeImage,
-        state: reconciledState,
+        desiredState: workspace.desiredState,
+        state,
       });
     }
   }

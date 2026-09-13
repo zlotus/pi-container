@@ -1,9 +1,10 @@
-import { constants } from "node:fs";
+import { constants, type Dirent } from "node:fs";
 import {
   access,
   chown,
   lstat,
   mkdir,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -13,6 +14,9 @@ import { dirname, join, resolve } from "node:path";
 
 import {
   WorkspaceIdSchema,
+  type WorkerReconcileAssignment,
+  type WorkerReconciliationReport,
+  type WorkerRecoveryIssue,
   type WorkspaceResources,
   type WorkspaceState,
 } from "@agent-runtime/protocol";
@@ -26,6 +30,7 @@ const APP_LABEL = "agent-runtime-platform";
 const MANAGED_BY_LABEL = "worker";
 const PI_WEB_PORT = "30141/tcp";
 const PI_WEB_DEFAULT_CWD_ENV = "PI_WEB_DEFAULT_CWD=/workspace";
+const RESOURCE_NAME_PREFIX = "agent-runtime-";
 
 const MetadataSchema = z
   .object({
@@ -195,6 +200,7 @@ export class DockerWorkspaceRuntime {
               [PI_WEB_PORT]: [{ HostIp: "127.0.0.1", HostPort: "" }],
             },
             Privileged: false,
+            RestartPolicy: { Name: "unless-stopped", MaximumRetryCount: 0 },
             SecurityOpt: ["no-new-privileges:true"],
           },
         });
@@ -373,6 +379,180 @@ export class DockerWorkspaceRuntime {
     }
   }
 
+  async reconcile(
+    assignments: readonly WorkerReconcileAssignment[],
+  ): Promise<WorkerReconciliationReport> {
+    await this.#initialize();
+    let containers: Docker.ContainerInfo[];
+    let networks: Docker.NetworkInspectInfo[];
+    let directories: Dirent[];
+    try {
+      [containers, networks, directories] = await Promise.all([
+        this.#docker.listContainers({ all: true }),
+        this.#docker.listNetworks(),
+        readdir(this.#workspacesRoot, { withFileTypes: true }),
+      ]);
+    } catch (error) {
+      throw this.#engineError(error, "inventory managed Workspace resources");
+    }
+
+    const assignedIds = new Set(
+      assignments.map((assignment) => assignment.workspaceId),
+    );
+    const containerIds = new Set<string>();
+    const networkIds = new Set<string>();
+    const directoryIds = new Set<string>();
+    const issues: WorkerRecoveryIssue[] = [];
+
+    const addIssue = (issue: WorkerRecoveryIssue): void => {
+      if (issues.length >= 10_000) {
+        throw new WorkspaceRuntimeError(
+          "RUNTIME_ENGINE_ERROR",
+          "Local Runtime inventory exceeds the supported recovery limit",
+        );
+      }
+      issues.push(issue);
+    };
+
+    for (const container of containers) {
+      const name = container.Names.find((entry) =>
+        entry.startsWith(`/${RESOURCE_NAME_PREFIX}`),
+      );
+      const platformLabeled =
+        container.Labels.app === APP_LABEL &&
+        container.Labels.managed_by === MANAGED_BY_LABEL;
+      if (name === undefined && !platformLabeled) continue;
+      const nameWorkspaceId = this.#workspaceIdFromResourceName(name?.slice(1));
+      const labeledWorkspaceId = WorkspaceIdSchema.safeParse(
+        container.Labels.workspace_id,
+      );
+      const inferredWorkspaceId = this.#resourceWorkspaceId(
+        name?.slice(1),
+        container.Labels.workspace_id,
+      );
+      if (nameWorkspaceId !== null) containerIds.add(nameWorkspaceId);
+      if (labeledWorkspaceId.success) containerIds.add(labeledWorkspaceId.data);
+      const resourceIds = [
+        ...(nameWorkspaceId === null ? [] : [nameWorkspaceId]),
+        ...(labeledWorkspaceId.success ? [labeledWorkspaceId.data] : []),
+      ];
+      const workspaceId =
+        resourceIds.find((candidate) => !assignedIds.has(candidate)) ??
+        inferredWorkspaceId;
+      if (
+        resourceIds.length > 0 &&
+        resourceIds.every((candidate) => assignedIds.has(candidate))
+      ) {
+        continue;
+      }
+      addIssue({
+        classification: this.#resourceClassification(
+          container.Labels,
+          workspaceId,
+          name?.slice(1),
+        ),
+        resource: "CONTAINER",
+        ...(workspaceId === null ? {} : { workspaceId }),
+        code: "UNASSIGNED_LOCAL_RESOURCE",
+      });
+    }
+
+    for (const network of networks) {
+      const inNamespace = network.Name.startsWith(RESOURCE_NAME_PREFIX);
+      const labels = network.Labels ?? {};
+      const platformLabeled =
+        labels.app === APP_LABEL && labels.managed_by === MANAGED_BY_LABEL;
+      if (!inNamespace && !platformLabeled) continue;
+      const nameWorkspaceId = this.#workspaceIdFromResourceName(network.Name);
+      const labeledWorkspaceId = WorkspaceIdSchema.safeParse(
+        labels.workspace_id,
+      );
+      const inferredWorkspaceId = this.#resourceWorkspaceId(
+        network.Name,
+        labels.workspace_id,
+      );
+      if (nameWorkspaceId !== null) networkIds.add(nameWorkspaceId);
+      if (labeledWorkspaceId.success) networkIds.add(labeledWorkspaceId.data);
+      const resourceIds = [
+        ...(nameWorkspaceId === null ? [] : [nameWorkspaceId]),
+        ...(labeledWorkspaceId.success ? [labeledWorkspaceId.data] : []),
+      ];
+      const workspaceId =
+        resourceIds.find((candidate) => !assignedIds.has(candidate)) ??
+        inferredWorkspaceId;
+      if (
+        resourceIds.length > 0 &&
+        resourceIds.every((candidate) => assignedIds.has(candidate))
+      ) {
+        continue;
+      }
+      addIssue({
+        classification: this.#resourceClassification(
+          labels,
+          workspaceId,
+          network.Name,
+        ),
+        resource: "NETWORK",
+        ...(workspaceId === null ? {} : { workspaceId }),
+        code: "UNASSIGNED_LOCAL_RESOURCE",
+      });
+    }
+
+    for (const directory of directories) {
+      const parsedId = WorkspaceIdSchema.safeParse(directory.name);
+      const workspaceId = parsedId.success ? parsedId.data : null;
+      if (workspaceId !== null) directoryIds.add(workspaceId);
+      if (workspaceId !== null && assignedIds.has(workspaceId)) continue;
+      let classification: WorkerRecoveryIssue["classification"] =
+        "UNKNOWN_RESOURCE";
+      if (workspaceId !== null && directory.isDirectory()) {
+        classification = await this.#directoryClassification(workspaceId);
+      }
+      addIssue({
+        classification,
+        resource: "DIRECTORY",
+        ...(workspaceId === null ? {} : { workspaceId }),
+        code: directory.isDirectory()
+          ? "UNASSIGNED_LOCAL_RESOURCE"
+          : "INVALID_MANAGED_ROOT_ENTRY",
+      });
+    }
+
+    const workspaces = [] as WorkerReconciliationReport["workspaces"];
+    for (const assignment of assignments) {
+      const hasLocalResource =
+        containerIds.has(assignment.workspaceId) ||
+        networkIds.has(assignment.workspaceId) ||
+        directoryIds.has(assignment.workspaceId);
+      if (!hasLocalResource) {
+        workspaces.push({
+          status: "MISSING",
+          workspaceId: assignment.workspaceId,
+        });
+        continue;
+      }
+      try {
+        workspaces.push({
+          status: "OBSERVED",
+          workspace: await this.#inspectForRecovery(assignment),
+        });
+      } catch (error) {
+        const runtimeError =
+          error instanceof WorkspaceRuntimeError
+            ? error
+            : this.#engineError(error, "inspect a managed Workspace Runtime");
+        workspaces.push({
+          status: "INVALID",
+          workspaceId: assignment.workspaceId,
+          code: runtimeError.code,
+          retryable: runtimeError.retryable,
+        });
+      }
+    }
+
+    return { workspaces, issues, observedAt: new Date().toISOString() };
+  }
+
   async gatewayTarget(workspaceId: string): Promise<URL> {
     const paths = await this.#requireWorkspacePaths(workspaceId);
     const container = await this.#requireManagedContainer(workspaceId);
@@ -547,22 +727,7 @@ export class DockerWorkspaceRuntime {
     const existing = await this.#findNamedNetwork(workspaceId);
     if (existing !== null) {
       const inspection = await existing.inspect();
-      if (
-        inspection.Name !== name ||
-        inspection.Driver !== "bridge" ||
-        inspection.Internal ||
-        inspection.Attachable ||
-        inspection.Options?.["com.docker.network.bridge.enable_icc"] !== "false" ||
-        inspection.Options?.[
-          "com.docker.network.bridge.host_binding_ipv4"
-        ] !== "127.0.0.1" ||
-        !labelsMatch(inspection.Labels, managedLabels(this.#workerId, workspaceId))
-      ) {
-        throw new WorkspaceRuntimeError(
-          "UNMANAGED_NETWORK_CONFLICT",
-          "Workspace network conflicts with an unmanaged Docker network",
-        );
-      }
+      this.#verifyManagedNetwork(inspection, workspaceId, name);
       return;
     }
     try {
@@ -653,7 +818,8 @@ export class DockerWorkspaceRuntime {
     const defaultCwdEntries = this.#defaultCwdEntries(inspection);
     if (
       defaultCwdEntries.length !== 1 ||
-      defaultCwdEntries[0] !== PI_WEB_DEFAULT_CWD_ENV
+      defaultCwdEntries[0] !== PI_WEB_DEFAULT_CWD_ENV ||
+      inspection.HostConfig.RestartPolicy?.Name !== "unless-stopped"
     ) {
       throw new WorkspaceRuntimeError(
         "RUNTIME_CONFIGURATION_MISMATCH",
@@ -669,6 +835,158 @@ export class DockerWorkspaceRuntime {
   ): void {
     this.#verifyLegacyCompatibleDefaultCwd(inspection);
     this.#verifyResourceConfiguration(inspection, resources);
+  }
+
+  async #inspectForRecovery(
+    assignment: WorkerReconcileAssignment,
+  ): Promise<WorkspaceRuntimeObservation> {
+    this.#assertRuntimeImage(assignment.runtimeImage);
+    const paths = await this.#requireWorkspacePaths(assignment.workspaceId);
+    const container = await this.#requireManagedContainer(assignment.workspaceId);
+    const networkName = this.#networkName(assignment.workspaceId);
+    const network = await this.#findNamedNetwork(assignment.workspaceId);
+    if (network === null) {
+      throw new WorkspaceRuntimeError(
+        "UNMANAGED_NETWORK_CONFLICT",
+        "Managed Workspace network is missing",
+      );
+    }
+    this.#verifyManagedNetwork(
+      await network.inspect(),
+      assignment.workspaceId,
+      networkName,
+    );
+    let inspection = await container.inspect();
+    this.#verifyManagedContainerIdentity(
+      inspection,
+      assignment.workspaceId,
+      paths,
+      networkName,
+    );
+    this.#verifyLegacyRuntimeConfiguration(inspection, this.#workspaceResources);
+    if (inspection.State.Restarting || inspection.State.Paused || inspection.State.Dead) {
+      throw new WorkspaceRuntimeError(
+        "RUNTIME_NOT_READY",
+        "Workspace Runtime is not in a stable running or stopped state",
+        true,
+      );
+    }
+    if (!inspection.State.Running) {
+      return this.#observation(assignment.workspaceId, "STOPPED");
+    }
+
+    const deadline = Date.now() + this.#startTimeoutMs;
+    while (Date.now() < deadline) {
+      inspection = await container.inspect();
+      if (!inspection.State.Running) {
+        throw new WorkspaceRuntimeError(
+          "RUNTIME_START_FAILED",
+          "Workspace Runtime exited during recovery inspection",
+        );
+      }
+      const binding = inspection.NetworkSettings.Ports[PI_WEB_PORT]?.[0];
+      if (
+        binding?.HostIp === "127.0.0.1" &&
+        binding.HostPort !== undefined &&
+        (await this.#readinessProbe(binding.HostPort))
+      ) {
+        return this.#observation(assignment.workspaceId, "RUNNING");
+      }
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 250));
+    }
+    throw new WorkspaceRuntimeError(
+      "RUNTIME_NOT_READY",
+      "pi-web did not become ready during recovery inspection",
+      true,
+    );
+  }
+
+  #verifyManagedNetwork(
+    inspection: Docker.NetworkInspectInfo,
+    workspaceId: string,
+    name: string,
+  ): void {
+    if (
+      inspection.Name !== name ||
+      inspection.Driver !== "bridge" ||
+      inspection.Internal ||
+      inspection.Attachable ||
+      inspection.Options?.["com.docker.network.bridge.enable_icc"] !== "false" ||
+      inspection.Options?.["com.docker.network.bridge.host_binding_ipv4"] !==
+        "127.0.0.1" ||
+      !labelsMatch(inspection.Labels, managedLabels(this.#workerId, workspaceId))
+    ) {
+      throw new WorkspaceRuntimeError(
+        "UNMANAGED_NETWORK_CONFLICT",
+        "Workspace network conflicts with an unmanaged Docker network",
+      );
+    }
+  }
+
+  #resourceWorkspaceId(
+    resourceName: string | undefined,
+    labelWorkspaceId: string | undefined,
+  ): string | null {
+    const label = WorkspaceIdSchema.safeParse(labelWorkspaceId);
+    if (label.success) return label.data;
+    return this.#workspaceIdFromResourceName(resourceName);
+  }
+
+  #workspaceIdFromResourceName(
+    resourceName: string | undefined,
+  ): string | null {
+    if (
+      resourceName === undefined ||
+      !resourceName.startsWith(RESOURCE_NAME_PREFIX)
+    ) {
+      return null;
+    }
+    const suffix = WorkspaceIdSchema.safeParse(
+      resourceName.slice(RESOURCE_NAME_PREFIX.length),
+    );
+    return suffix.success ? suffix.data : null;
+  }
+
+  #resourceClassification(
+    labels: Record<string, string>,
+    workspaceId: string | null,
+    resourceName: string | undefined,
+  ): WorkerRecoveryIssue["classification"] {
+    if (
+      labels.app === APP_LABEL &&
+      labels.managed_by === MANAGED_BY_LABEL &&
+      labels.worker_id !== undefined &&
+      labels.worker_id !== this.#workerId
+    ) {
+      return "FOREIGN_MANAGED_RESOURCE";
+    }
+    if (
+      workspaceId !== null &&
+      resourceName === `${RESOURCE_NAME_PREFIX}${workspaceId}` &&
+      labelsMatch(labels, managedLabels(this.#workerId, workspaceId))
+    ) {
+      return "MANAGED_ORPHAN";
+    }
+    return "UNKNOWN_RESOURCE";
+  }
+
+  async #directoryClassification(
+    workspaceId: string,
+  ): Promise<WorkerRecoveryIssue["classification"]> {
+    const paths = await this.#paths(workspaceId);
+    try {
+      const parsed = MetadataSchema.safeParse(
+        JSON.parse(await readFile(paths.metadataFile, "utf8")),
+      );
+      if (!parsed.success || parsed.data.workspaceId !== workspaceId) {
+        return "UNKNOWN_RESOURCE";
+      }
+      return parsed.data.workerId === this.#workerId
+        ? "MANAGED_ORPHAN"
+        : "FOREIGN_MANAGED_RESOURCE";
+    } catch {
+      return "UNKNOWN_RESOURCE";
+    }
   }
 
   #verifyResourceConfiguration(

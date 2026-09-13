@@ -1,7 +1,7 @@
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase5Repository,
+  createPhase6Repository,
   migrateDatabase,
 } from "@agent-runtime/database";
 import { parseWorkspaceBaseUrl } from "@agent-runtime/gateway";
@@ -105,7 +105,8 @@ const database = createDatabaseClient(config.DATABASE_URL);
 
 await migrateDatabase(database);
 
-const repository = createPhase5Repository(database, selectWorker);
+const repository = createPhase6Repository(database, selectWorker);
+await repository.markAllWorkersOfflineForRecovery(new Date());
 const sessionExchanges = new WorkspaceSessionExchange(
   config.WORKSPACE_SESSION_EXCHANGE_TTL_MS,
 );
@@ -127,6 +128,9 @@ const app = buildControlPlane({
   },
   workspaceBaseUrl: config.WORKSPACE_BASE_URL,
   sessionExchanges,
+  reportRecoveryIssue: (issue) => {
+    console.warn("Worker recovery issue", JSON.stringify(issue));
+  },
 });
 const gateway = buildWorkspaceGateway({
   store: repository,

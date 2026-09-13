@@ -130,6 +130,7 @@ export function createPhase3Repository(database: DatabaseClient) {
         set
           worker_id = coalesce(worker_id, ${input.workerId}),
           state = 'STARTING',
+          desired_state = 'RUNNING',
           updated_at = now(),
           last_activity_at = now()
         where id = ${input.workspaceId}
@@ -165,7 +166,11 @@ export function createPhase3Repository(database: DatabaseClient) {
     }): Promise<boolean> {
       const rows = await database<{ id: string }[]>`
         update workspaces
-        set state = 'STOPPING', updated_at = now(), last_activity_at = now()
+        set
+          state = 'STOPPING',
+          desired_state = 'STOPPED',
+          updated_at = now(),
+          last_activity_at = now()
         where id = ${input.workspaceId}
           and user_id = ${input.userId}
           and worker_id = ${input.workerId}
@@ -197,7 +202,11 @@ export function createPhase3Repository(database: DatabaseClient) {
     }): Promise<boolean> {
       const rows = await database<{ id: string }[]>`
         update workspaces
-        set state = 'DELETING', updated_at = now(), last_activity_at = now()
+        set
+          state = 'DELETING',
+          desired_state = 'DELETED',
+          updated_at = now(),
+          last_activity_at = now()
         where id = ${input.workspaceId}
           and user_id = ${input.userId}
           and worker_id = ${input.workerId}

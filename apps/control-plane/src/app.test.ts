@@ -8,6 +8,10 @@ import type {
   WorkerRecord,
   WorkspaceRecord,
 } from "@agent-runtime/database";
+import type {
+  WorkerToControlMessage,
+  WorkspaceDesiredState,
+} from "@agent-runtime/protocol";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -30,6 +34,7 @@ interface TestControlPlaneDependencies extends ControlPlaneDependencies {
     workspaces: WorkspaceRecord[];
     workers: WorkerRecord[];
     markWorkersOffline(cutoff: Date): number;
+    setDesiredState(workspaceId: string, state: WorkspaceDesiredState): void;
   };
 }
 
@@ -69,6 +74,18 @@ async function createTestDependencies(
   const workspaces: WorkspaceRecord[] = initialWorkspaces.map((workspace) => ({
     ...workspace,
   }));
+  const desiredStates = new Map<string, WorkspaceDesiredState>(
+    workspaces.map((workspace) => [
+      workspace.id,
+      workspace.state === "RUNNING" || workspace.state === "STARTING"
+        ? "RUNNING"
+        : workspace.state === "DELETING"
+          ? "DELETED"
+          : workspace.state === "ERROR" || workspace.state === "WORKER_OFFLINE"
+            ? "UNKNOWN"
+          : "STOPPED",
+    ]),
+  );
   const workers: WorkerRecord[] = [WORKER_1_TOKEN, WORKER_2_TOKEN].map(
     (_token, index) => ({
       id: `worker-0${index + 1}`,
@@ -123,6 +140,9 @@ async function createTestDependencies(
           }
         }
         return offlineWorkerIds.size;
+      },
+      setDesiredState(workspaceId, state) {
+        desiredStates.set(workspaceId, state);
       },
     },
     checkDatabase: vi.fn<() => Promise<void>>(),
@@ -232,23 +252,49 @@ async function createTestDependencies(
       async listWorkspaces(userId) {
         return workspaces.filter((workspace) => workspace.userId === userId);
       },
-      async listWorkerOfflineWorkspaces(workerId) {
-        return workspaces.filter(
-          (workspace) =>
-            workspace.workerId === workerId &&
-            workspace.state === "WORKER_OFFLINE",
-        );
+      async beginWorkerReconciliation(workerId) {
+        return workspaces
+          .filter((workspace) => workspace.workerId === workerId)
+          .map((workspace) => {
+            workspace.state = "WORKER_OFFLINE";
+            return {
+              ...workspace,
+              desiredState: desiredStates.get(workspace.id) ?? "STOPPED",
+            };
+          });
       },
-      async reconcileWorkerOfflineWorkspace(input) {
+      async reconcileWorkspaceRecovery(input) {
         const workspace = workspaces.find(
           (candidate) =>
             candidate.id === input.workspaceId &&
             candidate.workerId === input.workerId &&
             candidate.runtimeImage === input.runtimeImage &&
+            desiredStates.get(candidate.id) === input.desiredState &&
             candidate.state === "WORKER_OFFLINE",
         );
         if (workspace === undefined) return false;
         workspace.state = input.state;
+        if (
+          input.desiredState === "UNKNOWN" &&
+          (input.state === "RUNNING" || input.state === "STOPPED")
+        ) {
+          desiredStates.set(workspace.id, input.state);
+        }
+        return true;
+      },
+      async deleteRecoveredWorkspace(input) {
+        const index = workspaces.findIndex(
+          (candidate) =>
+            candidate.id === input.workspaceId &&
+            candidate.userId === input.userId &&
+            candidate.workerId === input.workerId &&
+            candidate.runtimeImage === input.runtimeImage &&
+            desiredStates.get(candidate.id) === "DELETED" &&
+            candidate.state === "WORKER_OFFLINE",
+        );
+        if (index < 0) return false;
+        desiredStates.delete(input.workspaceId);
+        workspaces.splice(index, 1);
         return true;
       },
       async createWorkspace(input) {
@@ -264,6 +310,7 @@ async function createTestDependencies(
           lastActivityAt: NOW,
         };
         workspaces.push(workspace);
+        desiredStates.set(workspace.id, "STOPPED");
         return workspace;
       },
       async findOwnedWorkspace(id, userId) {
@@ -282,6 +329,7 @@ async function createTestDependencies(
             workspace.state === "CREATED",
         );
         if (index < 0) return false;
+        desiredStates.delete(id);
         workspaces.splice(index, 1);
         return true;
       },
@@ -324,6 +372,7 @@ async function createTestDependencies(
           workspace.workerId = selected.id;
         }
         workspace.state = "STARTING";
+        desiredStates.set(workspace.id, "RUNNING");
         return { outcome: "STARTING", workspace, sticky };
       },
       async finishWorkspaceStart(input) {
@@ -347,6 +396,7 @@ async function createTestDependencies(
         );
         if (workspace === undefined) return false;
         workspace.state = "STOPPING";
+        desiredStates.set(workspace.id, "STOPPED");
         return true;
       },
       async finishWorkspaceStop(input) {
@@ -370,6 +420,7 @@ async function createTestDependencies(
         );
         if (workspace === undefined) return false;
         workspace.state = "DELETING";
+        desiredStates.set(workspace.id, "DELETED");
         return true;
       },
       async deleteConfirmedWorkspace(input) {
@@ -381,6 +432,7 @@ async function createTestDependencies(
             candidate.state === "DELETING",
         );
         if (index < 0) return false;
+        desiredStates.delete(input.workspaceId);
         workspaces.splice(index, 1);
         return true;
       },
@@ -653,12 +705,17 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       const command = JSON.parse(data.toString()) as {
         requestId: string;
         type:
+          | "worker.reconcile"
           | "workspace.ensure"
           | "workspace.start"
           | "workspace.stop"
           | "workspace.delete";
-        payload: { workspaceId: string };
+        payload: { workspaceId: string; assignments?: unknown[] };
       };
+      if (command.type === "worker.reconcile") {
+        worker.send(JSON.stringify(emptyReconciliation(command.requestId)));
+        return;
+      }
       commands.push(command.type);
       const state =
         command.type === "workspace.start"
@@ -827,9 +884,13 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
     worker1.on("message", (data) => {
       const command = JSON.parse(data.toString()) as {
         requestId: string;
-        type: "workspace.ensure" | "workspace.start";
+        type: "worker.reconcile" | "workspace.ensure" | "workspace.start";
         payload: { workspaceId: string };
       };
+      if (command.type === "worker.reconcile") {
+        worker1.send(JSON.stringify(emptyReconciliation(command.requestId)));
+        return;
+      }
       worker1Commands.push(command.type);
       worker1.send(
         JSON.stringify({
@@ -851,9 +912,13 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
     worker2.on("message", (data) => {
       const command = JSON.parse(data.toString()) as {
         requestId: string;
-        type: "workspace.ensure" | "workspace.start";
+        type: "worker.reconcile" | "workspace.ensure" | "workspace.start";
         payload: { workspaceId: string };
       };
+      if (command.type === "worker.reconcile") {
+        worker2.send(JSON.stringify(emptyReconciliation(command.requestId)));
+        return;
+      }
       worker2Commands.push(command.type);
       worker2.send(
         JSON.stringify({
@@ -936,8 +1001,8 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
   });
 });
 
-describe("Worker reconnect reconciliation", () => {
-  it("keeps an offline Workspace closed until inspect confirms its Runtime is still running", async () => {
+describe("Phase 6 Worker recovery reconciliation", () => {
+  it("keeps an assigned Workspace closed until full inventory confirms its Runtime", async () => {
     const dependencies = await createTestDependencies();
     const app = buildControlPlane(dependencies);
     await app.ready();
@@ -947,9 +1012,13 @@ describe("Worker reconnect reconciliation", () => {
     firstWorker.on("message", (data) => {
       const command = JSON.parse(data.toString()) as {
         requestId: string;
-        type: "workspace.ensure" | "workspace.start";
+        type: "worker.reconcile" | "workspace.ensure" | "workspace.start";
         payload: { workspaceId: string };
       };
+      if (command.type === "worker.reconcile") {
+        firstWorker.send(JSON.stringify(emptyReconciliation(command.requestId)));
+        return;
+      }
       firstWorker.send(
         JSON.stringify({
           version: 1,
@@ -976,8 +1045,15 @@ describe("Worker reconnect reconciliation", () => {
     });
     const otherWorkerCommands: string[] = [];
     otherWorker.on("message", (data) => {
-      const command = JSON.parse(data.toString()) as { type: string };
-      otherWorkerCommands.push(command.type);
+      const command = JSON.parse(data.toString()) as {
+        requestId: string;
+        type: string;
+      };
+      if (command.type === "worker.reconcile") {
+        otherWorker.send(JSON.stringify(emptyReconciliation(command.requestId)));
+      } else {
+        otherWorkerCommands.push(command.type);
+      }
     });
     otherWorker.send(JSON.stringify(workerHello("worker-02")));
     await vi.waitFor(() => {
@@ -1023,26 +1099,32 @@ describe("Worker reconnect reconciliation", () => {
     const reconnectedWorker = await app.injectWS("/api/workers/connect", {
       headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
     });
-    let inspectCommand:
-      | { requestId: string; type: "workspace.inspect"; workspaceId: string }
+    let reconcileCommand:
+      | {
+          requestId: string;
+          assignments: Array<{ workspaceId: string; desiredState: string }>;
+        }
       | undefined;
     const reconnectCommands: string[] = [];
     reconnectedWorker.on("message", (data) => {
       const command = JSON.parse(data.toString()) as {
         requestId: string;
-        type: "workspace.inspect";
-        payload: { workspaceId: string };
+        type: "worker.reconcile";
+        payload: {
+          assignments: Array<{ workspaceId: string; desiredState: string }>;
+        };
       };
       reconnectCommands.push(command.type);
-      inspectCommand = {
+      reconcileCommand = {
         requestId: command.requestId,
-        type: command.type,
-        workspaceId: command.payload.workspaceId,
+        assignments: command.payload.assignments,
       };
     });
     reconnectedWorker.send(JSON.stringify(workerHello("worker-01")));
     await vi.waitFor(() => {
-      expect(inspectCommand?.workspaceId).toBe(workspaceId);
+      expect(reconcileCommand?.assignments).toEqual([
+        expect.objectContaining({ workspaceId, desiredState: "RUNNING" }),
+      ]);
     });
 
     const whileReconciling = await app.inject({
@@ -1058,18 +1140,29 @@ describe("Worker reconnect reconciliation", () => {
     expect(whileReconciling.statusCode).toBe(409);
     expect(dependencies.testState.workspaces[0]?.state).toBe("WORKER_OFFLINE");
 
-    if (inspectCommand === undefined) throw new Error("inspect command missing");
+    if (reconcileCommand === undefined) {
+      throw new Error("reconcile command missing");
+    }
     reconnectedWorker.send(
       JSON.stringify({
         version: 1,
         type: "response.ok",
-        requestId: inspectCommand.requestId,
+        requestId: reconcileCommand.requestId,
         payload: {
-          requestType: "workspace.inspect",
-          workspace: {
-            workspaceId,
-            state: "RUNNING",
-            runtimeImage: "agent-runtime:test-unassigned",
+          requestType: "worker.reconcile",
+          reconciliation: {
+            workspaces: [
+              {
+                status: "OBSERVED",
+                workspace: {
+                  workspaceId,
+                  state: "RUNNING",
+                  runtimeImage: "agent-runtime:test-unassigned",
+                  observedAt: NOW.toISOString(),
+                },
+              },
+            ],
+            issues: [],
             observedAt: NOW.toISOString(),
           },
         },
@@ -1089,7 +1182,7 @@ describe("Worker reconnect reconciliation", () => {
         { id: workspaceId, workerId: "worker-01", state: "RUNNING" },
       ],
     });
-    expect(reconnectCommands).toEqual(["workspace.inspect"]);
+    expect(reconnectCommands).toEqual(["worker.reconcile"]);
     expect(otherWorkerCommands).toEqual([]);
 
     reconnectedWorker.close();
@@ -1098,11 +1191,12 @@ describe("Worker reconnect reconciliation", () => {
   });
 
   it.each([
-    ["STOPPED", "STOPPED"],
-    ["CREATED", "ERROR"],
+    ["STOPPED", "STOPPED", "STOPPED"],
+    ["RUNNING", "STOPPED", "ERROR"],
+    ["UNKNOWN", "RUNNING", "RUNNING"],
   ] as const)(
-    "maps a confirmed %s Runtime without ever reporting it RUNNING",
-    async (observedState, expectedState) => {
+    "reconciles desired %s with observed %s to %s",
+    async (desiredState, observedState, expectedState) => {
       const workspaceId = randomUUID();
       const dependencies = await createTestDependencies([
         {
@@ -1117,6 +1211,7 @@ describe("Worker reconnect reconciliation", () => {
           lastActivityAt: NOW,
         },
       ]);
+      dependencies.testState.setDesiredState(workspaceId, desiredState);
       const app = buildControlPlane(dependencies);
       await app.ready();
       const worker = await app.injectWS("/api/workers/connect", {
@@ -1125,7 +1220,7 @@ describe("Worker reconnect reconciliation", () => {
       worker.on("message", (data) => {
         const command = JSON.parse(data.toString()) as {
           requestId: string;
-          type: "workspace.inspect";
+          type: "worker.reconcile";
         };
         worker.send(
           JSON.stringify({
@@ -1133,11 +1228,20 @@ describe("Worker reconnect reconciliation", () => {
             type: "response.ok",
             requestId: command.requestId,
             payload: {
-              requestType: command.type,
-              workspace: {
-                workspaceId,
-                state: observedState,
-                runtimeImage: "agent-runtime:test-unassigned",
+              requestType: "worker.reconcile",
+              reconciliation: {
+                workspaces: [
+                  {
+                    status: "OBSERVED",
+                    workspace: {
+                      workspaceId,
+                      state: observedState,
+                      runtimeImage: "agent-runtime:test-unassigned",
+                      observedAt: NOW.toISOString(),
+                    },
+                  },
+                ],
+                issues: [],
                 observedAt: NOW.toISOString(),
               },
             },
@@ -1149,7 +1253,6 @@ describe("Worker reconnect reconciliation", () => {
       await vi.waitFor(() => {
         expect(dependencies.testState.workspaces[0]?.state).toBe(expectedState);
       });
-      expect(dependencies.testState.workspaces[0]?.state).not.toBe("RUNNING");
 
       worker.close();
       await app.close();
@@ -1168,7 +1271,7 @@ describe("Worker reconnect reconciliation", () => {
       expectedState: "ERROR",
     },
   ] as const)(
-    "maps inspect error $code to $expectedState",
+    "maps inventory error $code to $expectedState",
     async ({ code, retryable, expectedState }) => {
       const workspaceId = randomUUID();
       const dependencies = await createTestDependencies([
@@ -1192,20 +1295,27 @@ describe("Worker reconnect reconciliation", () => {
       worker.on("message", (data) => {
         const command = JSON.parse(data.toString()) as {
           requestId: string;
-          type: "workspace.inspect";
+          type: "worker.reconcile";
         };
         worker.send(
           JSON.stringify({
             version: 1,
-            type: "response.error",
+            type: "response.ok",
             requestId: command.requestId,
             payload: {
-              requestType: command.type,
-              code,
-              message: retryable
-                ? "Docker is temporarily unavailable"
-                : "Managed metadata does not match",
-              retryable,
+              requestType: "worker.reconcile",
+              reconciliation: {
+                workspaces: [
+                  {
+                    status: "INVALID",
+                    workspaceId,
+                    code,
+                    retryable,
+                  },
+                ],
+                issues: [],
+                observedAt: NOW.toISOString(),
+              },
             },
           }),
         );
@@ -1219,6 +1329,95 @@ describe("Worker reconnect reconciliation", () => {
       await app.close();
     },
   );
+
+  it("reports managed orphans without deleting or reassigning them", async () => {
+    const issues: Array<{
+      classification: string;
+      workspaceId?: string | undefined;
+    }> = [];
+    const orphanId = randomUUID();
+    const dependencies = await createTestDependencies();
+    dependencies.reportRecoveryIssue = (issue) => issues.push(issue);
+    const app = buildControlPlane(dependencies);
+    await app.ready();
+    const worker = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    worker.on("message", (data) => {
+      const command = JSON.parse(data.toString()) as { requestId: string };
+      const response = emptyReconciliation(command.requestId);
+      response.payload.reconciliation.issues.push({
+        classification: "MANAGED_ORPHAN",
+        resource: "DIRECTORY",
+        workspaceId: orphanId,
+        code: "UNASSIGNED_LOCAL_RESOURCE",
+      });
+      worker.send(JSON.stringify(response));
+    });
+    worker.send(JSON.stringify(workerHello("worker-01")));
+
+    await vi.waitFor(() => {
+      expect(issues).toEqual([
+        expect.objectContaining({
+          classification: "MANAGED_ORPHAN",
+          workspaceId: orphanId,
+          workerId: "worker-01",
+        }),
+      ]);
+    });
+    expect(dependencies.testState.workspaces).toEqual([]);
+
+    worker.close();
+    await app.close();
+  });
+
+  it("finalizes an interrupted delete only after inventory confirms every local resource is absent", async () => {
+    const workspaceId = randomUUID();
+    const dependencies = await createTestDependencies([
+      {
+        id: workspaceId,
+        userId: USER_A_ID,
+        name: "recover-delete",
+        workerId: "worker-01",
+        state: "DELETING",
+        runtimeImage: "agent-runtime:test-unassigned",
+        createdAt: NOW,
+        updatedAt: NOW,
+        lastActivityAt: NOW,
+      },
+    ]);
+    const app = buildControlPlane(dependencies);
+    await app.ready();
+    const worker = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    worker.on("message", (data) => {
+      const command = JSON.parse(data.toString()) as { requestId: string };
+      worker.send(
+        JSON.stringify({
+          version: 1,
+          type: "response.ok",
+          requestId: command.requestId,
+          payload: {
+            requestType: "worker.reconcile",
+            reconciliation: {
+              workspaces: [{ status: "MISSING", workspaceId }],
+              issues: [],
+              observedAt: NOW.toISOString(),
+            },
+          },
+        }),
+      );
+    });
+    worker.send(JSON.stringify(workerHello("worker-01")));
+
+    await vi.waitFor(() => {
+      expect(dependencies.testState.workspaces).toEqual([]);
+    });
+
+    worker.close();
+    await app.close();
+  });
 });
 
 function workerHello(workerId: string) {
@@ -1245,6 +1444,33 @@ function workerHello(workerId: string) {
       systemResources: {
         logicalCpuCount: 8,
         memoryBytes: 16 * 1024 ** 3,
+      },
+    },
+  };
+}
+
+type WorkerOkResponse = Extract<
+  WorkerToControlMessage,
+  { type: "response.ok" }
+>;
+type ReconcileOkResponse = Omit<WorkerOkResponse, "payload"> & {
+  payload: Extract<
+    WorkerOkResponse["payload"],
+    { requestType: "worker.reconcile" }
+  >;
+};
+
+function emptyReconciliation(requestId: string): ReconcileOkResponse {
+  return {
+    version: 1,
+    type: "response.ok",
+    requestId,
+    payload: {
+      requestType: "worker.reconcile",
+      reconciliation: {
+        workspaces: [],
+        issues: [],
+        observedAt: NOW.toISOString(),
       },
     },
   };

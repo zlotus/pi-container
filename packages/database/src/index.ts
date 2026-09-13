@@ -59,3 +59,8 @@ export {
   type WorkerSelector,
   type WorkspaceSchedulingRequirements,
 } from "./phase5.js";
+export {
+  createPhase6Repository,
+  type Phase6Repository,
+  type WorkspaceRecoveryRecord,
+} from "./phase6.js";

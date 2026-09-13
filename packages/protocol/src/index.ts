@@ -30,6 +30,13 @@ export const WorkspaceStateSchema = z.enum([
   "WORKER_OFFLINE",
 ]);
 
+export const WorkspaceDesiredStateSchema = z.enum([
+  "RUNNING",
+  "STOPPED",
+  "DELETED",
+  "UNKNOWN",
+]);
+
 export const WorkerCapabilitiesSchema = z
   .object({
     browser: z.boolean(),
@@ -109,6 +116,107 @@ export const WorkspaceCommandTypeSchema = z.enum([
   "workspace.inspect",
 ]);
 
+export const WorkspaceObservationSchema = z
+  .object({
+    workspaceId: WorkspaceIdSchema,
+    state: WorkspaceStateSchema,
+    runtimeImage: z.string().min(1).max(255),
+    observedAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+export const WorkerReconcileAssignmentSchema = z
+  .object({
+    workspaceId: WorkspaceIdSchema,
+    runtimeImage: z.string().min(1).max(255),
+    desiredState: WorkspaceDesiredStateSchema,
+  })
+  .strict();
+
+const WorkerReconcileObservedWorkspaceSchema = z
+  .object({
+    status: z.literal("OBSERVED"),
+    workspace: WorkspaceObservationSchema,
+  })
+  .strict();
+
+const WorkerReconcileMissingWorkspaceSchema = z
+  .object({
+    status: z.literal("MISSING"),
+    workspaceId: WorkspaceIdSchema,
+  })
+  .strict();
+
+const WorkerReconcileInvalidWorkspaceSchema = z
+  .object({
+    status: z.literal("INVALID"),
+    workspaceId: WorkspaceIdSchema,
+    code: z.string().min(1).max(64).regex(/^[A-Z][A-Z0-9_]*$/),
+    retryable: z.boolean(),
+  })
+  .strict();
+
+export const WorkerReconcileWorkspaceResultSchema = z.discriminatedUnion(
+  "status",
+  [
+    WorkerReconcileObservedWorkspaceSchema,
+    WorkerReconcileMissingWorkspaceSchema,
+    WorkerReconcileInvalidWorkspaceSchema,
+  ],
+);
+
+export const WorkerRecoveryIssueSchema = z
+  .object({
+    classification: z.enum([
+      "MANAGED_ORPHAN",
+      "FOREIGN_MANAGED_RESOURCE",
+      "UNKNOWN_RESOURCE",
+    ]),
+    resource: z.enum(["CONTAINER", "DIRECTORY", "NETWORK"]),
+    workspaceId: WorkspaceIdSchema.optional(),
+    code: z.string().min(1).max(64).regex(/^[A-Z][A-Z0-9_]*$/),
+  })
+  .strict();
+
+export const WorkerReconciliationReportSchema = z
+  .object({
+    workspaces: z.array(WorkerReconcileWorkspaceResultSchema).max(10_000),
+    issues: z.array(WorkerRecoveryIssueSchema).max(10_000),
+    observedAt: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .refine(
+    (report) => {
+      const ids = report.workspaces.map((entry) =>
+        entry.status === "OBSERVED"
+          ? entry.workspace.workspaceId
+          : entry.workspaceId,
+      );
+      return new Set(ids).size === ids.length;
+    },
+    "Reconciliation results must contain unique Workspace IDs",
+  );
+
+export const WorkerReconcileMessageSchema = RequestEnvelopeSchema.extend({
+  type: z.literal("worker.reconcile"),
+  payload: z
+    .object({
+      assignments: z.array(WorkerReconcileAssignmentSchema).max(10_000),
+    })
+    .strict()
+    .refine(
+      (payload) =>
+        new Set(payload.assignments.map((entry) => entry.workspaceId)).size ===
+        payload.assignments.length,
+      "Authoritative assignments must contain unique Workspace IDs",
+    ),
+}).strict();
+
+export const ControlCommandTypeSchema = z.union([
+  WorkspaceCommandTypeSchema,
+  z.literal("worker.reconcile"),
+]);
+
 export const WorkspaceEnsureMessageSchema = RequestEnvelopeSchema.extend({
   type: z.literal("workspace.ensure"),
   payload: z
@@ -140,30 +248,33 @@ export const WorkspaceInspectMessageSchema = RequestEnvelopeSchema.extend({
   payload: WorkspaceCommandPayloadSchema,
 }).strict();
 
-export const WorkspaceObservationSchema = z
+const WorkspaceResponseOkPayloadSchema = z
   .object({
-    workspaceId: WorkspaceIdSchema,
-    state: WorkspaceStateSchema,
-    runtimeImage: z.string().min(1).max(255),
-    observedAt: z.string().datetime({ offset: true }),
+    requestType: WorkspaceCommandTypeSchema,
+    workspace: WorkspaceObservationSchema,
+  })
+  .strict();
+
+const WorkerReconcileResponseOkPayloadSchema = z
+  .object({
+    requestType: z.literal("worker.reconcile"),
+    reconciliation: WorkerReconciliationReportSchema,
   })
   .strict();
 
 export const ResponseOkMessageSchema = RequestEnvelopeSchema.extend({
   type: z.literal("response.ok"),
-  payload: z
-    .object({
-      requestType: WorkspaceCommandTypeSchema,
-      workspace: WorkspaceObservationSchema.optional(),
-    })
-    .strict(),
+  payload: z.union([
+    WorkspaceResponseOkPayloadSchema,
+    WorkerReconcileResponseOkPayloadSchema,
+  ]),
 }).strict();
 
 export const ResponseErrorMessageSchema = RequestEnvelopeSchema.extend({
   type: z.literal("response.error"),
   payload: z
     .object({
-      requestType: WorkspaceCommandTypeSchema,
+      requestType: ControlCommandTypeSchema,
       code: z.string().min(1).max(64).regex(/^[A-Z][A-Z0-9_]*$/),
       message: z.string().min(1).max(1_024),
       retryable: z.boolean(),
@@ -211,6 +322,7 @@ export const WorkerToControlMessageSchema = z.discriminatedUnion("type", [
 ]);
 
 export const ControlToWorkerMessageSchema = z.discriminatedUnion("type", [
+  WorkerReconcileMessageSchema,
   WorkspaceEnsureMessageSchema,
   WorkspaceStartMessageSchema,
   WorkspaceStopMessageSchema,
@@ -231,3 +343,12 @@ export type WorkerToControlMessage = z.infer<
 >;
 export type WorkspaceResources = z.infer<typeof WorkspaceResourcesSchema>;
 export type WorkspaceState = z.infer<typeof WorkspaceStateSchema>;
+export type WorkspaceObservation = z.infer<typeof WorkspaceObservationSchema>;
+export type WorkspaceDesiredState = z.infer<typeof WorkspaceDesiredStateSchema>;
+export type WorkerReconcileAssignment = z.infer<
+  typeof WorkerReconcileAssignmentSchema
+>;
+export type WorkerReconciliationReport = z.infer<
+  typeof WorkerReconciliationReportSchema
+>;
+export type WorkerRecoveryIssue = z.infer<typeof WorkerRecoveryIssueSchema>;

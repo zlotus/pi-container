@@ -12,13 +12,14 @@ import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { loadWorkerConfig } from "./config.js";
+import type { WorkerConfig } from "./config.js";
 import { buildWorkerGateway } from "./gateway.js";
 import { DockerWorkspaceRuntime } from "./runtime.js";
 
 const runDockerIntegration = process.env.TEST_DOCKER_RUNTIME === "1";
 const describeWithDocker = runDockerIntegration ? describe : describe.skip;
 
-describeWithDocker("Phase 3 Docker Runtime integration", () => {
+describeWithDocker("Phase 3 through 6 Docker Runtime integration", () => {
   const workspaceId = randomUUID();
   const legacyWorkspaceId = randomUUID();
   const isolationWorkspaceIds = [randomUUID(), randomUUID()] as const;
@@ -32,12 +33,13 @@ describeWithDocker("Phase 3 Docker Runtime integration", () => {
   };
   let managedRoot = "";
   let docker!: Docker;
+  let config!: WorkerConfig;
   let runtime!: DockerWorkspaceRuntime;
   let workerGateway: Server | undefined;
 
   beforeAll(async () => {
     managedRoot = await mkdtemp(join(tmpdir(), "agent-runtime-integration-"));
-    const config = loadWorkerConfig({
+    config = loadWorkerConfig({
       CONTROL_PLANE_URL: "ws://127.0.0.1:3000/api/workers/connect",
       WORKER_ID: "integration-worker",
       WORKER_TOKEN: "0123456789abcdef0123456789abcdef",
@@ -121,6 +123,7 @@ describeWithDocker("Phase 3 Docker Runtime integration", () => {
     expect(inspection.HostConfig.Memory).toBe(resources.memoryBytes);
     expect(inspection.HostConfig.NanoCpus).toBe(1_000_000_000);
     expect(inspection.HostConfig.PidsLimit).toBe(resources.pidsLimit);
+    expect(inspection.HostConfig.RestartPolicy?.Name).toBe("unless-stopped");
     expect(inspection.NetworkSettings.Ports["30141/tcp"]?.[0]?.HostIp).toBe(
       "127.0.0.1",
     );
@@ -241,6 +244,26 @@ describeWithDocker("Phase 3 Docker Runtime integration", () => {
 
     expect((await runtime.stop(workspaceId)).state).toBe("STOPPED");
     expect((await runtime.start(workspaceId)).state).toBe("RUNNING");
+    await docker.getContainer(containerName).restart({ t: 5 });
+    runtime = new DockerWorkspaceRuntime(config, docker);
+    const recovery = await runtime.reconcile([
+      {
+        workspaceId,
+        runtimeImage: "agent-runtime:phase3-minimal",
+        desiredState: "RUNNING",
+      },
+    ]);
+    expect(recovery).toMatchObject({
+      workspaces: [
+        {
+          status: "OBSERVED",
+          workspace: { workspaceId, state: "RUNNING" },
+        },
+      ],
+    });
+    expect(
+      recovery.issues.every((issue) => issue.workspaceId !== workspaceId),
+    ).toBe(true);
     expect(await readFile(workspaceFile, "utf8")).toBe("artifact persists");
     expect(await readFile(sessionFile, "utf8")).toContain(
       `"cwd":"/workspace"`,

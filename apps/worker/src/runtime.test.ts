@@ -116,6 +116,7 @@ class FakeDocker {
     return [...this.networks.values()].map((network) => ({
       Id: network.id,
       Name: network.name,
+      Labels: network.labels,
     }));
   }
 
@@ -245,6 +246,7 @@ describe("Docker Workspace Runtime", () => {
         Memory: RESOURCES.memoryBytes,
         NanoCpus: 2_000_000_000,
         PidsLimit: RESOURCES.pidsLimit,
+        RestartPolicy: { Name: "unless-stopped", MaximumRetryCount: 0 },
         PortBindings: {
           "30141/tcp": [{ HostIp: "127.0.0.1", HostPort: "" }],
         },
@@ -321,6 +323,33 @@ describe("Docker Workspace Runtime", () => {
     ).rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({
       code: "UNMANAGED_CONTAINER_CONFLICT",
     });
+    await expect(runtime.reconcile([])).resolves.toMatchObject({
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          classification: "UNKNOWN_RESOURCE",
+          resource: "CONTAINER",
+          workspaceId: WORKSPACE_ID,
+        }),
+      ]),
+    });
+    await expect(
+      runtime.reconcile([
+        {
+          workspaceId: WORKSPACE_ID,
+          runtimeImage: config.RUNTIME_IMAGE,
+          desiredState: "DELETED",
+        },
+      ]),
+    ).resolves.toMatchObject({
+      workspaces: [
+        {
+          status: "INVALID",
+          workspaceId: WORKSPACE_ID,
+          code: "UNMANAGED_CONTAINER_CONFLICT",
+          retryable: false,
+        },
+      ],
+    });
     expect(docker.containers.get(name)?.id).toBe("unmanaged");
   });
 
@@ -375,6 +404,69 @@ describe("Docker Workspace Runtime", () => {
     ).rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({
       code: "RUNTIME_CONFIGURATION_MISMATCH",
     });
+  });
+
+  it("inventories authoritative assignments without creating or deleting resources", async () => {
+    const { config, docker, runtime } = await fixture();
+    const missingId = "0c0c7ff9-5679-4543-b561-1eb492719b77";
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+
+    const report = await runtime.reconcile([
+      {
+        workspaceId: WORKSPACE_ID,
+        runtimeImage: config.RUNTIME_IMAGE,
+        desiredState: "STOPPED",
+      },
+      {
+        workspaceId: missingId,
+        runtimeImage: config.RUNTIME_IMAGE,
+        desiredState: "RUNNING",
+      },
+    ]);
+
+    expect(report.workspaces).toEqual([
+      expect.objectContaining({
+        status: "OBSERVED",
+        workspace: expect.objectContaining({
+          workspaceId: WORKSPACE_ID,
+          state: "STOPPED",
+        }),
+      }),
+      { status: "MISSING", workspaceId: missingId },
+    ]);
+    expect(report.issues).toEqual([]);
+    expect(docker.containers.size).toBe(1);
+    expect(docker.networks.size).toBe(1);
+  });
+
+  it("classifies unassigned managed resources as orphans and leaves them intact", async () => {
+    const { config, docker, runtime } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+
+    const report = await runtime.reconcile([]);
+
+    expect(report.workspaces).toEqual([]);
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          classification: "MANAGED_ORPHAN",
+          resource: "CONTAINER",
+          workspaceId: WORKSPACE_ID,
+        }),
+        expect.objectContaining({
+          classification: "MANAGED_ORPHAN",
+          resource: "NETWORK",
+          workspaceId: WORKSPACE_ID,
+        }),
+        expect.objectContaining({
+          classification: "MANAGED_ORPHAN",
+          resource: "DIRECTORY",
+          workspaceId: WORKSPACE_ID,
+        }),
+      ]),
+    );
+    expect(docker.containers.size).toBe(1);
+    expect(docker.networks.size).toBe(1);
   });
 
   it("blocks an explicitly conflicting default cwd from start but still permits safe deletion", async () => {
