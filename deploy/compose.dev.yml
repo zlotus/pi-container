@@ -3,6 +3,7 @@ name: agent-runtime-platform
 services:
   postgres:
     image: postgres:17.6-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-agent_runtime}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-development-only}

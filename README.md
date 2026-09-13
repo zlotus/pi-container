@@ -7,7 +7,7 @@ Workspace、Worker、Docker 生命周期、调度和安全代理。
 当前仓库已实现 **Phase 6：Persistence / Recovery 的工程基线**：Control Plane 启动时先将已分配
 Workspace fail-closed，Worker authenticated hello 后接收 PostgreSQL authoritative assignments，
 只读扫描本机 managed Container、network 与 persistent directory，再按持久化 desired state 条件恢复。
-Phase 1～5 已完成人工验收；Phase 6 自动验证已通过，但真实宿主机/Control Plane 重启的人工验收尚未完成。
+Phase 1～5 已完成人工验收；Phase 6 自动验证和人工验收主线均已通过，Phase 7 尚未开始。
 HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其 Chat、Terminal 或 streaming 实现。
 
 ## Prerequisites
@@ -32,6 +32,10 @@ pnpm typecheck
 pnpm test
 pnpm lint
 ```
+
+开发 compose 中的 PostgreSQL 使用 `restart: unless-stopped`，只保证它在宿主机 reboot、Docker daemon
+恢复后随之恢复。Control Plane、Portal 与 Worker 的进程托管不属于本项；本仓库未因此新增 systemd 或
+生产部署方案。
 
 ## Create local users
 
@@ -335,9 +339,10 @@ Phase 3/Runtime 诊断时，仍可在 Worker 宿主机用下面的命令查看�
 docker port agent-runtime-<workspace-uuid> 30141/tcp
 ```
 
-该地址只用于本机诊断，不是最终用户入口，不应暴露到 LAN。正常用户从 Portal 点击“打开”，
-Portal 会签发 60 秒内有效、单次使用且绑定 user/workspace 的 exchange code，并以 top-level
-POST 进入 Workspace Host。Gateway 随后为该 Host 设置 host-only session Cookie；原始 code
+该地址只用于本机诊断，不是最终用户入口，不应暴露到 LAN。正常用户从 Portal 点击“打开”，Portal
+会立即保留当前列表页并预开一个新浏览器标签页，再签发 60 秒内有效、单次使用且绑定 user/workspace
+的 exchange code，并在新标签页以 top-level POST 进入 Workspace Host。Gateway 随后为该 Host 设置
+host-only session Cookie；原始 code
 不会进入 query string、pi-web 或 Referer。exchange 响应是一个禁止缓存、禁止嵌入并带严格
 CSP 的最小 Workspace-origin bootstrap 页面；它使用 `location.replace("/")` 发起新的同源导航，
 而不是用 HTTP redirect 延续 Portal 发起的跨站导航链。Gateway 因此仍可拒绝所有进入 pi-web

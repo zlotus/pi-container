@@ -4,10 +4,10 @@ Last reviewed: 2026-09-13
 
 ## Current Milestone
 
-Phase 1～5 已完成人工验收。Phase 6 Persistence / Recovery 的工程实现与自动验证已完成，等待真实
-Control Plane、Worker daemon、Docker/宿主机 restart 人工验收。当前实现以 PostgreSQL desired state
-和 sticky assignment 为 authority，由 Worker 完整只读 inventory 恢复状态；orphan、foreign managed
-与 unknown resource 均 fail-closed 且不自动删除。Phase 7 Toolchain 尚未开始。
+Phase 1～5 已完成人工验收，Phase 6 Persistence / Recovery 的工程实现、自动验证与人工验收主线均已
+通过。当前实现以 PostgreSQL desired state 和 sticky assignment 为 authority，由 Worker 完整只读
+inventory 恢复状态；orphan、foreign managed 与 unknown resource 均 fail-closed 且不自动删除。
+Phase 7 Toolchain 尚未开始。
 
 ## Current Baseline
 
@@ -21,8 +21,9 @@ Control Plane、Worker daemon、Docker/宿主机 restart 人工验收。当前�
 - `apps/control-plane` 提供本地登录/注销、Workspace CRUD/start/stop/open、Worker control
   channel 与 Admin Worker 页面；state-changing API 校验精确 Portal Origin 和 CSRF，跨用户
   API/Proxy 访问统一按不可见资源拒绝。
-- `apps/web` 提供 Portal；RUNNING Workspace 的“打开”会请求短时 exchange code，再以
-  top-level form POST 到 Workspace Host，不使用 query string、iframe 或宽域 Cookie。
+- `apps/web` 提供 Portal；RUNNING Workspace 的“打开”由用户点击同步预开新标签页，再请求短时
+  exchange code，并在新标签页以 top-level form POST 到 Workspace Host，不使用 query string、
+  iframe 或宽域 Cookie；Portal/Workspace 列表保留在原标签页。
 - Portal 与 Workspace Host 使用同一条 server-side session 的不同 host-only Cookie 副本；
   exchange code 仅在单 Control Plane 进程内保存 hash 索引及短时绑定，60 秒过期、单次消费，
   并绑定 user/workspace。Portal logout/revoke 后 Workspace Host Cookie 不能继续通过认证。
@@ -84,15 +85,12 @@ Control Plane、Worker daemon、Docker/宿主机 restart 人工验收。当前�
 
 ## In Progress
 
-Phase 6 工程实现已完成，当前只剩人工 acceptance；在人工验证前不标记 Phase 6 已完成人工验收。
+Phase 6 人工验收主线已通过；当前 cleanup 不扩展 Phase scope，Phase 7 尚未开始。
 
 ## Next
 
-1. 在真实单机与 multi-host 拓扑分别重启 Control Plane、Worker daemon 和 Docker/Worker 宿主机，确认
-   原 RUNNING/STOPPED desired state、Gateway fail-closed 窗口、sticky assignment 与 pi-web readiness。
-2. 使用真实 Pi Session 和 `/workspace` 文件验证 Container/Docker restart 前后恢复；人工构造 managed
-   orphan 与 unknown name/label conflict，确认只告警且不会删除或迁移。
-3. 人工验收完成后再更新结论；Phase 7 Toolchain 继续保持未开始。
+1. 保持 Phase 6 recovery、安全边界和已验收主线稳定。
+2. Phase 7 Toolchain 继续保持未开始，后续仅在明确启动该 Phase 后实施。
 
 ## Risks And Blockers
 
@@ -114,6 +112,13 @@ Phase 6 工程实现已完成，当前只剩人工 acceptance；在人工验证�
 
 ## Verification
 
+- 2026-09-13：Phase 6 post-acceptance cleanup 通过 `pnpm lint`、`pnpm typecheck`、`pnpm test` 与
+  `pnpm build:web`；默认测试 74 passed，9 个 PostgreSQL/真实 Docker 条件测试按设计跳过。
+  `docker compose -f deploy/compose.dev.yml config` 确认开发 PostgreSQL 的 restart policy 为
+  `unless-stopped`。Portal 新标签页行为已通过类型检查与生产构建，仍需在目标浏览器策略下点击确认
+  popup blocker 交互。
+- 2026-09-13：用户确认 Phase 6 人工验收主线通过；该结论不扩展至 systemd、生产进程托管或其他
+  Phase 7+ 部署能力。
 - 2026-09-13：Phase 6 工程门通过 `pnpm lint`、`pnpm typecheck`、`pnpm test` 与
   `pnpm build:web`；Node.js 24.20.0 / pnpm 11.24.0 环境下默认测试 74 passed，5 个 PostgreSQL 与
   4 个真实 Docker 条件测试按设计跳过。协议/Control Plane/Worker 单测覆盖 typed authoritative
@@ -125,7 +130,7 @@ Phase 6 工程实现已完成，当前只剩人工 acceptance；在人工验证�
 - 2026-09-13：`TEST_DOCKER_RUNTIME=1 pnpm --filter @agent-runtime/worker test` 在 arm64 Docker Engine
   29.7.2 上 20/20 通过；真实 Runtime 验证 `unless-stopped`、Docker Container restart、重建 Worker
   Runtime 对象后的 inventory/recovery、`/workspace` 文件与 Pi Session JSONL 保留、legacy Container
-  管理、Gateway 和网络隔离。真实 Control Plane/Worker daemon/宿主机 restart 的人工验收仍待执行。
+  管理、Gateway 和网络隔离。
 - 2026-09-13：Phase 5 cleanup backward-compatibility regression 修复通过 `pnpm lint`、
   `pnpm typecheck`、`pnpm test` 和 `pnpm build:web`；默认测试 67 passed、8 个 PostgreSQL/真实
   Docker 条件测试按设计跳过。启用本机 PostgreSQL 后 Control Plane 42/42 通过，确认 destructive

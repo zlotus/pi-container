@@ -199,6 +199,12 @@ export function App() {
 
   async function openWorkspace(workspace: Workspace) {
     if (session === null || workspace.state !== "RUNNING") return;
+    const workspaceTab = window.open("about:blank", "_blank");
+    if (workspaceTab === null) {
+      setError("浏览器阻止了新标签页，请允许弹出窗口后重试");
+      return;
+    }
+    workspaceTab.opener = null;
     setError(null);
     setPendingWorkspaceId(workspace.id);
     try {
@@ -210,17 +216,19 @@ export function App() {
           body: "{}",
         },
       );
-      const form = document.createElement("form");
+      const form = workspaceTab.document.createElement("form");
       form.method = "POST";
       form.action = exchange.exchangeUrl;
-      const code = document.createElement("input");
+      const code = workspaceTab.document.createElement("input");
       code.type = "hidden";
       code.name = "code";
       code.value = exchange.code;
       form.append(code);
-      document.body.append(form);
+      workspaceTab.document.body.append(form);
       form.submit();
+      setPendingWorkspaceId(null);
     } catch (caught) {
+      workspaceTab.close();
       setError(caught instanceof Error ? caught.message : "Unable to open Workspace");
       setPendingWorkspaceId(null);
       await loadWorkspaces();
@@ -371,9 +379,9 @@ export function App() {
                       workspace.state !== "RUNNING" ||
                       pendingWorkspaceId === workspace.id
                     }
-                    title={workspace.state === "RUNNING" ? "打开 pi-web" : "请先启动 Workspace"}
+                    title={workspace.state === "RUNNING" ? "在新标签页打开 pi-web" : "请先启动 Workspace"}
                     onClick={() => void openWorkspace(workspace)}
-                  >打开</button>
+                  >打开 ↗</button>
                   <button
                     className="danger"
                     disabled={pendingWorkspaceId === workspace.id}
