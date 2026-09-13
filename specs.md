@@ -1392,13 +1392,24 @@ Control Plane 可以安全重复请求。
 
 ```text
 inspect
--> verify labels
--> verify mount
--> verify image
+-> verify managed identity / safe-to-manage security baseline
+-> verify current or explicitly supported legacy runtime configuration
 -> return current state
 ```
 
 不要创建重复 Container。
+
+`managed identity / safe-to-manage` 与 `current desired runtime configuration` 必须分开验证。
+前者包含 workspace metadata、Worker/Workspace labels、managed name、runtime image、UID/GID、
+managed bind mount、managed network、privileged/capability/security options 与 loopback port exposure
+等 ownership/security 边界；后续新增的功能性环境变量不得追溯性地使原本合法的 managed
+Container 变成不可 inspect/stop/delete。
+
+Phase 5 post-acceptance baseline 明确支持：在引入 `PI_WEB_DEFAULT_CWD=/workspace` 前创建且仅缺少
+该变量的合法 Container，继续允许幂等 ensure、legacy-compatible start、inspect、stop、Gateway
+和 delete，不自动重建、不自动删除持久数据。它在被明确删除/重建前保留旧 pi-web default-cwd
+行为。新建 Container 必须设置并在 create 后验证当前变量；显式设置冲突值时拒绝 ensure/start/
+Gateway，但只要 managed identity 仍完整，inspect/stop/delete 继续可用以完成安全清理。
 
 ---
 

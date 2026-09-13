@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -20,6 +20,7 @@ const describeWithDocker = runDockerIntegration ? describe : describe.skip;
 
 describeWithDocker("Phase 3 Docker Runtime integration", () => {
   const workspaceId = randomUUID();
+  const legacyWorkspaceId = randomUUID();
   const isolationWorkspaceIds = [randomUUID(), randomUUID()] as const;
   const containerName = `agent-runtime-${workspaceId}`;
   const networkName = containerName;
@@ -59,7 +60,11 @@ describeWithDocker("Phase 3 Docker Runtime integration", () => {
       await new Promise<void>((resolve) => workerGateway?.close(() => resolve()));
     }
     if (runtime !== undefined) {
-      for (const cleanupWorkspaceId of [workspaceId, ...isolationWorkspaceIds]) {
+      for (const cleanupWorkspaceId of [
+        workspaceId,
+        legacyWorkspaceId,
+        ...isolationWorkspaceIds,
+      ]) {
         try {
           await runtime.delete(cleanupWorkspaceId);
         } catch {
@@ -68,7 +73,11 @@ describeWithDocker("Phase 3 Docker Runtime integration", () => {
         }
       }
     }
-    for (const cleanupWorkspaceId of [workspaceId, ...isolationWorkspaceIds]) {
+    for (const cleanupWorkspaceId of [
+      workspaceId,
+      legacyWorkspaceId,
+      ...isolationWorkspaceIds,
+    ]) {
       const cleanupName = `agent-runtime-${cleanupWorkspaceId}`;
       try {
         await docker?.getContainer(cleanupName).remove({ force: true });
@@ -295,6 +304,79 @@ describeWithDocker("Phase 3 Docker Runtime integration", () => {
         // The suite-level cleanup retries the same random container name.
       }
     }
+  }, 120_000);
+
+  it("manages and destructively deletes a pre-default-cwd container", async () => {
+    const legacyName = `agent-runtime-${legacyWorkspaceId}`;
+    await runtime.ensure(
+      legacyWorkspaceId,
+      "agent-runtime:phase3-minimal",
+      resources,
+    );
+    const currentContainer = docker.getContainer(legacyName);
+    const current = await currentContainer.inspect();
+    await currentContainer.remove({ force: true });
+
+    await docker.createContainer({
+      name: legacyName,
+      Image: current.Config.Image,
+      User: current.Config.User,
+      WorkingDir: current.Config.WorkingDir,
+      Env: current.Config.Env.filter(
+        (entry) => entry !== "PI_WEB_DEFAULT_CWD=/workspace",
+      ),
+      ExposedPorts: { "30141/tcp": {} },
+      Labels: current.Config.Labels,
+      HostConfig: {
+        AutoRemove: false,
+        Binds: current.Mounts.map(
+          (mount) => `${mount.Source}:${mount.Destination}:rw`,
+        ),
+        CapDrop: ["ALL"],
+        Memory: resources.memoryBytes,
+        NanoCpus: 1_000_000_000,
+        NetworkMode: legacyName,
+        PidsLimit: resources.pidsLimit,
+        PortBindings: {
+          "30141/tcp": [{ HostIp: "127.0.0.1", HostPort: "" }],
+        },
+        Privileged: false,
+        SecurityOpt: ["no-new-privileges:true"],
+      },
+    });
+
+    const legacyRoot = join(managedRoot, "workspaces", legacyWorkspaceId);
+    const persistentFile = join(legacyRoot, "workspace", "legacy.txt");
+    await writeFile(persistentFile, "legacy persists", "utf8");
+
+    await expect(
+      runtime.ensure(
+        legacyWorkspaceId,
+        "agent-runtime:phase3-minimal",
+        resources,
+      ),
+    ).resolves.toMatchObject({ state: "STOPPED" });
+    await expect(runtime.start(legacyWorkspaceId)).resolves.toMatchObject({
+      state: "RUNNING",
+    });
+    await expect(runtime.inspect(legacyWorkspaceId)).resolves.toMatchObject({
+      state: "RUNNING",
+    });
+    await expect(runtime.stop(legacyWorkspaceId)).resolves.toMatchObject({
+      state: "STOPPED",
+    });
+    expect(await readFile(persistentFile, "utf8")).toBe("legacy persists");
+
+    await expect(runtime.delete(legacyWorkspaceId)).resolves.toMatchObject({
+      state: "CREATED",
+    });
+    await expect(docker.getContainer(legacyName).inspect()).rejects.toThrow();
+    expect(
+      (await docker.listNetworks({ filters: { name: [legacyName] } })).filter(
+        (network) => network.Name === legacyName,
+      ),
+    ).toHaveLength(0);
+    expect(existsSync(legacyRoot)).toBe(false);
   }, 120_000);
 
   it("keeps Workspace bridges isolated from each other and host loopback", async () => {

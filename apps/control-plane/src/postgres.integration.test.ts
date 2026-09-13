@@ -280,6 +280,11 @@ describeWithPostgres("Phase 1 through 5 PostgreSQL integration", () => {
         workerId: phase3WorkerId,
       }),
     ).resolves.toBe(true);
+    expect(
+      (await repository.listWorkersWithAssignments()).find(
+        (worker) => worker.id === phase3WorkerId,
+      ),
+    ).toMatchObject({ assignedWorkspaces: 1 });
     await expect(repository.markWorkersOffline(NOW)).resolves.toBe(1);
     await expect(
       repository.findOwnedWorkspace(workspace.id, phase3UserId),
@@ -335,6 +340,14 @@ describeWithPostgres("Phase 1 through 5 PostgreSQL integration", () => {
         workerId: phase3WorkerId,
       }),
     ).resolves.toBe(true);
+    await expect(
+      repository.findOwnedWorkspace(workspace.id, phase3UserId),
+    ).resolves.toBeNull();
+    expect(
+      (await repository.listWorkersWithAssignments()).find(
+        (worker) => worker.id === phase3WorkerId,
+      ),
+    ).toMatchObject({ assignedWorkspaces: 0 });
   });
 
   it("schedules compatible Workers by authoritative load and reserves the final slot once", async () => {

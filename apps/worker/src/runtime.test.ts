@@ -43,6 +43,7 @@ class FakeDocker {
   readonly containers = new Map<string, FakeContainer>();
   readonly networks = new Map<string, FakeNetwork>();
   createdOptions: Docker.ContainerCreateOptions | null = null;
+  omitDefaultCwdOnCreate = false;
   hostPort = "1";
 
   async createContainer(options: Docker.ContainerCreateOptions) {
@@ -59,7 +60,11 @@ class FakeDocker {
           User: options.User ?? "",
           Labels: options.Labels ?? {},
           WorkingDir: options.WorkingDir ?? "",
-          Env: options.Env ?? [],
+          Env: this.omitDefaultCwdOnCreate
+            ? (options.Env ?? []).filter(
+                (entry) => entry !== "PI_WEB_DEFAULT_CWD=/workspace",
+              )
+            : (options.Env ?? []),
         },
         HostConfig: options.HostConfig ?? {},
         Mounts: binds.map((bind) => {
@@ -317,5 +322,89 @@ describe("Docker Workspace Runtime", () => {
       code: "UNMANAGED_CONTAINER_CONFLICT",
     });
     expect(docker.containers.get(name)?.id).toBe("unmanaged");
+  });
+
+  it("keeps a pre-default-cwd managed container inspectable, stoppable, startable, and deletable", async () => {
+    const { root, config, docker, runtime } = await fixture();
+    docker.hostPort = "30200";
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+
+    const name = `agent-runtime-${WORKSPACE_ID}`;
+    const legacyContainer = docker.containers.get(name);
+    if (legacyContainer === undefined) throw new Error("container fixture missing");
+    legacyContainer.inspection.Config.Env =
+      legacyContainer.inspection.Config.Env.filter(
+        (entry) => entry !== "PI_WEB_DEFAULT_CWD=/workspace",
+      );
+
+    const workspaceRoot = join(root, "workspaces", WORKSPACE_ID);
+    const workspaceFile = join(workspaceRoot, "workspace", "legacy.txt");
+    await writeFile(workspaceFile, "legacy", "utf8");
+
+    await expect(
+      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES),
+    ).resolves.toMatchObject({ state: "STOPPED" });
+    await expect(runtime.start(WORKSPACE_ID)).resolves.toMatchObject({
+      state: "RUNNING",
+    });
+    await expect(runtime.gatewayTarget(WORKSPACE_ID)).resolves.toEqual(
+      new URL("http://127.0.0.1:30200"),
+    );
+    await expect(runtime.inspect(WORKSPACE_ID)).resolves.toMatchObject({
+      state: "RUNNING",
+    });
+    await expect(runtime.stop(WORKSPACE_ID)).resolves.toMatchObject({
+      state: "STOPPED",
+    });
+    expect(existsSync(workspaceFile)).toBe(true);
+
+    await expect(runtime.delete(WORKSPACE_ID)).resolves.toMatchObject({
+      state: "CREATED",
+    });
+    expect(docker.containers.has(name)).toBe(false);
+    expect(docker.networks.has(name)).toBe(false);
+    expect(existsSync(workspaceRoot)).toBe(false);
+  });
+
+  it("strictly verifies the default cwd on a newly created container", async () => {
+    const { config, docker, runtime } = await fixture();
+    docker.omitDefaultCwdOnCreate = true;
+
+    await expect(
+      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES),
+    ).rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({
+      code: "RUNTIME_CONFIGURATION_MISMATCH",
+    });
+  });
+
+  it("blocks an explicitly conflicting default cwd from start but still permits safe deletion", async () => {
+    const { root, config, docker, runtime } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+
+    const name = `agent-runtime-${WORKSPACE_ID}`;
+    const container = docker.containers.get(name);
+    if (container === undefined) throw new Error("container fixture missing");
+    container.inspection.Config.Env = container.inspection.Config.Env.map(
+      (entry) =>
+        entry === "PI_WEB_DEFAULT_CWD=/workspace"
+          ? "PI_WEB_DEFAULT_CWD=/tmp"
+          : entry,
+    );
+
+    await expect(
+      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES),
+    ).rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({
+      code: "RUNTIME_CONFIGURATION_MISMATCH",
+    });
+    await expect(runtime.start(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "RUNTIME_CONFIGURATION_MISMATCH" });
+    await expect(runtime.inspect(WORKSPACE_ID)).resolves.toMatchObject({
+      state: "STOPPED",
+    });
+    await expect(runtime.delete(WORKSPACE_ID)).resolves.toMatchObject({
+      state: "CREATED",
+    });
+    expect(existsSync(join(root, "workspaces", WORKSPACE_ID))).toBe(false);
   });
 });

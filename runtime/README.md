@@ -40,3 +40,12 @@ The persistence boundary remains:
 New Pi Session JSONL metadata therefore records `cwd: "/workspace"`, while the
 JSONL itself remains under `/agent/pi/sessions`. `/home/agent` is not mounted and
 is not part of the platform's persistent Workspace contract.
+
+Upgrade compatibility is intentionally asymmetric. A managed container created
+before `PI_WEB_DEFAULT_CWD` was introduced remains safe to inspect, stop, start,
+proxy, and delete when every ownership and security identity check still
+matches. It keeps the upstream default-cwd behavior until the user explicitly
+deletes and recreates the Workspace; the Worker never recreates it or removes
+persistent data automatically. Newly created containers must contain the current
+`PI_WEB_DEFAULT_CWD=/workspace` setting. An explicit conflicting value blocks
+ensure/start/proxy, while inspect/stop/delete remain available for safe cleanup.

@@ -305,6 +305,14 @@ root。Session JSONL 的 header 记录 `cwd: "/workspace"`，文件本身继续�
 `PI_CODING_AGENT_DIR=/agent/pi`。平台只承诺 `/workspace` 与 `/agent/pi` 两个 managed bind mount，
 不持久化整个 `/home/agent`；未设置该环境变量时 patch 保留上游 `~/pi-cwd-YYYYMMDD` fallback。
 
+升级兼容性：在引入 `PI_WEB_DEFAULT_CWD` 前创建、但仍满足完整 managed ownership/security
+identity 的 Container 会作为 legacy Runtime 继续支持 ensure/start/inspect/stop/Gateway/delete，
+不会被自动重建或删除。它仍保留创建时的 pi-web default-cwd 行为；只有新建 Container 才获得并
+严格验证当前 `/workspace` 配置。若 Container 显式设置了冲突的 `PI_WEB_DEFAULT_CWD`，Worker
+拒绝 ensure/start/Gateway，但仍允许 inspect/stop/delete，以便安全完成生命周期清理。正常
+destructive delete 得到 Worker 确认后，Control Plane 才删除 metadata 并释放 sticky assignment；
+需要当前 baseline 时应由用户明确删除旧 Workspace 后新建，不会触碰未授权的持久数据。
+
 Phase 3/Runtime 诊断时，仍可在 Worker 宿主机用下面的命令查看仅绑定 loopback 的端口：
 
 ```bash

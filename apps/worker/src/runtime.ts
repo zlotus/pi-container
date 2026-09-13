@@ -25,6 +25,7 @@ import type { WorkerConfig } from "./config.js";
 const APP_LABEL = "agent-runtime-platform";
 const MANAGED_BY_LABEL = "worker";
 const PI_WEB_PORT = "30141/tcp";
+const PI_WEB_DEFAULT_CWD_ENV = "PI_WEB_DEFAULT_CWD=/workspace";
 
 const MetadataSchema = z
   .object({
@@ -158,6 +159,7 @@ export class DockerWorkspaceRuntime {
     const networkName = this.#networkName(workspaceId);
     await this.#ensureNetwork(workspaceId, networkName);
     const existing = await this.#findNamedContainer(workspaceId);
+    const created = existing === null;
     if (existing === null) {
       try {
         await this.#docker.createContainer({
@@ -168,7 +170,7 @@ export class DockerWorkspaceRuntime {
           Env: [
             "HOME=/home/agent",
             "PI_CODING_AGENT_DIR=/agent/pi",
-            "PI_WEB_DEFAULT_CWD=/workspace",
+            PI_WEB_DEFAULT_CWD_ENV,
             "PI_WEB_HOSTNAME=0.0.0.0",
             "PI_WEB_NO_OPEN=1",
             "PI_WEB_SKIP_VERSION_CHECK=1",
@@ -203,7 +205,17 @@ export class DockerWorkspaceRuntime {
 
     const container = await this.#requireManagedContainer(workspaceId);
     const inspection = await container.inspect();
-    this.#verifyContainer(inspection, workspaceId, paths, networkName, resources);
+    this.#verifyManagedContainerIdentity(
+      inspection,
+      workspaceId,
+      paths,
+      networkName,
+    );
+    if (created) {
+      this.#verifyCurrentRuntimeConfiguration(inspection, resources);
+    } else {
+      this.#verifyLegacyRuntimeConfiguration(inspection, resources);
+    }
     return this.#observation(
       workspaceId,
       inspection.State.Running ? "RUNNING" : "STOPPED",
@@ -214,12 +226,13 @@ export class DockerWorkspaceRuntime {
     const paths = await this.#requireWorkspacePaths(workspaceId);
     const container = await this.#requireManagedContainer(workspaceId);
     let inspection = await container.inspect();
-    this.#verifyContainerIdentity(
+    this.#verifyManagedContainerIdentity(
       inspection,
       workspaceId,
       paths,
       this.#networkName(workspaceId),
     );
+    this.#verifyLegacyCompatibleDefaultCwd(inspection);
     if (!inspection.State.Running) {
       try {
         await container.start();
@@ -260,7 +273,7 @@ export class DockerWorkspaceRuntime {
     await this.#requireWorkspacePaths(workspaceId);
     const container = await this.#requireManagedContainer(workspaceId);
     const inspection = await container.inspect();
-    this.#verifyContainerIdentity(
+    this.#verifyManagedContainerIdentity(
       inspection,
       workspaceId,
       await this.#paths(workspaceId),
@@ -283,7 +296,7 @@ export class DockerWorkspaceRuntime {
     const container = await this.#findNamedContainer(workspaceId);
     if (container === null) return this.#observation(workspaceId, "CREATED");
     const inspection = await container.inspect();
-    this.#verifyContainerIdentity(
+    this.#verifyManagedContainerIdentity(
       inspection,
       workspaceId,
       paths,
@@ -300,7 +313,7 @@ export class DockerWorkspaceRuntime {
     const container = await this.#findNamedContainer(workspaceId);
     if (container !== null) {
       const inspection = await container.inspect();
-      this.#verifyContainerIdentity(
+      this.#verifyManagedContainerIdentity(
         inspection,
         workspaceId,
         paths,
@@ -364,12 +377,13 @@ export class DockerWorkspaceRuntime {
     const paths = await this.#requireWorkspacePaths(workspaceId);
     const container = await this.#requireManagedContainer(workspaceId);
     const inspection = await container.inspect();
-    this.#verifyContainerIdentity(
+    this.#verifyManagedContainerIdentity(
       inspection,
       workspaceId,
       paths,
       this.#networkName(workspaceId),
     );
+    this.#verifyLegacyCompatibleDefaultCwd(inspection);
     if (!inspection.State.Running) {
       throw new WorkspaceRuntimeError(
         "RUNTIME_NOT_READY",
@@ -632,19 +646,35 @@ export class DockerWorkspaceRuntime {
     return this.#docker.getNetwork(candidate.Id);
   }
 
-  #verifyContainer(
+  #verifyCurrentRuntimeConfiguration(
     inspection: Docker.ContainerInspectInfo,
-    workspaceId: string,
-    paths: WorkspacePaths,
-    networkName: string,
     resources: WorkspaceResources,
   ): void {
-    this.#verifyContainerIdentity(
-      inspection,
-      workspaceId,
-      paths,
-      networkName,
-    );
+    const defaultCwdEntries = this.#defaultCwdEntries(inspection);
+    if (
+      defaultCwdEntries.length !== 1 ||
+      defaultCwdEntries[0] !== PI_WEB_DEFAULT_CWD_ENV
+    ) {
+      throw new WorkspaceRuntimeError(
+        "RUNTIME_CONFIGURATION_MISMATCH",
+        "Managed Workspace default cwd does not match the current Runtime configuration",
+      );
+    }
+    this.#verifyResourceConfiguration(inspection, resources);
+  }
+
+  #verifyLegacyRuntimeConfiguration(
+    inspection: Docker.ContainerInspectInfo,
+    resources: WorkspaceResources,
+  ): void {
+    this.#verifyLegacyCompatibleDefaultCwd(inspection);
+    this.#verifyResourceConfiguration(inspection, resources);
+  }
+
+  #verifyResourceConfiguration(
+    inspection: Docker.ContainerInspectInfo,
+    resources: WorkspaceResources,
+  ): void {
     if (
       inspection.HostConfig.Memory !== resources.memoryBytes ||
       inspection.HostConfig.NanoCpus !==
@@ -658,7 +688,7 @@ export class DockerWorkspaceRuntime {
     }
   }
 
-  #verifyContainerIdentity(
+  #verifyManagedContainerIdentity(
     inspection: Docker.ContainerInspectInfo,
     workspaceId: string,
     paths: WorkspacePaths,
@@ -674,7 +704,6 @@ export class DockerWorkspaceRuntime {
       inspection.Config.User !== this.#runtimeUser ||
       inspection.Config.WorkingDir !== "/workspace" ||
       !inspection.Config.Env.includes("PI_CODING_AGENT_DIR=/agent/pi") ||
-      !inspection.Config.Env.includes("PI_WEB_DEFAULT_CWD=/workspace") ||
       inspection.Mounts.length !== 2 ||
       inspection.HostConfig.Privileged ||
       inspection.HostConfig.NetworkMode !== networkName ||
@@ -698,6 +727,28 @@ export class DockerWorkspaceRuntime {
         "Managed Workspace container does not match the security baseline",
       );
     }
+  }
+
+  #verifyLegacyCompatibleDefaultCwd(
+    inspection: Docker.ContainerInspectInfo,
+  ): void {
+    const defaultCwdEntries = this.#defaultCwdEntries(inspection);
+    if (
+      defaultCwdEntries.length > 1 ||
+      (defaultCwdEntries.length === 1 &&
+        defaultCwdEntries[0] !== PI_WEB_DEFAULT_CWD_ENV)
+    ) {
+      throw new WorkspaceRuntimeError(
+        "RUNTIME_CONFIGURATION_MISMATCH",
+        "Managed Workspace default cwd is neither the legacy nor current Runtime configuration",
+      );
+    }
+  }
+
+  #defaultCwdEntries(inspection: Docker.ContainerInspectInfo): string[] {
+    return inspection.Config.Env.filter((entry) =>
+      entry.startsWith("PI_WEB_DEFAULT_CWD="),
+    );
   }
 
   #assertRuntimeImage(runtimeImage: string): void {

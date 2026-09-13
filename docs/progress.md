@@ -6,8 +6,9 @@ Last reviewed: 2026-09-13
 
 Phase 1～5 已完成人工验收。Phase 5 已在两台真实 Worker 的 multi-host 拓扑验证 Scheduler、
 sticky/offline/reconnect 语义、跨主机 Gateway data path 与持久化。post-acceptance cleanup 已补充
-真实部署说明，并把新 Pi Session 的默认项目根固定为 `/workspace`。尚未进入 Phase 6
-Persistence / Recovery。
+真实部署说明，并把新 Pi Session 的默认项目根固定为 `/workspace`；后续兼容性修复确保 cleanup
+前的合法 managed Container 不会因缺少新增 default-cwd 环境变量而失去生命周期管理能力。
+尚未进入 Phase 6 Persistence / Recovery。
 
 ## Current Baseline
 
@@ -49,6 +50,10 @@ Persistence / Recovery。
 - Worker 的 Docker 基线保持不变：UID/GID 1000、非 privileged、drop all capabilities、
   no-new-privileges、CPU/memory/PID limit、两个 managed bind mount、每 Workspace 独立 bridge、
   无 Docker socket，pi-web 只发布到动态 loopback port。
+- Worker 将 managed ownership/security identity 与当前 desired Runtime configuration 分开验证。
+  cleanup 前仅缺少 `PI_WEB_DEFAULT_CWD` 的合法 Container 可继续 ensure/start/inspect/stop/Gateway/
+  delete，并保留 legacy default-cwd 行为；新建 Container 必须设置并验证 `/workspace`。显式冲突
+  配置不能启动或进入 data path，但仍可 inspect/stop/delete；不会自动重建或删除用户持久数据。
 - Phase 5 Scheduler 在独立纯函数模块中执行 connected/ONLINE/enabled/fresh-heartbeat、capacity、
   architecture、exact runtime image 与 capability filtering；按 authoritative assignment/max score
   选择最低负载，score 相同按 Worker ID 升序确定性选择。
@@ -68,8 +73,9 @@ Persistence / Recovery。
 
 ## In Progress
 
-当前没有已启动的 Phase 6 实现。本轮停在 Phase 5 post-acceptance baseline：真实 multi-host
-部署说明、验收记录和 `/workspace` default cwd 已同步。
+当前没有已启动的 Phase 6 实现。本轮停在 Phase 5 post-acceptance baseline；旧 managed Container
+的 default-cwd backward-compatibility regression 已修复并通过自动验证，等待真实旧 Workspace
+人工复验。
 
 ## Next
 
@@ -93,6 +99,13 @@ Persistence / Recovery。
 
 ## Verification
 
+- 2026-09-13：Phase 5 cleanup backward-compatibility regression 修复通过 `pnpm lint`、
+  `pnpm typecheck`、`pnpm test` 和 `pnpm build:web`；默认测试 67 passed、8 个 PostgreSQL/真实
+  Docker 条件测试按设计跳过。启用本机 PostgreSQL 后 Control Plane 42/42 通过，确认 destructive
+  delete 后 metadata 删除且 authoritative assignment 从 1 释放为 0；arm64 Docker 条件套件
+  18/18 通过，真实构造 cleanup 前仅缺少 `PI_WEB_DEFAULT_CWD` 的 managed Container，并验证
+  ensure/start/inspect/stop/delete 后 Container、network 与 managed root 均删除。新 Container 的
+  `/workspace` working dir/default cwd、Session JSONL cwd、bind persistence 与既有 Gateway 行为继续通过。
 - 2026-09-13：Phase 5 post-acceptance cleanup 通过 `pnpm lint`、`pnpm typecheck`、`pnpm test` 和
   `pnpm build:web`；默认测试门 64 passed，4 个 PostgreSQL 与 3 个真实 Docker 条件测试按设计跳过。
   另以 `TEST_DATABASE_URL` 启用本机 PostgreSQL 后 Control Plane 42/42 通过，使常规测试完整覆盖
