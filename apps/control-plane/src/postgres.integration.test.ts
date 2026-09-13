@@ -4,26 +4,31 @@ import { hashOpaqueToken, hashPassword } from "@agent-runtime/auth";
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase4Repository,
+  createPhase5Repository,
   migrateDatabase,
   type DatabaseClient,
 } from "@agent-runtime/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildControlPlane } from "./app.js";
+import { selectWorker } from "./scheduler.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithPostgres = databaseUrl === undefined ? describe.skip : describe;
 const NOW = new Date("2026-09-10T08:00:00.000Z");
 
-describeWithPostgres("Phase 1 through 4 PostgreSQL integration", () => {
+describeWithPostgres("Phase 1 through 5 PostgreSQL integration", () => {
   const userAId = randomUUID();
   const userBId = randomUUID();
   const phase3UserId = randomUUID();
+  const phase5UserId = randomUUID();
   const suffix = randomUUID();
   const workerId = `worker-${suffix}`;
   const phase3WorkerId = `runtime-${suffix}`;
+  const phase5WorkerIds = ["a", "b", "arch", "cap", "image", "last"].map(
+    (name) => `scheduler-${name}-${suffix}`,
+  );
   const phase3RuntimeImage = `agent-runtime:integration-${suffix}`;
   let database!: DatabaseClient;
 
@@ -35,14 +40,14 @@ describeWithPostgres("Phase 1 through 4 PostgreSQL integration", () => {
   });
 
   afterAll(async () => {
-    await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId})`;
-    await database`delete from workers where id in (${workerId}, ${phase3WorkerId})`;
-    await database`delete from users where id in (${userAId}, ${userBId}, ${phase3UserId})`;
+    await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId})`;
+    await database`delete from workers where id = ${workerId} or id = ${phase3WorkerId} or id = any(${phase5WorkerIds})`;
+    await database`delete from users where id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId})`;
     await database.end({ timeout: 5 });
   });
 
   it("logs in two persisted users and isolates their workspaces", async () => {
-    const repository = createPhase4Repository(database);
+    const repository = createPhase5Repository(database, selectWorker);
     await repository.createUser({
       id: userAId,
       email: `a-${suffix}@example.test`,
@@ -135,7 +140,7 @@ describeWithPostgres("Phase 1 through 4 PostgreSQL integration", () => {
   });
 
   it("persists a bound Worker credential and rotates it atomically", async () => {
-    const repository = createPhase4Repository(database);
+    const repository = createPhase5Repository(database, selectWorker);
     const originalToken = "originalworker0123456789abcdef0123456789abcdef";
     const rotatedToken = "rotatedworker0123456789abcdef0123456789abcdef";
     const originalHash = hashOpaqueToken(originalToken);
@@ -191,7 +196,7 @@ describeWithPostgres("Phase 1 through 4 PostgreSQL integration", () => {
   });
 
   it("persists minimal placement and lifecycle transitions atomically", async () => {
-    const repository = createPhase4Repository(database);
+    const repository = createPhase5Repository(database, selectWorker);
     await repository.createUser({
       id: phase3UserId,
       email: `runtime-${suffix}@example.test`,
@@ -330,5 +335,200 @@ describeWithPostgres("Phase 1 through 4 PostgreSQL integration", () => {
         workerId: phase3WorkerId,
       }),
     ).resolves.toBe(true);
+  });
+
+  it("schedules compatible Workers by authoritative load and reserves the final slot once", async () => {
+    const repository = createPhase5Repository(database, selectWorker);
+    const runtimeImage = `agent-runtime:scheduler-${suffix}`;
+    const finalSlotImage = `agent-runtime:last-slot-${suffix}`;
+    await repository.createUser({
+      id: phase5UserId,
+      email: `scheduler-${suffix}@example.test`,
+      username: null,
+      passwordHash: await hashPassword("integration-scheduler-password"),
+      role: "user",
+    });
+
+    const [workerA, workerB, wrongArch, wrongCapability, wrongImage, lastSlot] =
+      phase5WorkerIds;
+    if (
+      workerA === undefined ||
+      workerB === undefined ||
+      wrongArch === undefined ||
+      wrongCapability === undefined ||
+      wrongImage === undefined ||
+      lastSlot === undefined
+    ) {
+      throw new Error("Phase 5 Worker fixtures are missing");
+    }
+
+    async function onlineWorker(input: {
+      workerId: string;
+      image: string;
+      architecture: "amd64" | "arm64";
+      browser: boolean;
+      maxWorkspaces: number;
+    }) {
+      const token = hashOpaqueToken(`scheduler-${input.workerId}-credential-token`);
+      await repository.provisionWorker({
+        workerId: input.workerId,
+        credentialHash: token,
+      });
+      await repository.recordWorkerHello({
+        credentialHash: token,
+        workerId: input.workerId,
+        hostname: `${input.workerId}.internal`,
+        architecture: input.architecture,
+        runtimeImage: input.image,
+        runtimeVersion: "phase-3",
+        capabilities: {
+          browser: input.browser,
+          office: false,
+          ffmpeg: false,
+          python: true,
+          node: true,
+          rust: false,
+        },
+        maxWorkspaces: input.maxWorkspaces,
+        // Deliberately stale-low: scheduler capacity and score must use
+        // Control Plane assignments, not this Worker observation.
+        allocatedWorkspaces: 0,
+        systemResources: {
+          logicalCpuCount: 8,
+          memoryBytes: 16 * 1024 ** 3,
+        },
+        receivedAt: NOW,
+      });
+    }
+
+    await onlineWorker({
+      workerId: workerA,
+      image: runtimeImage,
+      architecture: "arm64",
+      browser: true,
+      maxWorkspaces: 4,
+    });
+    await onlineWorker({
+      workerId: workerB,
+      image: runtimeImage,
+      architecture: "arm64",
+      browser: true,
+      maxWorkspaces: 8,
+    });
+    await onlineWorker({
+      workerId: wrongArch,
+      image: runtimeImage,
+      architecture: "amd64",
+      browser: true,
+      maxWorkspaces: 100,
+    });
+    await onlineWorker({
+      workerId: wrongCapability,
+      image: runtimeImage,
+      architecture: "arm64",
+      browser: false,
+      maxWorkspaces: 100,
+    });
+    await onlineWorker({
+      workerId: wrongImage,
+      image: `${runtimeImage}-other`,
+      architecture: "arm64",
+      browser: true,
+      maxWorkspaces: 100,
+    });
+    await onlineWorker({
+      workerId: lastSlot,
+      image: finalSlotImage,
+      architecture: "arm64",
+      browser: false,
+      maxWorkspaces: 1,
+    });
+
+    for (const [workerId, count] of [
+      [workerA, 2],
+      [workerB, 2],
+    ] as const) {
+      for (let index = 0; index < count; index += 1) {
+        await database`
+          insert into workspaces (
+            id, user_id, name, worker_id, state, runtime_image
+          ) values (
+            ${randomUUID()}, ${phase5UserId},
+            ${`load-${workerId}-${index}`}, ${workerId}, 'STOPPED', ${runtimeImage}
+          )
+        `;
+      }
+    }
+
+    const target = await repository.createWorkspace({
+      id: randomUUID(),
+      userId: phase5UserId,
+      name: "scored-placement",
+      runtimeImage,
+    });
+    await database`
+      update workspaces
+      set
+        required_architecture = 'arm64',
+        required_capabilities = ${database.json({ browser: true, python: true })}
+      where id = ${target.id}
+    `;
+    const placed = await repository.scheduleWorkspaceStart({
+      workspaceId: target.id,
+      userId: phase5UserId,
+      heartbeatCutoff: new Date(NOW.getTime() - 35_000),
+      connectedWorkerIds: phase5WorkerIds,
+    });
+    expect(placed).toMatchObject({
+      outcome: "STARTING",
+      sticky: false,
+      workspace: { workerId: workerB },
+    });
+    expect(
+      (await repository.listWorkersWithAssignments()).find(
+        (worker) => worker.id === workerB,
+      ),
+    ).toMatchObject({ assignedWorkspaces: 3, allocatedWorkspaces: 0 });
+
+    await database`update workspaces set state = 'STOPPED' where id = ${target.id}`;
+    await database`update workers set status = 'OFFLINE' where id = ${workerB}`;
+    const sticky = await repository.scheduleWorkspaceStart({
+      workspaceId: target.id,
+      userId: phase5UserId,
+      heartbeatCutoff: new Date(NOW.getTime() - 35_000),
+      connectedWorkerIds: [workerA],
+    });
+    expect(sticky).toMatchObject({
+      outcome: "STARTING",
+      sticky: true,
+      workspace: { workerId: workerB },
+    });
+
+    const contenders = await Promise.all(
+      ["last-slot-one", "last-slot-two"].map(async (name) => {
+        const workspace = await repository.createWorkspace({
+          id: randomUUID(),
+          userId: phase5UserId,
+          name,
+          runtimeImage: finalSlotImage,
+        });
+        return repository.scheduleWorkspaceStart({
+          workspaceId: workspace.id,
+          userId: phase5UserId,
+          heartbeatCutoff: new Date(NOW.getTime() - 35_000),
+          connectedWorkerIds: [lastSlot],
+        });
+      }),
+    );
+    expect(contenders.map((result) => result.outcome).sort()).toEqual([
+      "NO_ELIGIBLE_WORKER",
+      "STARTING",
+    ]);
+    const assignments = await database<Array<{ count: number }>>`
+      select count(*)::integer as count
+      from workspaces
+      where worker_id = ${lastSlot}
+    `;
+    expect(assignments[0]?.count).toBe(1);
   });
 });

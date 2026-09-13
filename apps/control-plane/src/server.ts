@@ -1,7 +1,7 @@
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase4Repository,
+  createPhase5Repository,
   migrateDatabase,
 } from "@agent-runtime/database";
 import { parseWorkspaceBaseUrl } from "@agent-runtime/gateway";
@@ -11,6 +11,7 @@ import { z } from "zod";
 import { buildControlPlane } from "./app.js";
 import { buildWorkspaceGateway } from "./gateway.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
+import { selectWorker } from "./scheduler.js";
 
 const WorkerGatewayTokensSchema = z
   .string()
@@ -104,7 +105,7 @@ const database = createDatabaseClient(config.DATABASE_URL);
 
 await migrateDatabase(database);
 
-const repository = createPhase4Repository(database);
+const repository = createPhase5Repository(database, selectWorker);
 const sessionExchanges = new WorkspaceSessionExchange(
   config.WORKSPACE_SESSION_EXCHANGE_TTL_MS,
 );

@@ -14,6 +14,7 @@ import {
   buildControlPlane,
   type ControlPlaneDependencies,
 } from "./app.js";
+import { selectWorker } from "./scheduler.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
 
 const ORIGIN = "http://portal.test";
@@ -173,28 +174,13 @@ async function createTestDependencies(
         worker.status = "ONLINE";
         return true;
       },
-      async listWorkers() {
-        return workers;
-      },
-      async listEligibleWorkerIds(input) {
-        const workspace = workspaces.find(
-          (candidate) =>
-            candidate.id === input.workspaceId &&
-            candidate.userId === input.userId,
-        );
-        if (workspace === undefined) return [];
-        return workers
-          .filter(
-            (worker) =>
-              worker.enabled &&
-              worker.status === "ONLINE" &&
-              worker.lastHeartbeatAt !== null &&
-              worker.lastHeartbeatAt > input.heartbeatCutoff &&
-              worker.runtimeImage === workspace.runtimeImage &&
-              worker.maxWorkspaces !== null &&
-              worker.allocatedWorkspaces < worker.maxWorkspaces,
-          )
-          .map((worker) => worker.id);
+      async listWorkersWithAssignments() {
+        return workers.map((worker) => ({
+          ...worker,
+          assignedWorkspaces: workspaces.filter(
+            (workspace) => workspace.workerId === worker.id,
+          ).length,
+        }));
       },
     },
     store: {
@@ -299,20 +285,46 @@ async function createTestDependencies(
         workspaces.splice(index, 1);
         return true;
       },
-      async beginWorkspaceStart(input) {
+      async scheduleWorkspaceStart(input) {
         const workspace = workspaces.find(
           (candidate) =>
             candidate.id === input.workspaceId &&
             candidate.userId === input.userId &&
-            (candidate.workerId === null || candidate.workerId === input.workerId) &&
             ["CREATED", "STOPPED", "ERROR", "WORKER_OFFLINE"].includes(
               candidate.state,
             ),
         );
-        if (workspace === undefined) return null;
-        workspace.workerId = input.workerId;
+        if (workspace === undefined) return { outcome: "WORKSPACE_CHANGED" };
+        const sticky = workspace.workerId !== null;
+        if (workspace.workerId === null) {
+          const selected = selectWorker({
+            workspace: {
+              runtimeImage: workspace.runtimeImage,
+              requiredArchitecture: null,
+              requiredCapabilities: {},
+            },
+            candidates: workers.map((worker) => ({
+              id: worker.id,
+              architecture: worker.architecture,
+              status: worker.status,
+              enabled: worker.enabled,
+              runtimeImage: worker.runtimeImage,
+              runtimeVersion: worker.runtimeVersion,
+              capabilities: worker.capabilities,
+              maxWorkspaces: worker.maxWorkspaces,
+              assignedWorkspaces: workspaces.filter(
+                (candidate) => candidate.workerId === worker.id,
+              ).length,
+              lastHeartbeatAt: worker.lastHeartbeatAt,
+            })),
+            connectedWorkerIds: input.connectedWorkerIds,
+            heartbeatCutoff: input.heartbeatCutoff,
+          });
+          if (selected === null) return { outcome: "NO_ELIGIBLE_WORKER" };
+          workspace.workerId = selected.id;
+        }
         workspace.state = "STARTING";
-        return workspace;
+        return { outcome: "STARTING", workspace, sticky };
       },
       async finishWorkspaceStart(input) {
         const workspace = workspaces.find(
@@ -628,7 +640,7 @@ describe("workspace ownership", () => {
   });
 });
 
-describe("Phase 3 Workspace Runtime lifecycle", () => {
+describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
   it("binds only one eligible Worker and drives ensure, start, stop, and delete", async () => {
     const dependencies = await createTestDependencies();
     const app = buildControlPlane(dependencies);
@@ -801,7 +813,7 @@ describe("Phase 3 Workspace Runtime lifecycle", () => {
     await app.close();
   });
 
-  it("refuses arbitrary placement when multiple eligible Workers are online", async () => {
+  it("selects deterministically when multiple equally loaded Workers are online", async () => {
     const app = buildControlPlane(await createTestDependencies());
     await app.ready();
     const worker1 = await app.injectWS("/api/workers/connect", {
@@ -809,6 +821,56 @@ describe("Phase 3 Workspace Runtime lifecycle", () => {
     });
     const worker2 = await app.injectWS("/api/workers/connect", {
       headers: { authorization: `Bearer ${WORKER_2_TOKEN}` },
+    });
+    const worker1Commands: string[] = [];
+    const worker2Commands: string[] = [];
+    worker1.on("message", (data) => {
+      const command = JSON.parse(data.toString()) as {
+        requestId: string;
+        type: "workspace.ensure" | "workspace.start";
+        payload: { workspaceId: string };
+      };
+      worker1Commands.push(command.type);
+      worker1.send(
+        JSON.stringify({
+          version: 1,
+          type: "response.ok",
+          requestId: command.requestId,
+          payload: {
+            requestType: command.type,
+            workspace: {
+              workspaceId: command.payload.workspaceId,
+              state: command.type === "workspace.start" ? "RUNNING" : "STOPPED",
+              runtimeImage: "agent-runtime:test-unassigned",
+              observedAt: NOW.toISOString(),
+            },
+          },
+        }),
+      );
+    });
+    worker2.on("message", (data) => {
+      const command = JSON.parse(data.toString()) as {
+        requestId: string;
+        type: "workspace.ensure" | "workspace.start";
+        payload: { workspaceId: string };
+      };
+      worker2Commands.push(command.type);
+      worker2.send(
+        JSON.stringify({
+          version: 1,
+          type: "response.ok",
+          requestId: command.requestId,
+          payload: {
+            requestType: command.type,
+            workspace: {
+              workspaceId: command.payload.workspaceId,
+              state: command.type === "workspace.start" ? "RUNNING" : "STOPPED",
+              runtimeImage: "agent-runtime:test-unassigned",
+              observedAt: NOW.toISOString(),
+            },
+          },
+        }),
+      );
     });
     worker1.send(JSON.stringify(workerHello("worker-01")));
     worker2.send(JSON.stringify(workerHello("worker-02")));
@@ -822,7 +884,7 @@ describe("Phase 3 Workspace Runtime lifecycle", () => {
         origin: ORIGIN,
         "x-csrf-token": owner.csrfToken,
       },
-      payload: { name: "needs-explicit-placement" },
+      payload: { name: "multi-worker-placement" },
     });
     const workspaceId = create.json<{ workspace: WorkspaceRecord }>().workspace.id;
     const start = await app.inject({
@@ -836,10 +898,38 @@ describe("Phase 3 Workspace Runtime lifecycle", () => {
       payload: {},
     });
 
-    expect(start.statusCode).toBe(409);
+    expect(start.statusCode).toBe(200);
     expect(start.json()).toMatchObject({
-      error: { code: "WORKER_ASSIGNMENT_REQUIRED" },
+      workspace: { workerId: "worker-01", state: "RUNNING" },
     });
+    const secondCreate = await app.inject({
+      method: "POST",
+      url: "/api/workspaces",
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+      payload: { name: "multi-worker-placement-2" },
+    });
+    const secondWorkspaceId = secondCreate.json<{ workspace: WorkspaceRecord }>()
+      .workspace.id;
+    const secondStart = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${secondWorkspaceId}/start`,
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+      payload: {},
+    });
+    expect(secondStart.statusCode).toBe(200);
+    expect(secondStart.json()).toMatchObject({
+      workspace: { workerId: "worker-02", state: "RUNNING" },
+    });
+    expect(worker1Commands).toEqual(["workspace.ensure", "workspace.start"]);
+    expect(worker2Commands).toEqual(["workspace.ensure", "workspace.start"]);
     worker1.close();
     worker2.close();
     await app.close();
@@ -881,6 +971,18 @@ describe("Worker reconnect reconciliation", () => {
     await vi.waitFor(() => {
       expect(dependencies.testState.workers[0]?.status).toBe("ONLINE");
     });
+    const otherWorker = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_2_TOKEN}` },
+    });
+    const otherWorkerCommands: string[] = [];
+    otherWorker.on("message", (data) => {
+      const command = JSON.parse(data.toString()) as { type: string };
+      otherWorkerCommands.push(command.type);
+    });
+    otherWorker.send(JSON.stringify(workerHello("worker-02")));
+    await vi.waitFor(() => {
+      expect(dependencies.testState.workers[1]?.status).toBe("ONLINE");
+    });
 
     const owner = await login(app, "user-a", "password-for-user-a");
     const create = await app.inject({
@@ -909,8 +1011,14 @@ describe("Worker reconnect reconciliation", () => {
     const firstClosed = once(firstWorker, "close");
     firstWorker.close();
     await firstClosed;
-    expect(dependencies.testState.markWorkersOffline(NOW)).toBe(1);
+    const assignedWorker = dependencies.testState.workers[0];
+    if (assignedWorker === undefined) throw new Error("Worker fixture missing");
+    assignedWorker.lastHeartbeatAt = new Date(NOW.getTime() - 35_000);
+    expect(
+      dependencies.testState.markWorkersOffline(new Date(NOW.getTime() - 1)),
+    ).toBe(1);
     expect(dependencies.testState.workspaces[0]?.state).toBe("WORKER_OFFLINE");
+    expect(dependencies.testState.workspaces[0]?.workerId).toBe("worker-01");
 
     const reconnectedWorker = await app.injectWS("/api/workers/connect", {
       headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
@@ -977,11 +1085,15 @@ describe("Worker reconnect reconciliation", () => {
       headers: { cookie: owner.cookie },
     });
     expect(afterReconciliation.json()).toMatchObject({
-      workspaces: [{ id: workspaceId, state: "RUNNING" }],
+      workspaces: [
+        { id: workspaceId, workerId: "worker-01", state: "RUNNING" },
+      ],
     });
     expect(reconnectCommands).toEqual(["workspace.inspect"]);
+    expect(otherWorkerCommands).toEqual([]);
 
     reconnectedWorker.close();
+    otherWorker.close();
     await app.close();
   });
 
@@ -1237,7 +1349,7 @@ describe("Phase 2 worker control channel", () => {
 
   it("restricts the Worker inventory to admins and derives Offline by age", async () => {
     const dependencies = await createTestDependencies();
-    const workers = await dependencies.workerStore.listWorkers();
+    const workers = dependencies.testState.workers;
     const first = workers[0];
     const second = workers[1];
     if (first === undefined || second === undefined) throw new Error("fixture missing");

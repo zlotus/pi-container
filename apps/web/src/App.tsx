@@ -22,6 +22,7 @@ interface Worker {
   status: "ONLINE" | "OFFLINE" | "DISABLED";
   runtimeVersion: string | null;
   maxWorkspaces: number | null;
+  assignedWorkspaces: number;
   allocatedWorkspaces: number;
   lastHeartbeatAt: string | null;
 }
@@ -317,7 +318,9 @@ export function App() {
                         <td><strong>{worker.id}</strong><small>{worker.hostname ?? "尚未连接"}</small></td>
                         <td><span className={`state worker-${worker.status.toLowerCase()}`}>{worker.status}</span></td>
                         <td>{worker.architecture ?? "—"}</td>
-                        <td>{worker.allocatedWorkspaces}/{worker.maxWorkspaces ?? "—"}</td>
+                        <td title={`Worker 最近上报 ${worker.allocatedWorkspaces} 个 Runtime`}>
+                          {worker.assignedWorkspaces}/{worker.maxWorkspaces ?? "—"}
+                        </td>
                         <td>{worker.lastHeartbeatAt === null ? "—" : new Date(worker.lastHeartbeatAt).toLocaleString()}</td>
                       </tr>
                     ))}
@@ -332,7 +335,7 @@ export function App() {
           <section className="empty-state">
             <span>＋</span>
             <h2>还没有 Workspace</h2>
-            <p>创建第一个工作环境，在唯一 eligible Worker 上启动 pi-web。</p>
+            <p>创建第一个工作环境，由 Scheduler 选择 compatible Worker 启动 pi-web。</p>
           </section>
         ) : (
           <section className="workspace-grid">

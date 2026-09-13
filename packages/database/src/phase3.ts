@@ -63,21 +63,25 @@ export function createPhase3Repository(database: DatabaseClient) {
     }): Promise<string[]> {
       const rows = await database<Array<{ id: string }>>`
         select workers.id
-        from workspaces
+        from workspaces workspace
         join workers on
           workers.enabled
           and workers.status = 'ONLINE'
           and workers.last_heartbeat_at > ${input.heartbeatCutoff}
-          and workers.runtime_image = workspaces.runtime_image
+          and workers.runtime_image = workspace.runtime_image
           and workers.max_workspaces is not null
-          and workers.allocated_workspaces < workers.max_workspaces
           and (
-            workspaces.required_architecture is null
-            or workers.architecture = workspaces.required_architecture
+            select count(*)
+            from workspaces assigned
+            where assigned.worker_id = workers.id
+          ) < workers.max_workspaces
+          and (
+            workspace.required_architecture is null
+            or workers.architecture = workspace.required_architecture
           )
-          and workers.capabilities @> workspaces.required_capabilities
-        where workspaces.id = ${input.workspaceId}
-          and workspaces.user_id = ${input.userId}
+          and workers.capabilities @> workspace.required_capabilities
+        where workspace.id = ${input.workspaceId}
+          and workspace.user_id = ${input.userId}
         order by workers.id asc
       `;
       return rows.map((row) => row.id);

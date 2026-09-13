@@ -12,8 +12,9 @@ import type {
   Phase1Repository,
   Phase2Repository,
   Phase3Repository,
+  Phase5Repository,
   UserRecord,
-  WorkerRecord,
+  WorkerPlacementRecord,
   WorkspaceRecord,
 } from "@agent-runtime/database";
 import type {
@@ -57,7 +58,7 @@ const INVALID_LOGIN_HASH =
   "scrypt$N=16384,r=8,p=1$MDEyMzQ1Njc4OWFiY2RlZg$91N6IibOCNGoJIaLSVpuW8f6Qg4lxDxxq0yCck7RYgnoDkMSGEYhoP9aqNjR08hwW6OkhlITEQoD_Hoq0k5wxQ";
 
 type Phase1Store = Pick<
-  Phase1Repository & Phase3Repository,
+  Phase1Repository & Phase3Repository & Phase5Repository,
   | "findUserByLogin"
   | "createSession"
   | "findActiveSession"
@@ -66,7 +67,7 @@ type Phase1Store = Pick<
   | "createWorkspace"
   | "findOwnedWorkspace"
   | "deleteOwnedWorkspace"
-  | "beginWorkspaceStart"
+  | "scheduleWorkspaceStart"
   | "finishWorkspaceStart"
   | "beginWorkspaceStop"
   | "finishWorkspaceStop"
@@ -78,8 +79,8 @@ type Phase1Store = Pick<
 >;
 
 type WorkerAdminStore = Pick<
-  Phase2Repository & Phase3Repository,
-  "listWorkers" | "listEligibleWorkerIds"
+  Phase2Repository & Phase3Repository & Phase5Repository,
+  "listWorkersWithAssignments"
 >;
 
 export interface ControlPlaneDependencies {
@@ -164,7 +165,7 @@ function publicWorkspace(workspace: WorkspaceRecord) {
 }
 
 function publicWorker(
-  worker: WorkerRecord,
+  worker: WorkerPlacementRecord,
   currentTime: Date,
   offlineAfterMs: number,
 ) {
@@ -184,6 +185,7 @@ function publicWorker(
     runtimeVersion: worker.runtimeVersion,
     capabilities: worker.capabilities,
     maxWorkspaces: worker.maxWorkspaces,
+    assignedWorkspaces: worker.assignedWorkspaces,
     allocatedWorkspaces: worker.allocatedWorkspaces,
     systemResources: worker.systemResources,
     lastHeartbeatAt: worker.lastHeartbeatAt?.toISOString() ?? null,
@@ -549,7 +551,7 @@ export function buildControlPlane(
         .send(errorBody("FORBIDDEN", "Administrator access is required"));
     }
     const currentTime = now();
-    const workers = await dependencies.workerStore.listWorkers();
+    const workers = await dependencies.workerStore.listWorkersWithAssignments();
     reply.header("cache-control", "no-store");
     return {
       workers: workers.map((worker) =>
@@ -649,55 +651,53 @@ export function buildControlPlane(
       return { workspace: publicWorkspace(workspace) };
     }
 
-    let workerId = workspace.workerId;
-    if (workerId === null) {
-      const eligibleWorkerIds = await dependencies.workerStore.listEligibleWorkerIds({
-        workspaceId: workspace.id,
-        userId: auth.session.user.id,
-        heartbeatCutoff: new Date(
-          now().getTime() - dependencies.workerOfflineAfterMs,
-        ),
-      });
-      const connectedEligibleWorkerIds = eligibleWorkerIds.filter((candidate) =>
-        workerChannel.isConnected(candidate),
-      );
-      if (connectedEligibleWorkerIds.length === 0) {
-        return reply
-          .code(503)
-          .send(
-            errorBody(
-              "NO_ELIGIBLE_WORKER",
-              "No eligible Worker is online for this Runtime",
-            ),
-          );
-      }
-      if (connectedEligibleWorkerIds.length !== 1) {
-        return reply
-          .code(409)
-          .send(
-            errorBody(
-              "WORKER_ASSIGNMENT_REQUIRED",
-              "Multiple eligible Workers are online; assign one before starting",
-            ),
-          );
-      }
-      workerId = connectedEligibleWorkerIds[0] ?? null;
-    }
-    if (workerId === null || !workerChannel.isConnected(workerId)) {
+    if (
+      workspace.workerId !== null &&
+      !workerChannel.isConnected(workspace.workerId)
+    ) {
       return reply
         .code(503)
         .send(errorBody("WORKER_UNAVAILABLE", "Assigned Worker is unavailable"));
     }
 
-    const starting = await dependencies.store.beginWorkspaceStart({
+    const scheduling = await dependencies.store.scheduleWorkspaceStart({
       workspaceId: workspace.id,
       userId: auth.session.user.id,
-      workerId,
+      heartbeatCutoff: new Date(
+        now().getTime() - dependencies.workerOfflineAfterMs,
+      ),
+      connectedWorkerIds: workerChannel.connectedWorkerIds(),
     });
-    if (starting === null) {
+    if (scheduling.outcome === "NO_ELIGIBLE_WORKER") {
+      return reply
+        .code(503)
+        .send(
+          errorBody(
+            "NO_ELIGIBLE_WORKER",
+            "No eligible Worker is online for this Runtime",
+          ),
+        );
+    }
+    if (scheduling.outcome === "WORKSPACE_CHANGED") {
       return reply
         .code(409)
         .send(errorBody("WORKSPACE_CHANGED", "Workspace state changed; retry"));
+    }
+    const starting = scheduling.workspace;
+    const workerId = starting.workerId;
+    if (workerId === null) {
+      throw new Error("Scheduler returned a Workspace without a Worker");
+    }
+    if (!workerChannel.isConnected(workerId)) {
+      const unavailable: Extract<DispatchResult, { ok: false }> = {
+        ok: false,
+        workerOffline: true,
+        statusCode: 503,
+        code: "WORKER_UNAVAILABLE",
+        message: "Assigned Worker is unavailable",
+      };
+      await markRuntimeFailure(workspace.id, workerId, unavailable);
+      return sendDispatchFailure(reply, unavailable);
     }
 
     const ensured = await dispatchRuntimeCommand(workerId, {

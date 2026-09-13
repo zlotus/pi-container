@@ -47,6 +47,13 @@ export class WorkerChannel {
     return this.#connections.get(workerId)?.readyState === 1;
   }
 
+  connectedWorkerIds(): string[] {
+    return [...this.#connections]
+      .filter(([, socket]) => socket.readyState === 1)
+      .map(([workerId]) => workerId)
+      .sort();
+  }
+
   register(workerId: string, socket: ChannelSocket): void {
     const existing = this.#connections.get(workerId);
     if (existing !== undefined && existing !== socket) {

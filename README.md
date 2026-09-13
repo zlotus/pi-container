@@ -4,10 +4,10 @@
 [pi-web](https://github.com/agegr/pi-web) 与 Pi Coding Agent，自身只负责认证、
 Workspace、Worker、Docker 生命周期、调度和安全代理。
 
-当前仓库已实现 **Phase 4：Authenticated Gateway**：在 Phase 3 Minimal Runtime 主链上
-增加 Workspace subdomain、短时单次 session exchange、host-only Cookie，以及经过两级
-认证和 ownership/RUNNING 检查的 Control Plane Gateway 与 Worker Gateway。HTTP、SSE 和
-WebSocket upgrade 均透明代理到原始 pi-web，不复制其 Chat、Terminal 或 streaming 实现。
+当前仓库已实现 **Phase 5：Multi-host Scheduler**：在 Phase 4 Authenticated Gateway 主链上
+增加多 Worker eligibility、capacity、architecture/runtime/capability compatibility、负载评分、
+deterministic tie-break 和 sticky placement。HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理
+到原始 pi-web，不复制其 Chat、Terminal 或 streaming 实现。
 
 ## Prerequisites
 
@@ -91,6 +91,13 @@ pnpm worker:provision
 # 安全保存输出的 WORKER_TOKEN 与 WORKER_GATEWAY_TOKEN，然后为 worker-b 重复一次
 ```
 
+第二台 Worker 必须使用不同的 `WORKER_ID`、control/data-plane token 和 Gateway 地址；不同宿主机
+可以使用相同监听端口，仅同宿主机运行多个 Worker daemon 时端口必须不同。例如预注册
+`worker-b` 的受保护地址 `https://worker-b.internal:3100`，再把
+其私有环境中的 `WORKER_ID=worker-b`、`WORKER_GATEWAY_HOST` 和 token 与该预注册记录对应起来。
+Control Plane 的 `WORKER_GATEWAY_TOKENS_JSON` 需要同时包含 `worker-a`、`worker-b`；不要复制
+第一台 Worker 的 credential。
+
 将 `WORKER_GATEWAY_TOKEN` 写入该 Worker 的私有环境；同时把同一值放入 Control Plane
 `.env` 的 JSON 映射，例如：
 
@@ -173,10 +180,19 @@ GET    /api/admin/workers
 WS     /api/workers/connect
 ```
 
-首次启动仅在恰好一个在线、enabled、容量未满且 Runtime/架构/capability 兼容的 Worker
-存在时自动绑定；零个会返回 unavailable，多个会要求管理员预先固定 assignment，不做
-Phase 5 的评分或随机选择。已分配 Workspace 的删除必须等待 Worker 明确确认 managed
-Container、独立 network 与持久目录均已删除，Control Plane 才删除 metadata。
+首次启动会从当前 Control Plane 已认证连接、在线、enabled、heartbeat 新鲜、容量未满且
+Runtime image/架构/capability 兼容的 Worker 中选择。load score 为 PostgreSQL 中该 Worker 的
+sticky Workspace assignment 数除以 `max_workspaces`，最低者优先，相同 score 按 Worker ID
+升序确定性选择。capacity 的 authoritative source 是 `workspaces.worker_id` assignment count；
+heartbeat 的 `allocated_workspaces` 只作为 Worker 本机观测，不参与 reservation。选择和写入
+`worker_id` 在同一 PostgreSQL placement transaction 中完成，因此并发首次启动不能共同占用
+最后一个 slot。Admin Worker 表的 `Workspace` 列显示 authoritative assignment/max，悬停可看
+最近 heartbeat 上报的 Runtime 数。
+
+Workspace 一旦拥有 `workerId` 就保持 sticky placement；stop、Worker offline/reconnect、Runtime
+错误或 Worker capability 变化都不会触发 Scheduler 自动迁移。已分配 Workspace 的删除必须等待
+原 Worker 明确确认 managed Container、独立 network 与持久目录均已删除，Control Plane 才删除
+metadata 并释放该 assignment。
 
 Phase 3/Runtime 诊断时，仍可在 Worker 宿主机用下面的命令查看仅绑定 loopback 的端口：
 

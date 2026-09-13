@@ -49,3 +49,13 @@ export {
   type Phase4Repository,
   type WorkerGatewayRoute,
 } from "./phase4.js";
+export {
+  createPhase5Repository,
+  type Phase5Repository,
+  type ScheduleWorkspaceStartResult,
+  type WorkerPlacementRecord,
+  type WorkerScheduleCandidate,
+  type WorkerSelectionInput,
+  type WorkerSelector,
+  type WorkspaceSchedulingRequirements,
+} from "./phase5.js";

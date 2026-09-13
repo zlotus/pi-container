@@ -574,18 +574,38 @@ Workspace
 
 - ONLINE
 - enabled
+- 当前 Control Plane 上存在 authenticated control channel
+- heartbeat 未超过 offline threshold
 - 未超容量
 - architecture compatible
 - runtime image compatible
 - capability compatible
 
-最简单 score：
+Phase 5 的 capacity authoritative source 固定为 Control Plane PostgreSQL 中已有的
+sticky assignment 数量：
 
 ```text
-allocated_workspaces / max_workspaces
+count(workspaces.worker_id = worker.id)
 ```
 
-选最低值。
+计数包含 STOPPED、ERROR、WORKER_OFFLINE 等仍占有该 Worker 本地持久 Runtime 的 Workspace；
+只有 destructive delete 确认完成并删除 metadata 后才释放 assignment。Worker heartbeat 中的
+`allocated_workspaces` 是本机观测 telemetry，可能滞后，不作为新 placement 的 reservation 或
+capacity 真相。
+
+首次 placement 必须在 PostgreSQL 短事务中完成“读取 authoritative assignment count、选择
+Worker、写入 sticky `worker_id`”的原子 reservation，并发请求不能共同占用最后一个 slot。
+
+Phase 5 load score：
+
+```text
+authoritative_assigned_workspaces / max_workspaces
+```
+
+选择最低值；score 相同时按 Worker ID 升序做 deterministic tie-break。runtime compatibility
+在当前 Workspace 数据模型中指 `workspaces.runtime_image == workers.runtime_image` 的精确匹配；
+`runtime_version` 继续作为 Worker 镜像内容版本的观测字段，不替代 Workspace 声明的 image
+identity。
 
 ---
 
@@ -2140,17 +2160,20 @@ Open Workspace A
 完成：
 
 - Worker selection
-- capacity
-- capability
-- architecture/runtime compatibility
-- load score
-- sticky placement
+- capacity，以 PostgreSQL sticky assignment count 为 authoritative source
+- capability compatibility
+- architecture / exact runtime image compatibility
+- `assigned / max` load score 与 Worker ID deterministic tie-break
+- sticky placement；已有 `worker_id` 不重新进入候选选择
+- PostgreSQL 事务内原子 placement reservation
 
 验收：
 
 ```text
 Workspace A -> Host A
 Workspace B -> Host B
+并发首次启动 -> 不突破任一 Worker 的 max_workspaces
+Worker A offline/reconnect -> 原 Workspace 仍绑定 Worker A
 ```
 
 ---
