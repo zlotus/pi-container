@@ -8,6 +8,12 @@ RUN apt-get update \
       pnpm@11.24.0 \
     && rm -rf /var/lib/apt/lists/* /root/.npm
 
+COPY patches/pi-web-0.9.0-default-cwd.mjs /tmp/pi-web-0.9.0-default-cwd.mjs
+
+RUN node /tmp/pi-web-0.9.0-default-cwd.mjs \
+      /opt/agent-runtime/lib/node_modules/@agegr/pi-web \
+    && rm /tmp/pi-web-0.9.0-default-cwd.mjs
+
 FROM node:22.20.0-bookworm-slim@sha256:b21fe589dfbe5cc39365d0544b9be3f1f33f55f3c86c87a76ff65a02f8f5848e
 
 RUN apt-get update \
@@ -36,6 +42,7 @@ RUN ln -s /opt/agent-runtime/bin/pi /usr/local/bin/pi \
 ENV HOME=/home/agent \
     PATH=/opt/agent-runtime/bin:${PATH} \
     PI_CODING_AGENT_DIR=/agent/pi \
+    PI_WEB_DEFAULT_CWD=/workspace \
     PI_WEB_HOSTNAME=0.0.0.0 \
     PI_WEB_NO_OPEN=1 \
     PI_WEB_SKIP_VERSION_CHECK=1 \

@@ -248,6 +248,9 @@ describe("Docker Workspace Runtime", () => {
     expect(docker.createdOptions?.Env).toContain(
       `PI_WEB_ALLOWED_HOSTS=${WORKSPACE_ID}.agent.example.internal`,
     );
+    expect(docker.createdOptions?.Env).toContain(
+      "PI_WEB_DEFAULT_CWD=/workspace",
+    );
     const workspaceFile = join(
       root,
       "workspaces",

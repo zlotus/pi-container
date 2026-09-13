@@ -7,7 +7,8 @@ Workspace、Worker、Docker 生命周期、调度和安全代理。
 当前仓库已实现 **Phase 5：Multi-host Scheduler**：在 Phase 4 Authenticated Gateway 主链上
 增加多 Worker eligibility、capacity、architecture/runtime/capability compatibility、负载评分、
 deterministic tie-break 和 sticky placement。HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理
-到原始 pi-web，不复制其 Chat、Terminal 或 streaming 实现。
+到原始 pi-web，不复制其 Chat、Terminal 或 streaming 实现。两台真实 Worker 的 Phase 5
+multi-host 人工验收已经通过；生产 TLS/wildcard certificate 仍是独立的部署验收项。
 
 ## Prerequisites
 
@@ -50,7 +51,21 @@ unset LOCAL_USER_PASSWORD
 密码至少 12 个字符，以 scrypt 和随机 salt 保存。`LOCAL_USER_USERNAME` 可省略。查看
 Worker 管理页的账户应将 `LOCAL_USER_ROLE` 设置为 `admin`。
 
-## Run the Portal and Control Plane
+## Single-host local development
+
+`deploy/.env.example` is the single-host profile. Keep all listeners on loopback and use the
+browser-resolvable `.localhost` wildcard:
+
+```env
+HOST=127.0.0.1
+PORT=3000
+
+GATEWAY_HOST=127.0.0.1
+GATEWAY_PORT=3001
+
+PORTAL_ORIGIN=http://127.0.0.1:5173
+WORKSPACE_BASE_URL=http://agent.localhost:3001
+```
 
 启动 Control Plane：
 
@@ -72,6 +87,9 @@ pnpm dev:web
 Gateway；开发环境使用 `http://<workspace-id>.agent.localhost:3001`。`GET /health` 是
 Control Plane 进程存活检查，`GET /ready` 会验证 PostgreSQL 连接。
 
+`*.agent.localhost` 只适合浏览器、Portal、Control Plane 和 Worker 位于同一台机器的本地开发，
+不能直接复用于远端 Worker 或其他主机上的浏览器。
+
 本地 HTTP 开发环境显式设置 `SESSION_COOKIE_SECURE=false`，使用 host-only
 `platform-session` Cookie。HTTPS 部署必须设置 `SESSION_COOKIE_SECURE=true`，此时平台
 使用带 `Secure`、`HttpOnly`、`SameSite=Lax` 的 `__Host-platform-session` Cookie。
@@ -88,22 +106,26 @@ data-plane token；数据库只保存 control token 的 hash，data-plane token 
 export WORKER_ID=worker-a
 export WORKER_GATEWAY_BASE_URL=http://127.0.0.1:3100
 pnpm worker:provision
-# 安全保存输出的 WORKER_TOKEN 与 WORKER_GATEWAY_TOKEN，然后为 worker-b 重复一次
+# 安全保存输出的 WORKER_TOKEN 与 WORKER_GATEWAY_TOKEN，然后为其他 Worker 重复一次
 ```
 
 第二台 Worker 必须使用不同的 `WORKER_ID`、control/data-plane token 和 Gateway 地址；不同宿主机
 可以使用相同监听端口，仅同宿主机运行多个 Worker daemon 时端口必须不同。例如预注册
-`worker-b` 的受保护地址 `https://worker-b.internal:3100`，再把
-其私有环境中的 `WORKER_ID=worker-b`、`WORKER_GATEWAY_HOST` 和 token 与该预注册记录对应起来。
-Control Plane 的 `WORKER_GATEWAY_TOKENS_JSON` 需要同时包含 `worker-a`、`worker-b`；不要复制
+`worker-c` 的受保护地址 `https://worker-c.internal:3100`，再把
+其私有环境中的 `WORKER_ID=worker-c`、`WORKER_GATEWAY_HOST` 和 token 与该预注册记录对应起来。
+Control Plane 的 `WORKER_GATEWAY_TOKENS_JSON` 需要同时包含 `worker-a`、`worker-c`；不要复制
 第一台 Worker 的 credential。
 
 将 `WORKER_GATEWAY_TOKEN` 写入该 Worker 的私有环境；同时把同一值放入 Control Plane
 `.env` 的 JSON 映射，例如：
 
-```text
-WORKER_GATEWAY_TOKENS_JSON={"worker-a":"<worker-a-gateway-token>"}
+```env
+WORKER_GATEWAY_TOKENS_JSON={"worker-a":"<worker-a-gateway-token>","worker-c":"<worker-c-gateway-token>"}
 ```
+
+每个 Worker 的 `WORKER_TOKEN` 和 `WORKER_GATEWAY_TOKEN` 都必须独立。前者只认证 Worker 主动建立的
+WebSocket control channel，后者只认证 Control Plane 到 Worker Gateway 的 data plane；两类 token
+不得混用，不同 Worker 之间也不得复用。
 
 为已有 Phase 3 Worker 补登记 Gateway 时使用：
 
@@ -139,6 +161,88 @@ set +a
 pnpm dev:worker
 ```
 
+## Real multi-host development and acceptance
+
+真实跨主机环境必须把 bind address、浏览器 canonical origin 和节点间访问地址分开配置。以下是
+Phase 5 人工验收拓扑的开发示例：Control Plane/Portal 位于 `192.168.1.124`，远端
+`worker-c` 位于 `192.168.1.123`。
+
+### Control Plane and Portal host
+
+Control Plane 的 `.env` 使用：
+
+```env
+HOST=0.0.0.0
+PORT=3000
+
+GATEWAY_HOST=0.0.0.0
+GATEWAY_PORT=3001
+
+PORTAL_ORIGIN=http://192.168.1.124:5173
+WORKSPACE_BASE_URL=http://agent.192.168.1.124.nip.io:3001
+```
+
+- `HOST=0.0.0.0` 让远端 Worker 能主动连接 Control Plane 的 WebSocket control channel。
+- `GATEWAY_HOST=0.0.0.0` 让其他主机上的浏览器能访问 Workspace Gateway。
+- `PORTAL_ORIGIN` 是浏览器真正访问的 canonical origin，必须包含真实 hostname/IP 和端口；
+  `0.0.0.0` 只是 bind address，不能写入 `PORTAL_ORIGIN`。
+- `WORKSPACE_BASE_URL` 必须使用客户端可解析、且指向 Control Plane Gateway 的 wildcard hostname。
+  `agent.192.168.1.124.nip.io` 会让 `<workspace-id>.agent.192.168.1.124.nip.io` 解析到该主机。
+
+Portal 当前的 `pnpm dev:web` 脚本固定监听 `127.0.0.1`。跨主机验收可在 Control Plane 主机上
+临时运行下列命令；长期运行的开发服务也应把同一 `vite --host 0.0.0.0` 命令写入其进程配置：
+
+```bash
+VITE_API_PROXY_TARGET=http://127.0.0.1:3000 \
+  pnpm --filter @agent-runtime/web exec vite --host 0.0.0.0
+```
+
+此处 `--host` 控制 Vite listener，`PORTAL_ORIGIN=http://192.168.1.124:5173` 仍控制浏览器/API
+安全语义，两者不能互相替代。`nip.io` 只作为开发/验收 wildcard DNS 示例；生产环境应使用企业
+内部 DNS、wildcard certificate 和受信 TLS termination，本次验收没有证明生产 TLS 已完成。
+
+### Remote Worker
+
+`worker-c` 的私有环境示例：
+
+```env
+CONTROL_PLANE_URL=ws://192.168.1.124:3000/api/workers/connect
+
+WORKER_ID=worker-c
+WORKER_TOKEN=<worker-c-control-token>
+WORKER_GATEWAY_TOKEN=<worker-c-data-plane-token>
+WORKER_GATEWAY_HOST=0.0.0.0
+WORKER_GATEWAY_PORT=3100
+
+WORKSPACE_BASE_URL=http://agent.192.168.1.124.nip.io:3001
+```
+
+在 Control Plane 主机预注册的则是 Control Plane 实际访问 Worker Gateway 的地址：
+
+```bash
+export WORKER_ID=worker-c
+export WORKER_GATEWAY_BASE_URL=http://192.168.1.123:3100
+pnpm worker:provision
+```
+
+`WORKER_GATEWAY_HOST` 是 Worker 本机 listener 的 bind address；`WORKER_GATEWAY_BASE_URL` 是
+Control Plane 持久化并实际访问的 route。真实多主机时，后者绝不能注册成远端 Worker 自己的
+`127.0.0.1`。开发期使用 `0.0.0.0` listener 时也应通过主机防火墙或受保护 LAN/VPN 限制只有
+Control Plane 可达，不得把 Worker Gateway 作为用户入口。
+
+### Multi-host troubleshooting
+
+若 Workspace session exchange 的 `POST /_platform/session` 返回 `200`，但随后 `GET /` 返回
+`404 WORKSPACE_NOT_FOUND` 或 unavailable，优先核对：
+
+1. Workspace 绑定的 Worker ID 与数据库中预注册的 `WORKER_GATEWAY_BASE_URL`；
+2. 该 Worker 的 authenticated heartbeat 是否仍在线、新鲜，且 Gateway route 从 Control Plane 可达；
+3. `WORKER_GATEWAY_TOKENS_JSON` 是否使用完全相同的 Worker ID 作为 key，并匹配该 Worker 的
+   `WORKER_GATEWAY_TOKEN`。
+
+本次验收曾把 `worker-c` 的 gateway token 错写到 `worker-b` key 下，表现正是 exchange 成功、
+随后 Workspace 根路径不可用。修正映射后仍应保持每个 Worker 的 control/data-plane token 相互独立。
+
 同一 credential 不能在 `worker.hello` 中声明另一个 Worker ID。默认每 10 秒 heartbeat，
 35 秒未收到服务端认可的 hello/heartbeat 后 Admin 列表显示 `OFFLINE`。轮换凭证使用：
 
@@ -158,10 +262,10 @@ pnpm worker:rotate
 应使用 `wss://`；示例中的 `ws://127.0.0.1` 仅用于 loopback 开发。
 
 Worker Gateway 默认仅监听 `127.0.0.1:3100`。多主机部署必须改为 Control Plane 可达、
-最终用户不可达的受保护 LAN/VPN 地址，并把该 HTTPS origin 预注册为
-`WORKER_GATEWAY_BASE_URL`。可通过 `WORKER_GATEWAY_TLS_CERT_PATH` 与
-`WORKER_GATEWAY_TLS_KEY_PATH` 启用原生 TLS；两项必须同时配置。Runtime 不持有 control
-或 data-plane credential。
+最终用户不可达的受保护 LAN/VPN 地址，并把对应 URL 预注册为 `WORKER_GATEWAY_BASE_URL`。
+开发验收可以在受保护网络使用 HTTP；生产应使用 HTTPS。可通过
+`WORKER_GATEWAY_TLS_CERT_PATH` 与 `WORKER_GATEWAY_TLS_KEY_PATH` 启用原生 TLS；两项必须
+同时配置。Runtime 不持有 control 或 data-plane credential。
 
 Platform API：
 
@@ -193,6 +297,13 @@ Workspace 一旦拥有 `workerId` 就保持 sticky placement；stop、Worker off
 错误或 Worker capability 变化都不会触发 Scheduler 自动迁移。已分配 Workspace 的删除必须等待
 原 Worker 明确确认 managed Container、独立 network 与持久目录均已删除，Control Plane 才删除
 metadata 并释放该 assignment。
+
+平台把 `/workspace` 固定为 Workspace 的 persistent project root。Runtime image 和 Worker
+Container 都显式设置 working directory `/workspace`；针对 pinned pi-web 0.9.0 的小型构建期 patch
+让 `PI_WEB_DEFAULT_CWD=/workspace` 成为新 Pi Session 的默认 cwd，并由原路由把它加入合法 file
+root。Session JSONL 的 header 记录 `cwd: "/workspace"`，文件本身继续持久化在
+`PI_CODING_AGENT_DIR=/agent/pi`。平台只承诺 `/workspace` 与 `/agent/pi` 两个 managed bind mount，
+不持久化整个 `/home/agent`；未设置该环境变量时 patch 保留上游 `~/pi-cwd-YYYYMMDD` fallback。
 
 Phase 3/Runtime 诊断时，仍可在 Worker 宿主机用下面的命令查看仅绑定 loopback 的端口：
 

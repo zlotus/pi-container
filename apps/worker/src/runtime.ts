@@ -168,6 +168,7 @@ export class DockerWorkspaceRuntime {
           Env: [
             "HOME=/home/agent",
             "PI_CODING_AGENT_DIR=/agent/pi",
+            "PI_WEB_DEFAULT_CWD=/workspace",
             "PI_WEB_HOSTNAME=0.0.0.0",
             "PI_WEB_NO_OPEN=1",
             "PI_WEB_SKIP_VERSION_CHECK=1",
@@ -673,6 +674,7 @@ export class DockerWorkspaceRuntime {
       inspection.Config.User !== this.#runtimeUser ||
       inspection.Config.WorkingDir !== "/workspace" ||
       !inspection.Config.Env.includes("PI_CODING_AGENT_DIR=/agent/pi") ||
+      !inspection.Config.Env.includes("PI_WEB_DEFAULT_CWD=/workspace") ||
       inspection.Mounts.length !== 2 ||
       inspection.HostConfig.Privileged ||
       inspection.HostConfig.NetworkMode !== networkName ||

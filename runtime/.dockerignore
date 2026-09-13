@@ -1,2 +1,4 @@
 *
 !Dockerfile
+!patches/
+!patches/pi-web-0.9.0-default-cwd.mjs

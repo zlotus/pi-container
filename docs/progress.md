@@ -4,9 +4,10 @@ Last reviewed: 2026-09-13
 
 ## Current Milestone
 
-Phase 1～4 已完成人工验收，包括真实 Worker daemon reconnect 后的定向 reconciliation。
-Phase 5 Multi-host Scheduler 已完成代码、单元测试和 PostgreSQL 并发集成验证；当前等待两台真实
-Worker 的跨主机 placement 验收。尚未进入 Phase 6 Persistence / Recovery。
+Phase 1～5 已完成人工验收。Phase 5 已在两台真实 Worker 的 multi-host 拓扑验证 Scheduler、
+sticky/offline/reconnect 语义、跨主机 Gateway data path 与持久化。post-acceptance cleanup 已补充
+真实部署说明，并把新 Pi Session 的默认项目根固定为 `/workspace`。尚未进入 Phase 6
+Persistence / Recovery。
 
 ## Current Baseline
 
@@ -42,6 +43,9 @@ Worker 的跨主机 placement 验收。尚未进入 Phase 6 Persistence / Recove
   `PI_WEB_ALLOWED_HOSTS`。绝对 upstream redirect 会改写回公共 Workspace origin。
 - Runtime 仍为 Phase 3 Minimal Image：digest-pinned Node.js 22.20.0、pi-web 0.9.0、Pi
   0.85.1、pnpm 11.24.0，以及 shell/core CLI、Git、Python、Node；Phase 7 Toolchain 未提前加入。
+  针对 pi-web 0.9.0 唯一的 downstream 行为变更是带 pinned-version/精确片段校验的构建期
+  default-cwd patch：平台设置 `PI_WEB_DEFAULT_CWD=/workspace`，未设置时保留上游
+  `~/pi-cwd-YYYYMMDD` fallback。
 - Worker 的 Docker 基线保持不变：UID/GID 1000、非 privileged、drop all capabilities、
   no-new-privileges、CPU/memory/PID limit、两个 managed bind mount、每 Workspace 独立 bridge、
   无 Docker socket，pi-web 只发布到动态 loopback port。
@@ -64,34 +68,49 @@ Worker 的跨主机 placement 验收。尚未进入 Phase 6 Persistence / Recove
 
 ## In Progress
 
-Phase 5 真实多主机验收：接入至少两台 compatible Worker，观察不同负载下的首次 placement、
-Admin authoritative assignment 计数和 sticky restart；同时验证 Control Plane 到两个 Worker
-Gateway 的受保护 LAN/VPN TLS、HTTP/SSE 与 WebSocket 可达性。
+当前没有已启动的 Phase 6 实现。本轮停在 Phase 5 post-acceptance baseline：真实 multi-host
+部署说明、验收记录和 `/workspace` default cwd 已同步。
 
 ## Next
 
-1. 按 README 为第二台宿主机预注册独立 Worker identity、Gateway URL 和 data-plane token，保持
-   Worker Gateway 仅对 Control Plane 所在受保护网络可达。
-2. 创建多个 Workspace，验证多 Worker score/tie-break、capacity 与 sticky placement 的真实
-   host 分布，并记录两台宿主机的 architecture/runtime/capability 实际声明。
-3. Phase 5 人工验收完成后再评估 Phase 6；当前不加入完整 inventory/orphan/restart recovery。
+1. 等待明确开始 Phase 6 后，再按 `specs.md` 检查 Persistence / Recovery scope 与验收边界。
+2. 当前不加入完整 inventory/orphan/restart recovery，也不提前扩展 Scheduler 或 Runtime Toolchain。
 
 ## Risks And Blockers
 
-- Phase 4 的真实浏览器、Prompt/Terminal 和 Worker reconnect 已由人工验收确认；自动测试仍只
-  证明工程边界，不能替代 Phase 5 两台真实宿主机的 placement 与 data-path 验收。
+- Phase 5 的两台真实 Worker placement、浏览器 data path、Prompt/Terminal、sticky/offline/reconnect
+  与 bind-mount persistence 已由人工验收确认；自动测试仍不能替代目标生产网络、安全和运维验收。
 - Worker Gateway 的可选原生 TLS 已实现，公开 Workspace Gateway 预期由受信反向代理终止
-  wildcard TLS；真实 LAN/VPN、DNS、certificate、proxy timeout 和防火墙尚未在目标拓扑验证。
+  wildcard TLS；本次通过的是开发 HTTP + `nip.io` wildcard DNS，生产 wildcard certificate、
+  TLS termination、proxy timeout 和目标防火墙规则尚未验收。
 - session exchange 存储是单 Control Plane 进程内、短时且 fail-closed；Control Plane restart
   会使尚未消费的 code 失效。Phase 4 单实例不引入 Redis/多实例共享状态。
-- `*.agent.localhost` 是开发等价 host 配置；若目标浏览器/系统不解析子域 localhost，需要人工
-  配置 wildcard DNS 或等价本地域名，不能回退到 `/w/<id>/` base-path rewrite。
+- `*.agent.localhost` 仅适合单机开发；跨主机验收已使用 `nip.io` wildcard 示例。生产必须配置
+  受管内部 wildcard DNS，不能回退到 `/w/<id>/` base-path rewrite，也不能把 `nip.io` 当作生产依赖。
 - 当前 Runtime 镜像和真实 Docker 验证仅覆盖 arm64；amd64 仍需实际构建测试后才能声明支持。
 - Phase 5 使用单 Control Plane 进程持有的 authenticated Worker channel 集合作为 connected
   eligibility；多 Control Plane 实例和共享 channel presence 不在 MVP 当前范围。
 
 ## Verification
 
+- 2026-09-13：Phase 5 post-acceptance cleanup 通过 `pnpm lint`、`pnpm typecheck`、`pnpm test` 和
+  `pnpm build:web`；默认测试门 64 passed，4 个 PostgreSQL 与 3 个真实 Docker 条件测试按设计跳过。
+  另以 `TEST_DATABASE_URL` 启用本机 PostgreSQL 后 Control Plane 42/42 通过，使常规测试完整覆盖
+  68 passed。
+- 2026-09-13：重新构建 `agent-runtime:phase3-minimal` 后，
+  `TEST_DOCKER_RUNTIME=1 pnpm --filter @agent-runtime/worker test` 在 arm64 Docker 上 14/14 通过。
+  3 个 Docker integration tests 现覆盖 `/workspace` working dir/default cwd、pi-web 创建 Session 后
+  JSONL header 的 `/workspace` cwd、从 Session 在 bind mount 写文件并 stop/start 保留、authenticated
+  Worker Gateway HTTP，以及移除 `PI_WEB_DEFAULT_CWD` 后上游 `~/pi-cwd-YYYYMMDD` fallback；既有
+  HTTP/SSE/WebSocket Gateway 回归仍通过。
+- 2026-09-13：用户确认 Phase 5 真实 multi-host 人工验收通过：两台真实 Worker 的首次 placement
+  验证了 `assigned/max` load score、deterministic tie-break、capacity full / no eligible Worker；
+  STOPPED Workspace 继续占 authoritative assignment，只有 destructive delete 明确成功后才释放
+  capacity，释放后新的 Workspace 可以 placement。
+- 2026-09-13：同一轮人工验收确认 sticky restart、Worker offline 不 failover、reconnect 后只在原
+  Worker reconciliation；远端浏览器经 Control Plane Gateway 可访问 `worker-a` 和 `worker-c`，
+  HTTP、pi-web、Prompt streaming、Terminal data path 正常，且 `/workspace` bind mount 的真实跨主机
+  持久化已确认。该结论不包含生产 TLS 或 wildcard certificate 验收。
 - 2026-09-13：`pnpm lint`、`pnpm typecheck`、带本机 PostgreSQL 的 `pnpm test` 和
   `pnpm build:web` 通过；常规测试共 68 passed，真实 Docker 条件测试在常规门中按设计跳过 2 个。
 - 2026-09-13：`TEST_DOCKER_RUNTIME=1 pnpm --filter @agent-runtime/worker test` 在 arm64 Docker
@@ -108,7 +127,7 @@ Gateway 的受保护 LAN/VPN TLS、HTTP/SSE 与 WebSocket 可达性。
 
 - 2026-09-12：核对 pinned upstream `@agegr/pi-web@0.9.0` tag 对应 commit `0d1df12`；确认
   页面/API 使用根路径，Prompt/Terminal 使用 EventSource/SSE，Host/Origin 校验支持可信 proxy
-  场景，且无需修改或 fork pi-web。
+  场景，Phase 4 Gateway 当时无需修改或 fork pi-web。
 - 2026-09-12：`pnpm lint`、`pnpm typecheck`、`pnpm test` 和 `pnpm build:web` 通过；常规测试
   共 58 passed，5 个 PostgreSQL/真实 Docker 条件测试按设计跳过。新增重连回归覆盖
   `RUNNING -> WORKER_OFFLINE -> inspect -> RUNNING`、reconciliation 期间拒绝打开、STOPPED、

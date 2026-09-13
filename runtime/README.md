@@ -21,3 +21,22 @@ The Worker starts this image as UID/GID 1000, binds `/workspace` and
 `/agent/pi` from its managed root, and publishes pi-web only to an ephemeral
 `127.0.0.1` host port. `PI_CODING_AGENT_DIR=/agent/pi` keeps Pi configuration,
 credentials, and sessions in the persistent Pi mount.
+
+Platform Workspace semantics fix the persistent project root at `/workspace`.
+Pinned pi-web 0.9.0 has no default-cwd setting and otherwise creates
+`~/pi-cwd-YYYYMMDD`, so the image applies the narrowly scoped, version-checked
+build patch in `patches/pi-web-0.9.0-default-cwd.mjs` and sets
+`PI_WEB_DEFAULT_CWD=/workspace`. The patched route still creates the selected
+directory and registers it as an allowed file root. If the variable is unset,
+the exact upstream `~/pi-cwd-YYYYMMDD` fallback remains in effect.
+
+The persistence boundary remains:
+
+```text
+/workspace  -> <worker-managed-root>/workspaces/<workspace-id>/workspace
+/agent/pi   -> <worker-managed-root>/workspaces/<workspace-id>/pi
+```
+
+New Pi Session JSONL metadata therefore records `cwd: "/workspace"`, while the
+JSONL itself remains under `/agent/pi/sessions`. `/home/agent` is not mounted and
+is not part of the platform's persistent Workspace contract.
