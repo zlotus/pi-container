@@ -1,13 +1,12 @@
 # Project Progress
 
-Last reviewed: 2026-09-13
+Last reviewed: 2026-09-14
 
 ## Current Milestone
 
-Phase 1～5 已完成人工验收，Phase 6 Persistence / Recovery 的工程实现、自动验证与人工验收主线均已
-通过。当前实现以 PostgreSQL desired state 和 sticky assignment 为 authority，由 Worker 完整只读
-inventory 恢复状态；orphan、foreign managed 与 unknown resource 均 fail-closed 且不自动删除。
-Phase 7 Toolchain 尚未开始。
+Phase 0～6 已完成人工验收。Phase 7 完整 Runtime Toolchain、实际 capability probe 和原生双架构
+验证入口已实现；ARM64 image/toolchain/browser/Worker Docker 回归已通过。AMD64 没有从 ARM64 构建
+结果推断支持，仍等待 native runner 执行相同 matrix 后再完成本阶段人工验收。Phase 8 尚未开始。
 
 ## Current Baseline
 
@@ -45,11 +44,17 @@ Phase 7 Toolchain 尚未开始。
 - Worker 到 pi-web 的 Host/Origin 会在完成外部 Host/Origin 校验后重写为受管 loopback
   endpoint，兼容已存在的 Phase 3 容器；新容器同时显式设置该 Workspace 的
   `PI_WEB_ALLOWED_HOSTS`。绝对 upstream redirect 会改写回公共 Workspace origin。
-- Runtime 仍为 Phase 3 Minimal Image：digest-pinned Node.js 22.20.0、pi-web 0.9.0、Pi
-  0.85.1、pnpm 11.24.0，以及 shell/core CLI、Git、Python、Node；Phase 7 Toolchain 未提前加入。
+- Runtime 已升级为 `agent-runtime:phase7-toolchain`：digest-pinned Node.js 22.20.0、Rust 1.90.0、
+  pi-web 0.9.0、Pi 0.85.1，另 pin pnpm 11.24.0、uv 0.12.13、Playwright 1.63.0，并加入
+  build tools、ffmpeg、Poppler/pandoc、LibreOffice、匹配的 Chromium、基础中英文字体和克制的
+  shell/filesystem/process/network diagnostic CLI。
   针对 pi-web 0.9.0 唯一的 downstream 行为变更是带 pinned-version/精确片段校验的构建期
   default-cwd patch：平台设置 `PI_WEB_DEFAULT_CWD=/workspace`，未设置时保留上游
   `~/pi-cwd-YYYYMMDD` fallback。
+- Worker hello 不再使用按 architecture 硬编码的 Phase 3 capability。每次连接前都在精确
+  `RUNTIME_IMAGE` 上运行 short-lived、non-root、network-none、cap-drop/no-new-privileges 且带资源限制
+  的实际探针；browser capability 会真实 launch Chromium、打开本地页、evaluate JS 并 close。
+  单项失败上报 `false`，image platform mismatch、缺少探针或无效 schema 则不发送 hello。
 - Worker 的 Docker 基线保持不变：UID/GID 1000、非 privileged、drop all capabilities、
   no-new-privileges、CPU/memory/PID limit、两个 managed bind mount、每 Workspace 独立 bridge、
   无 Docker socket，pi-web 只发布到动态 loopback port。
@@ -85,12 +90,13 @@ Phase 7 Toolchain 尚未开始。
 
 ## In Progress
 
-Phase 6 人工验收主线已通过；当前 cleanup 不扩展 Phase scope，Phase 7 尚未开始。
+Phase 7 工程实现与 ARM64 自动验证已完成，当前等待 AMD64 native matrix 和本阶段人工验收。
 
 ## Next
 
-1. 保持 Phase 6 recovery、安全边界和已验收主线稳定。
-2. Phase 7 Toolchain 继续保持未开始，后续仅在明确启动该 Phase 后实施。
+1. 在 native AMD64 Docker host 或 GitHub `ubuntu-24.04` runner 上执行 Phase 7 matrix；通过前不标记支持。
+2. 人工确认两个架构的 Worker hello capability、pi-web/Prompt/Terminal 与代表性工具调用。
+3. 保持 Phase 6 recovery、安全边界和已验收主线稳定；验收前后都不进入 Phase 8。
 
 ## Risks And Blockers
 
@@ -103,7 +109,9 @@ Phase 6 人工验收主线已通过；当前 cleanup 不扩展 Phase scope，Pha
   会使尚未消费的 code 失效。Phase 4 单实例不引入 Redis/多实例共享状态。
 - `*.agent.localhost` 仅适合单机开发；跨主机验收已使用 `nip.io` wildcard 示例。生产必须配置
   受管内部 wildcard DNS，不能回退到 `/w/<id>/` base-path rewrite，也不能把 `nip.io` 当作生产依赖。
-- 当前 Runtime 镜像和真实 Docker 验证仅覆盖 arm64；amd64 仍需实际构建测试后才能声明支持。
+- 当前 Phase 7 Runtime 的真实 Docker 验证仅覆盖 arm64；本机没有 amd64/binfmt Docker endpoint，
+  先前验收示例的远端主机也不可达。仓库已提供 native AMD64/ARM64 workflow，但 amd64 job 尚未在
+  该 workflow 上执行，因此 matrix 明确保持 `PENDING`，不能声明支持。
 - Phase 5 及更早创建的合法 legacy Container 没有 `unless-stopped` policy；Phase 6 为保持兼容不会在
   recovery 中自动修改它。此类 Runtime 在完整宿主机重启后可能被观察为 STOPPED/ERROR，需用户明确
   start 或删除重建后才获得新 policy。
@@ -111,6 +119,21 @@ Phase 6 人工验收主线已通过；当前 cleanup 不扩展 Phase scope，Pha
   eligibility；多 Control Plane 实例和共享 channel presence 不在 MVP 当前范围。
 
 ## Verification
+
+- 2026-09-14：Phase 7 最终根级验证通过：`pnpm lint`、`pnpm typecheck`、`pnpm test`
+  （76 passed，10 个 PostgreSQL/真实 Docker 条件测试按设计跳过）与 `pnpm build:web`；接入本机
+  PostgreSQL 后 Control Plane 46/46 通过。随后重新构建最终 ARM64 image，Runtime smoke 与 Worker
+  真实 Docker 测试 23/23 再次通过。
+- 2026-09-14：本机 ARM64 Docker Engine 29.7.2 构建 `agent-runtime:phase7-toolchain` 成功；
+  `runtime/scripts/verify-image.sh ... arm64` 在 network-none、non-root、drop-all-capabilities、
+  no-new-privileges 条件下通过全部语言/build/media/PDF/Office/diagnostic 命令。实测版本包括
+  Python 3.11.2、uv 0.12.13、Node 22.20.0、pnpm 11.24.0、Rust/cargo 1.90.0、ffmpeg 5.1.9、
+  Poppler 22.12.0、pandoc 2.17.1.1 和 LibreOffice 7.4.7.2。
+- 2026-09-14：Playwright 1.63.0 下载并运行原生 ARM64 Chrome for Testing 153.0.8010.12；实际
+  launch/open local file/evaluate JS/close smoke 通过，strict Worker capability probe 返回六项 `true`。
+  `TEST_DOCKER_RUNTIME=1 TEST_RUNTIME_IMAGE=agent-runtime:phase7-toolchain pnpm --filter
+  @agent-runtime/worker test` 23/23 通过，覆盖 Phase 3～6 pi-web、persistence、Gateway、reconciliation、
+  legacy compatibility 与 network isolation 回归。
 
 - 2026-09-13：Phase 6 post-acceptance cleanup 通过 `pnpm lint`、`pnpm typecheck`、`pnpm test` 与
   `pnpm build:web`；默认测试 74 passed，9 个 PostgreSQL/真实 Docker 条件测试按设计跳过。

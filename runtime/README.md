@@ -1,56 +1,89 @@
-# Phase 3 Minimal Runtime
+# Phase 7 Runtime Toolchain
 
-This image deliberately contains only the Phase 3 baseline: pi-web, Pi Coding
-Agent, a shell and core CLI, Git, Python, Node.js, and pnpm. Rust, browser,
-Office, PDF, and media tooling remain Phase 7 work.
+The Phase 7 image keeps the pinned pi-web/Pi integration and adds the bounded
+engineering workstation toolchain from `specs.md`:
 
-Pinned runtime versions:
+- Python 3, pip, and pinned uv
+- pinned Node.js and pnpm
+- pinned Rust, cargo, and rustup
+- GCC/G++, make, CMake, and pkg-config
+- ffmpeg and ffprobe
+- Poppler PDF utilities, pandoc, and headless LibreOffice
+- pinned Playwright with its matching Chromium download
+- common shell, archive, filesystem, process, and network-debugging CLI tools
+- base English and CJK fonts
+
+The image intentionally does not add tcpdump, nmap, Wireshark, iperf, a Docker
+client/socket, or tools that need privileged mode or extra Linux capabilities.
+
+Pinned inputs:
 
 - Node.js `22.20.0-bookworm-slim`, pinned by multi-platform manifest digest
+- Rust `1.90.0-slim-bookworm`, pinned by multi-platform manifest digest
+- uv `0.12.13`
 - pnpm `11.24.0`
+- Playwright `1.63.0` and its matching Chromium revision
 - `@agegr/pi-web` `0.9.0`
 - `@earendil-works/pi-coding-agent` `0.85.1`
 
-Build from the repository root:
+Build and verify on each native architecture:
 
 ```bash
-docker build --tag agent-runtime:phase3-minimal runtime
+docker build \
+  --platform linux/arm64 \
+  --tag agent-runtime:phase7-toolchain \
+  runtime
+runtime/scripts/verify-image.sh agent-runtime:phase7-toolchain arm64
 ```
 
-The Worker starts this image as UID/GID 1000, binds `/workspace` and
-`/agent/pi` from its managed root, and publishes pi-web only to an ephemeral
-`127.0.0.1` host port. New Phase 6 allocations also use Docker's
-`unless-stopped` restart policy: a Runtime that was running before a host/Docker
-restart is restarted, while an explicitly stopped Runtime stays stopped.
-`PI_CODING_AGENT_DIR=/agent/pi` keeps Pi configuration,
-credentials, and sessions in the persistent Pi mount.
+Use `linux/amd64` and `amd64` respectively on an AMD64 host. The verification
+container uses no network, drops all Linux capabilities, enables
+`no-new-privileges`, and runs as the image's non-root user. The smoke test checks
+the language/build/document/media tools, every baseline diagnostic command,
+pi/pi-web, and a real Playwright flow that launches Chromium, opens a local HTML
+page, evaluates JavaScript, and closes the browser.
 
-Platform Workspace semantics fix the persistent project root at `/workspace`.
-Pinned pi-web 0.9.0 has no default-cwd setting and otherwise creates
-`~/pi-cwd-YYYYMMDD`, so the image applies the narrowly scoped, version-checked
-build patch in `patches/pi-web-0.9.0-default-cwd.mjs` and sets
-`PI_WEB_DEFAULT_CWD=/workspace`. The patched route still creates the selected
-directory and registers it as an allowed file root. If the variable is unset,
-the exact upstream `~/pi-cwd-YYYYMMDD` fallback remains in effect.
+The native AMD64/ARM64 workflow in
+`.github/workflows/runtime-toolchain.yml` runs the same build, smoke, and Worker
+Docker regression suite on both architectures. Do not replace native browser
+validation with a manifest-only or binary-exists check.
 
-The persistence boundary remains:
+## Runtime capability reporting
 
-```text
-/workspace  -> <worker-managed-root>/workspaces/<workspace-id>/workspace
-/agent/pi   -> <worker-managed-root>/workspaces/<workspace-id>/pi
-```
+The Worker no longer derives capability values from architecture. Before every
+authenticated hello it creates a short-lived, network-disabled container from
+its exact configured `RUNTIME_IMAGE`, verifies that the local image platform
+matches the Worker, and runs `runtime-capability-probe` with the same non-root,
+cap-drop, no-new-privileges, memory, and PID constraints used by Workspaces.
 
-New Pi Session JSONL metadata therefore records `cwd: "/workspace"`, while the
-JSONL itself remains under `/agent/pi/sessions`. `/home/agent` is not mounted and
-is not part of the platform's persistent Workspace contract.
+The strict result maps the existing scheduler capabilities as follows:
 
-Upgrade compatibility is intentionally asymmetric. A managed container created
-before `PI_WEB_DEFAULT_CWD` was introduced remains safe to inspect, stop, start,
-proxy, and delete when every ownership and security identity check still
-matches. It keeps the upstream default-cwd behavior until the user explicitly
-deletes and recreates the Workspace; the Worker never recreates it or removes
-persistent data automatically. Newly created containers must contain the current
-`PI_WEB_DEFAULT_CWD=/workspace` setting. An explicit conflicting value blocks
-ensure/start/proxy, while inspect/stop/delete remain available for safe cleanup.
-The same compatibility rule permits an older managed Container without the
-Phase 6 restart policy; recovery inventory does not mutate or rebuild it.
+- `browser`: Playwright launches its matching Chromium and completes the local-page JS smoke
+- `office`: LibreOffice, pdftotext, and pandoc all execute successfully
+- `ffmpeg`: ffmpeg and ffprobe both execute successfully
+- `python`: python, python3, and uv all execute successfully
+- `node`: node and pnpm both execute successfully
+- `rust`: rustc, cargo, and rustup all execute successfully
+
+Individual failed groups report `false`. A missing probe, an invalid report, an
+image/host architecture mismatch, or an unavailable image prevents Worker hello
+instead of registering guessed capabilities. The probe timeout is controlled by
+`RUNTIME_CAPABILITY_PROBE_TIMEOUT_MS` and defaults to 120 seconds.
+
+See [the capability matrix](../docs/runtime-capability-matrix.md) for recorded
+native results and the exact acceptance boundary.
+
+## Persistence and upgrade boundary
+
+The Worker still starts Workspaces as UID/GID 1000 by default, binds only
+`/workspace` and `/agent/pi`, and publishes pi-web only to an ephemeral host
+loopback port. `PI_CODING_AGENT_DIR=/agent/pi` keeps Pi credentials and sessions
+in the persistent Pi mount. `PI_WEB_DEFAULT_CWD=/workspace` retains the pinned,
+version-checked pi-web patch and existing legacy-container compatibility.
+
+The Phase 7 image name is `agent-runtime:phase7-toolchain` and its runtime
+version is `phase-7`. Existing Workspace metadata remains pinned to the image
+name with which it was created; changing a Worker's configured image does not
+silently rebuild, migrate, or delete an existing Phase 3 Runtime. Recreate a
+Workspace only through the existing explicit destructive delete flow when the
+new toolchain is required.

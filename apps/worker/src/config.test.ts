@@ -28,6 +28,9 @@ describe("worker configuration", () => {
 
     expect(config.WORKER_ID).toBe("worker-arm64-01");
     expect(config.WORKER_HEARTBEAT_INTERVAL_MS).toBe(10_000);
+    expect(config.RUNTIME_IMAGE).toBe("agent-runtime:phase7-toolchain");
+    expect(config.RUNTIME_VERSION).toBe("phase-7");
+    expect(config.RUNTIME_CAPABILITY_PROBE_TIMEOUT_MS).toBe(120_000);
   });
 
   it("requires reconnect bounds to be internally consistent", () => {

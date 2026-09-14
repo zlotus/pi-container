@@ -5,6 +5,7 @@ import {
   ControlToWorkerMessageSchema,
   type Architecture,
   type ControlToWorkerMessage,
+  type WorkerCapabilities,
   type WorkerReconcileAssignment,
   type WorkerReconciliationReport,
   type WorkerToControlMessage,
@@ -13,6 +14,7 @@ import {
 import WebSocket from "ws";
 
 import type { WorkerConfig } from "./config.js";
+import type { RuntimeCapabilityProbe } from "./capabilities.js";
 import {
   WorkspaceRuntimeError,
   type WorkspaceRuntimeObservation,
@@ -26,15 +28,6 @@ type WorkerHeartbeatMessage = Extract<
   WorkerToControlMessage,
   { type: "worker.heartbeat" }
 >;
-
-const PHASE_3_CAPABILITIES = {
-  browser: false,
-  office: false,
-  ffmpeg: false,
-  python: true,
-  node: true,
-  rust: false,
-} as const;
 
 export interface WorkspaceRuntime {
   ensure(
@@ -66,6 +59,7 @@ export function buildWorkerHello(
     logicalCpuCount: number;
     memoryBytes: number;
   },
+  capabilities: WorkerCapabilities,
   allocatedWorkspaces = 0,
 ): WorkerHelloMessage {
   return {
@@ -78,7 +72,7 @@ export function buildWorkerHello(
       architecture: system.architecture,
       runtimeImage: config.RUNTIME_IMAGE,
       runtimeVersion: config.RUNTIME_VERSION,
-      capabilities: PHASE_3_CAPABILITIES,
+      capabilities,
       maxWorkspaces: config.WORKER_MAX_WORKSPACES,
       allocatedWorkspaces,
       systemResources: {
@@ -117,6 +111,7 @@ export class WorkerDaemon {
   constructor(
     readonly config: WorkerConfig,
     readonly runtime: WorkspaceRuntime,
+    readonly capabilityProbe: RuntimeCapabilityProbe,
     readonly log: Pick<Console, "info" | "warn"> = console,
   ) {
     this.#reconnectDelayMs = config.WORKER_RECONNECT_INITIAL_MS;
@@ -193,17 +188,22 @@ export class WorkerDaemon {
 
   async #beginReporting(socket: WebSocket): Promise<void> {
     try {
-      const allocatedWorkspaces = await this.runtime.allocatedWorkspaces();
+      const architecture = currentArchitecture(process.arch);
+      const [allocatedWorkspaces, capabilities] = await Promise.all([
+        this.runtime.allocatedWorkspaces(),
+        this.capabilityProbe.probe(architecture),
+      ]);
       if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) return;
       this.#send(
         buildWorkerHello(
           this.config,
           {
             hostname: hostname(),
-            architecture: currentArchitecture(process.arch),
+            architecture,
             logicalCpuCount: cpus().length,
             memoryBytes: totalmem(),
           },
+          capabilities,
           allocatedWorkspaces,
         ),
       );
@@ -212,9 +212,9 @@ export class WorkerDaemon {
       }, this.config.WORKER_HEARTBEAT_INTERVAL_MS);
     } catch {
       this.log.warn(
-        `Worker ${this.config.WORKER_ID} could not inspect the local Docker runtime`,
+        `Worker ${this.config.WORKER_ID} could not verify the configured Runtime image`,
       );
-      socket.close(1011, "Local Docker runtime unavailable");
+      socket.close(1011, "Configured Runtime image unavailable or unverified");
     }
   }
 

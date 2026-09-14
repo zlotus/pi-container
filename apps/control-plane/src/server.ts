@@ -70,7 +70,7 @@ const ServerConfigSchema = z
     DEFAULT_RUNTIME_IMAGE: z
       .string()
       .min(1)
-      .default("agent-runtime:phase3-minimal"),
+      .default("agent-runtime:phase7-toolchain"),
     WORKER_OFFLINE_AFTER_MS: z.coerce
       .number()
       .int()

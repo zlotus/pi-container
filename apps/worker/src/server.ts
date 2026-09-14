@@ -1,13 +1,15 @@
 import { readFile } from "node:fs/promises";
 
 import { loadWorkerConfig } from "./config.js";
+import { DockerRuntimeCapabilityProbe } from "./capabilities.js";
 import { WorkerDaemon } from "./daemon.js";
 import { buildWorkerGateway } from "./gateway.js";
 import { DockerWorkspaceRuntime } from "./runtime.js";
 
 const config = loadWorkerConfig(process.env);
 const runtime = new DockerWorkspaceRuntime(config);
-const daemon = new WorkerDaemon(config, runtime);
+const capabilityProbe = new DockerRuntimeCapabilityProbe(config);
+const daemon = new WorkerDaemon(config, runtime, capabilityProbe);
 const tls =
   config.WORKER_GATEWAY_TLS_CERT_PATH === undefined ||
   config.WORKER_GATEWAY_TLS_KEY_PATH === undefined

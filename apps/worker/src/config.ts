@@ -62,8 +62,14 @@ export const WorkerConfigSchema = z
       .string()
       .min(1)
       .max(255)
-      .default("agent-runtime:phase3-minimal"),
-    RUNTIME_VERSION: z.string().min(1).max(128).default("phase-3"),
+      .default("agent-runtime:phase7-toolchain"),
+    RUNTIME_VERSION: z.string().min(1).max(128).default("phase-7"),
+    RUNTIME_CAPABILITY_PROBE_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(10_000)
+      .max(300_000)
+      .default(120_000),
     DOCKER_SOCKET_PATH: AbsolutePathSchema.default("/var/run/docker.sock"),
     WORKER_MANAGED_ROOT: AbsolutePathSchema.default("/var/lib/agent-runtime"),
     WORKSPACE_CPU_COUNT: z.coerce.number().positive().max(256).default(2),

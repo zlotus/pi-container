@@ -13,13 +13,17 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { loadWorkerConfig } from "./config.js";
 import type { WorkerConfig } from "./config.js";
+import { DockerRuntimeCapabilityProbe } from "./capabilities.js";
+import { currentArchitecture } from "./daemon.js";
 import { buildWorkerGateway } from "./gateway.js";
 import { DockerWorkspaceRuntime } from "./runtime.js";
 
 const runDockerIntegration = process.env.TEST_DOCKER_RUNTIME === "1";
 const describeWithDocker = runDockerIntegration ? describe : describe.skip;
 
-describeWithDocker("Phase 3 through 6 Docker Runtime integration", () => {
+describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
+  const runtimeImage =
+    process.env.TEST_RUNTIME_IMAGE ?? "agent-runtime:phase7-toolchain";
   const workspaceId = randomUUID();
   const legacyWorkspaceId = randomUUID();
   const isolationWorkspaceIds = [randomUUID(), randomUUID()] as const;
@@ -47,7 +51,7 @@ describeWithDocker("Phase 3 through 6 Docker Runtime integration", () => {
       WORKSPACE_BASE_URL: "https://agent.example.internal",
       WORKER_MAX_WORKSPACES: "2",
       WORKER_MANAGED_ROOT: managedRoot,
-      RUNTIME_IMAGE: "agent-runtime:phase3-minimal",
+      RUNTIME_IMAGE: runtimeImage,
       WORKSPACE_CPU_COUNT: String(resources.cpuCount),
       WORKSPACE_MEMORY_BYTES: String(resources.memoryBytes),
       WORKSPACE_PIDS_LIMIT: String(resources.pidsLimit),
@@ -56,6 +60,50 @@ describeWithDocker("Phase 3 through 6 Docker Runtime integration", () => {
     docker = new Docker({ socketPath: config.DOCKER_SOCKET_PATH });
     runtime = new DockerWorkspaceRuntime(config, docker);
   });
+
+  it("passes the full Runtime toolchain and browser smoke tests", async () => {
+    const image = await docker.getImage(runtimeImage).inspect();
+    const architecture = currentArchitecture(process.arch);
+    expect(image).toMatchObject({ Architecture: architecture, Os: "linux" });
+
+    const smoke = await docker.createContainer({
+      Image: runtimeImage,
+      Entrypoint: ["/usr/local/bin/runtime-smoke"],
+      User: "1000:1000",
+      WorkingDir: "/tmp",
+      Tty: true,
+      HostConfig: {
+        AutoRemove: false,
+        CapDrop: ["ALL"],
+        Memory: resources.memoryBytes,
+        NetworkMode: "none",
+        PidsLimit: resources.pidsLimit,
+        Privileged: false,
+        SecurityOpt: ["no-new-privileges:true"],
+      },
+    });
+    try {
+      await smoke.start();
+      const result = (await smoke.wait()) as { StatusCode?: unknown };
+      if (result.StatusCode !== 0) {
+        const output = await smoke.logs({ stdout: true, stderr: true });
+        throw new Error(`Runtime smoke failed:\n${output.toString("utf8")}`);
+      }
+    } finally {
+      await smoke.remove({ force: true });
+    }
+
+    await expect(
+      new DockerRuntimeCapabilityProbe(config, docker).probe(architecture),
+    ).resolves.toEqual({
+      browser: true,
+      office: true,
+      ffmpeg: true,
+      python: true,
+      node: true,
+      rust: true,
+    });
+  }, 180_000);
 
   afterAll(async () => {
     if (workerGateway !== undefined) {
@@ -105,7 +153,7 @@ describeWithDocker("Phase 3 through 6 Docker Runtime integration", () => {
   it("starts pi-web with the security baseline and keeps both mounts on restart", async () => {
     await runtime.ensure(
       workspaceId,
-      "agent-runtime:phase3-minimal",
+      runtimeImage,
       resources,
     );
     expect((await runtime.start(workspaceId)).state).toBe("RUNNING");
@@ -249,7 +297,7 @@ describeWithDocker("Phase 3 through 6 Docker Runtime integration", () => {
     const recovery = await runtime.reconcile([
       {
         workspaceId,
-        runtimeImage: "agent-runtime:phase3-minimal",
+        runtimeImage,
         desiredState: "RUNNING",
       },
     ]);
@@ -283,7 +331,7 @@ describeWithDocker("Phase 3 through 6 Docker Runtime integration", () => {
   it("preserves pi-web's upstream default cwd when the platform override is unset", async () => {
     const container = await docker.createContainer({
       name: fallbackContainerName,
-      Image: "agent-runtime:phase3-minimal",
+      Image: runtimeImage,
       User: "1000:1000",
       WorkingDir: "/workspace",
       Cmd: [
@@ -333,7 +381,7 @@ describeWithDocker("Phase 3 through 6 Docker Runtime integration", () => {
     const legacyName = `agent-runtime-${legacyWorkspaceId}`;
     await runtime.ensure(
       legacyWorkspaceId,
-      "agent-runtime:phase3-minimal",
+      runtimeImage,
       resources,
     );
     const currentContainer = docker.getContainer(legacyName);
@@ -375,7 +423,7 @@ describeWithDocker("Phase 3 through 6 Docker Runtime integration", () => {
     await expect(
       runtime.ensure(
         legacyWorkspaceId,
-        "agent-runtime:phase3-minimal",
+        runtimeImage,
         resources,
       ),
     ).resolves.toMatchObject({ state: "STOPPED" });
@@ -404,8 +452,8 @@ describeWithDocker("Phase 3 through 6 Docker Runtime integration", () => {
 
   it("keeps Workspace bridges isolated from each other and host loopback", async () => {
     const [workspaceA, workspaceB] = isolationWorkspaceIds;
-    await runtime.ensure(workspaceA, "agent-runtime:phase3-minimal", resources);
-    await runtime.ensure(workspaceB, "agent-runtime:phase3-minimal", resources);
+    await runtime.ensure(workspaceA, runtimeImage, resources);
+    await runtime.ensure(workspaceB, runtimeImage, resources);
     await runtime.start(workspaceA);
     await runtime.start(workspaceB);
 

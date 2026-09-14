@@ -4,10 +4,11 @@
 [pi-web](https://github.com/agegr/pi-web) 与 Pi Coding Agent，自身只负责认证、
 Workspace、Worker、Docker 生命周期、调度和安全代理。
 
-当前仓库已实现 **Phase 6：Persistence / Recovery 的工程基线**：Control Plane 启动时先将已分配
-Workspace fail-closed，Worker authenticated hello 后接收 PostgreSQL authoritative assignments，
-只读扫描本机 managed Container、network 与 persistent directory，再按持久化 desired state 条件恢复。
-Phase 1～5 已完成人工验收；Phase 6 自动验证和人工验收主线均已通过，Phase 7 尚未开始。
+当前仓库已在已验收的 Phase 0～6 基线上实现 **Phase 7：完整 Runtime Toolchain**。Runtime 现包含
+Python/uv、Node/pnpm、Rust、build tools、ffmpeg、PDF/Office 工具、Playwright/Chromium 和克制的
+Linux/network debugging CLI；Worker 在 hello 前通过本机精确镜像的实际探针上报 capability，不按
+architecture 猜测。Phase 7 工程验证已在 ARM64 通过，AMD64 保持未声明并等待 native matrix 验证与
+本阶段人工验收。
 HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其 Chat、Terminal 或 streaming 实现。
 
 ## Prerequisites
@@ -23,7 +24,8 @@ pnpm install
 cp deploy/.env.example .env
 # 将 SESSION_SECRET 替换为：openssl rand -hex 32
 docker compose --env-file .env -f deploy/compose.dev.yml up -d postgres
-docker build --tag agent-runtime:phase3-minimal runtime
+docker build --tag agent-runtime:phase7-toolchain runtime
+runtime/scripts/verify-image.sh agent-runtime:phase7-toolchain
 set -a
 . ./.env
 set +a
@@ -32,6 +34,11 @@ pnpm typecheck
 pnpm test
 pnpm lint
 ```
+
+`verify-image.sh` 接受 `amd64` 或 `arm64`，会检查本地镜像架构，并在 non-root、无 network、
+drop-all-capabilities、`no-new-privileges` 的容器中运行完整命令 smoke 和真实
+Playwright/Chromium local-page JS smoke。两个架构的当前证据和验收命令见
+[Runtime Capability Matrix](docs/runtime-capability-matrix.md)。
 
 开发 compose 中的 PostgreSQL 使用 `restart: unless-stopped`，只保证它在宿主机 reboot、Docker daemon
 恢复后随之恢复。Control Plane、Portal 与 Worker 的进程托管不属于本项；本仓库未因此新增 systemd 或
@@ -164,6 +171,12 @@ set -a
 set +a
 pnpm dev:worker
 ```
+
+Worker 每次建立 control channel 时，都会先对 `RUNTIME_IMAGE` 启动一次短时、无网络且受资源/
+安全约束的 capability probe。只有镜像 OS/architecture 与宿主机匹配且 probe 返回严格 typed 结果，
+Worker 才发送 hello；各能力组的失败会如实上报 `false`。超时可通过
+`RUNTIME_CAPABILITY_PROBE_TIMEOUT_MS` 调整，默认 120 秒。新部署的 Control Plane 和 Worker 默认
+使用 `agent-runtime:phase7-toolchain` / `phase-7`；已有私有环境文件中的显式旧值不会被自动改写。
 
 ## Real multi-host development and acceptance
 
@@ -333,7 +346,7 @@ identity 的 Container 会作为 legacy Runtime 继续支持 ensure/start/inspec
 destructive delete 得到 Worker 确认后，Control Plane 才删除 metadata 并释放 sticky assignment；
 需要当前 baseline 时应由用户明确删除旧 Workspace 后新建，不会触碰未授权的持久数据。
 
-Phase 3/Runtime 诊断时，仍可在 Worker 宿主机用下面的命令查看仅绑定 loopback 的端口：
+Runtime 诊断时，仍可在 Worker 宿主机用下面的命令查看仅绑定 loopback 的端口：
 
 ```bash
 docker port agent-runtime-<workspace-uuid> 30141/tcp

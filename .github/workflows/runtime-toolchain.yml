@@ -1,0 +1,56 @@
+name: Runtime toolchain
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/runtime-toolchain.yml"
+      - "apps/worker/**"
+      - "packages/protocol/**"
+      - "runtime/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  native-runtime:
+    name: linux/${{ matrix.architecture }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.20.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build native Runtime image
+        run: >-
+          docker build
+          --platform linux/${{ matrix.architecture }}
+          --tag agent-runtime:phase7-toolchain
+          runtime
+      - name: Verify toolchain and real browser launch
+        run: >-
+          runtime/scripts/verify-image.sh
+          agent-runtime:phase7-toolchain
+          ${{ matrix.architecture }}
+      - name: Run Worker Runtime regressions
+        env:
+          TEST_DOCKER_RUNTIME: "1"
+          TEST_RUNTIME_IMAGE: agent-runtime:phase7-toolchain
+        run: pnpm --filter @agent-runtime/worker test

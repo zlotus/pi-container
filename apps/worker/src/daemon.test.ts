@@ -17,13 +17,21 @@ const config = loadWorkerConfig({
 });
 
 describe("worker daemon messages", () => {
-  it("reports the Minimal Runtime capabilities and bounded host capacity", () => {
+  it("reports probed Runtime capabilities and bounded host capacity", () => {
+    const capabilities = {
+      browser: true,
+      office: true,
+      ffmpeg: true,
+      python: true,
+      node: true,
+      rust: true,
+    };
     const message = buildWorkerHello(config, {
       hostname: "worker-01.internal",
       architecture: "arm64",
       logicalCpuCount: 8,
       memoryBytes: 16 * 1024 ** 3,
-    });
+    }, capabilities);
 
     expect(message).toMatchObject({
       version: 1,
@@ -31,12 +39,12 @@ describe("worker daemon messages", () => {
       payload: {
         workerId: "worker-01",
         capabilities: {
-          browser: false,
-          office: false,
-          ffmpeg: false,
+          browser: true,
+          office: true,
+          ffmpeg: true,
           python: true,
           node: true,
-          rust: false,
+          rust: true,
         },
         maxWorkspaces: 8,
         allocatedWorkspaces: 0,
