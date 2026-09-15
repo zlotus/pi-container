@@ -210,9 +210,10 @@ export class WorkerDaemon {
       this.#heartbeatTimer = setInterval(() => {
         void this.#sendHeartbeat(socket);
       }, this.config.WORKER_HEARTBEAT_INTERVAL_MS);
-    } catch {
+    } catch (error) {
       this.log.warn(
         `Worker ${this.config.WORKER_ID} could not verify the configured Runtime image`,
+        error,
       );
       socket.close(1011, "Configured Runtime image unavailable or unverified");
     }

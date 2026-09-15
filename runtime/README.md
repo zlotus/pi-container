@@ -16,6 +16,12 @@ engineering workstation toolchain from `specs.md`:
 The image intentionally does not add tcpdump, nmap, Wireshark, iperf, a Docker
 client/socket, or tools that need privileged mode or extra Linux capabilities.
 
+`ping` is installed (`iputils-ping`), but default Workspaces use `CapDrop=ALL`.
+ICMP ping may therefore fail with `Operation not permitted`. This is an expected
+security restriction, not a missing binary; do not add `CAP_NET_RAW` just to
+enable ping. Use `nc`, `curl`, `dig`, `ip`, `ss`, and `lsof` for routine network
+diagnostics. The smoke test checks that `ping` exists, not that ICMP is permitted.
+
 Pinned inputs:
 
 - Node.js `22.20.0-bookworm-slim`, pinned by multi-platform manifest digest

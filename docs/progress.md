@@ -1,12 +1,12 @@
 # Project Progress
 
-Last reviewed: 2026-09-14
+Last reviewed: 2026-09-15
 
 ## Current Milestone
 
-Phase 0～6 已完成人工验收。Phase 7 完整 Runtime Toolchain、实际 capability probe 和原生双架构
-验证入口已实现；ARM64 image/toolchain/browser/Worker Docker 回归已通过。AMD64 没有从 ARM64 构建
-结果推断支持，仍等待 native runner 执行相同 matrix 后再完成本阶段人工验收。Phase 8 尚未开始。
+Phase 0～7 已完成人工验收，Phase 7 功能由用户确认通过。当前仅做 probe 失败日志与 ping 安全说明的
+post-acceptance cleanup；不改变 capability、Runtime 安全基线或 fail-closed 行为。仓库已有 ARM64
+自动验证证据；AMD64 native 自动结果未新增记录，不由人工验收结论推断支持。Phase 8 尚未开始。
 
 ## Current Baseline
 
@@ -90,13 +90,12 @@ Phase 0～6 已完成人工验收。Phase 7 完整 Runtime Toolchain、实际 ca
 
 ## In Progress
 
-Phase 7 工程实现与 ARM64 自动验证已完成，当前等待 AMD64 native matrix 和本阶段人工验收。
+本轮 Phase 7 post-acceptance cleanup 已完成并通过质量门；没有进行中的功能扩展。
 
 ## Next
 
-1. 在 native AMD64 Docker host 或 GitHub `ubuntu-24.04` runner 上执行 Phase 7 matrix；通过前不标记支持。
-2. 人工确认两个架构的 Worker hello capability、pi-web/Prompt/Terminal 与代表性工具调用。
-3. 保持 Phase 6 recovery、安全边界和已验收主线稳定；验收前后都不进入 Phase 8。
+1. 停止本轮工作，等待下一步明确指示。
+2. 保持 Phase 0～7 已验收行为和安全边界稳定，不进入 Phase 8。
 
 ## Risks And Blockers
 
@@ -109,9 +108,9 @@ Phase 7 工程实现与 ARM64 自动验证已完成，当前等待 AMD64 native 
   会使尚未消费的 code 失效。Phase 4 单实例不引入 Redis/多实例共享状态。
 - `*.agent.localhost` 仅适合单机开发；跨主机验收已使用 `nip.io` wildcard 示例。生产必须配置
   受管内部 wildcard DNS，不能回退到 `/w/<id>/` base-path rewrite，也不能把 `nip.io` 当作生产依赖。
-- 当前 Phase 7 Runtime 的真实 Docker 验证仅覆盖 arm64；本机没有 amd64/binfmt Docker endpoint，
-  先前验收示例的远端主机也不可达。仓库已提供 native AMD64/ARM64 workflow，但 amd64 job 尚未在
-  该 workflow 上执行，因此 matrix 明确保持 `PENDING`，不能声明支持。
+- 2026-09-14 记录的 Phase 7 自动 Docker 验证仅覆盖 arm64；当时本机没有 amd64/binfmt Docker
+  endpoint，先前验收示例的远端主机不可达。本轮 cleanup 不刷新架构验证结果，因此 matrix 的
+  AMD64 自动验证记录仍保持 `PENDING`；人工验收通过不自动补写具体架构测试证据。
 - Phase 5 及更早创建的合法 legacy Container 没有 `unless-stopped` policy；Phase 6 为保持兼容不会在
   recovery 中自动修改它。此类 Runtime 在完整宿主机重启后可能被观察为 STOPPED/ERROR，需用户明确
   start 或删除重建后才获得新 policy。
@@ -120,6 +119,11 @@ Phase 7 工程实现与 ARM64 自动验证已完成，当前等待 AMD64 native 
 
 ## Verification
 
+- 2026-09-15：用户确认 Phase 7 人工验收通过、功能通过；本次仅授权小范围 post-acceptance cleanup。
+- 2026-09-15：cleanup 通过 `pnpm lint`、`pnpm typecheck`、`pnpm test`（77 passed，10 个
+  PostgreSQL/真实 Docker 条件测试按设计跳过）与 `git diff --check`。新增日志回归测试确认原高层
+  信息与异常对象（含 cause）一并记录，探针失败仍不发送 hello，并以原 1011 code/reason 关闭连接。
+  Runtime Image、capability probe/scheduler/reconciliation 与资源/安全配置未修改，未重跑 Docker smoke。
 - 2026-09-14：Phase 7 最终根级验证通过：`pnpm lint`、`pnpm typecheck`、`pnpm test`
   （76 passed，10 个 PostgreSQL/真实 Docker 条件测试按设计跳过）与 `pnpm build:web`；接入本机
   PostgreSQL 后 Control Plane 46/46 通过。随后重新构建最终 ARM64 image，Runtime smoke 与 Worker

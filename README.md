@@ -7,8 +7,8 @@ Workspace、Worker、Docker 生命周期、调度和安全代理。
 当前仓库已在已验收的 Phase 0～6 基线上实现 **Phase 7：完整 Runtime Toolchain**。Runtime 现包含
 Python/uv、Node/pnpm、Rust、build tools、ffmpeg、PDF/Office 工具、Playwright/Chromium 和克制的
 Linux/network debugging CLI；Worker 在 hello 前通过本机精确镜像的实际探针上报 capability，不按
-architecture 猜测。Phase 7 工程验证已在 ARM64 通过，AMD64 保持未声明并等待 native matrix 验证与
-本阶段人工验收。
+architecture 猜测。Phase 7 功能已由人工验收确认通过；仓库记录的 ARM64 工程验证已通过，
+AMD64 native 自动验证记录仍待补齐，不由人工验收结论推断具体 matrix 结果。Phase 8 未开始。
 HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其 Chat、Terminal 或 streaming 实现。
 
 ## Prerequisites
@@ -39,6 +39,10 @@ pnpm lint
 drop-all-capabilities、`no-new-privileges` 的容器中运行完整命令 smoke 和真实
 Playwright/Chromium local-page JS smoke。两个架构的当前证据和验收命令见
 [Runtime Capability Matrix](docs/runtime-capability-matrix.md)。
+
+Runtime 已安装 `ping` binary，但默认 Workspace 使用 `CapDrop=ALL`，ICMP ping 可能报
+`Operation not permitted`。这是预期安全限制，不应为了 ping 增加 `CAP_NET_RAW`。常规网络诊断
+推荐使用 `nc`、`curl`、`dig`、`ip`、`ss`、`lsof`；smoke 只要求 `ping` 命令存在，不要求 ICMP 可用。
 
 开发 compose 中的 PostgreSQL 使用 `restart: unless-stopped`，只保证它在宿主机 reboot、Docker daemon
 恢复后随之恢复。Control Plane、Portal 与 Worker 的进程托管不属于本项；本仓库未因此新增 systemd 或
