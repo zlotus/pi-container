@@ -14,6 +14,8 @@ import type {
   Phase3Repository,
   Phase5Repository,
   Phase6Repository,
+  Phase8Repository,
+  PlatformAuditEvent,
   UserRecord,
   WorkerPlacementRecord,
   WorkspaceRecord,
@@ -57,11 +59,22 @@ const WorkspaceParamsSchema = z
   .object({ id: z.string().uuid() })
   .strict();
 
+const AuditQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(100).default(30),
+    before: z.string().regex(/^[1-9][0-9]*$/).optional(),
+  })
+  .strict();
+
 const INVALID_LOGIN_HASH =
   "scrypt$N=16384,r=8,p=1$MDEyMzQ1Njc4OWFiY2RlZg$91N6IibOCNGoJIaLSVpuW8f6Qg4lxDxxq0yCck7RYgnoDkMSGEYhoP9aqNjR08hwW6OkhlITEQoD_Hoq0k5wxQ";
 
 type Phase1Store = Pick<
-  Phase1Repository & Phase3Repository & Phase5Repository & Phase6Repository,
+  Phase1Repository &
+    Phase3Repository &
+    Phase5Repository &
+    Phase6Repository &
+    Phase8Repository,
   | "findUserByLogin"
   | "createSession"
   | "findActiveSession"
@@ -80,6 +93,8 @@ type Phase1Store = Pick<
   | "beginWorkerReconciliation"
   | "reconcileWorkspaceRecovery"
   | "deleteRecoveredWorkspace"
+  | "recordWorkspaceOpened"
+  | "listAuditEvents"
 >;
 
 type WorkerAdminStore = Pick<
@@ -173,6 +188,19 @@ function publicWorkspace(workspace: WorkspaceRecord) {
     createdAt: workspace.createdAt.toISOString(),
     updatedAt: workspace.updatedAt.toISOString(),
     lastActivityAt: workspace.lastActivityAt.toISOString(),
+  };
+}
+
+function publicAuditEvent(event: PlatformAuditEvent) {
+  return {
+    id: event.id,
+    eventType: event.eventType,
+    actorUserId: event.actorUserId,
+    ownerUserId: event.ownerUserId,
+    workspaceId: event.workspaceId,
+    workerId: event.workerId,
+    details: event.details,
+    createdAt: event.createdAt.toISOString(),
   };
 }
 
@@ -606,6 +634,25 @@ export function buildControlPlane(
     return { workspaces: workspaces.map(publicWorkspace) };
   });
 
+  app.get("/api/audit-events", async (request, reply) => {
+    const auth = await authenticate(request, reply);
+    if (auth === null) return reply;
+    const query = AuditQuerySchema.safeParse(request.query);
+    if (!query.success) {
+      return reply
+        .code(400)
+        .send(errorBody("INVALID_REQUEST", "Invalid audit event cursor"));
+    }
+    const events = await dependencies.store.listAuditEvents({
+      userId: auth.session.user.id,
+      includeAllUsers: auth.session.user.role === "admin",
+      limit: query.data.limit,
+      beforeId: query.data.before ?? null,
+    });
+    reply.header("cache-control", "no-store");
+    return { events: events.map(publicAuditEvent) };
+  });
+
   app.get("/api/admin/workers", async (request, reply) => {
     const auth = await authenticate(request, reply);
     if (auth === null) return reply;
@@ -938,6 +985,12 @@ export function buildControlPlane(
         .code(409)
         .send(errorBody("WORKSPACE_NOT_RUNNING", "Workspace is not running"));
     }
+    await dependencies.store.recordWorkspaceOpened({
+      actorUserId: auth.session.user.id,
+      ownerUserId: workspace.userId,
+      workspaceId: workspace.id,
+      workerId: workspace.workerId,
+    });
     const code = dependencies.sessionExchanges.issue({
       rawSessionToken: auth.rawToken,
       userId: auth.session.user.id,

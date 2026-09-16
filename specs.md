@@ -1235,16 +1235,18 @@ updated_at
 last_activity_at
 ```
 
-## workspace_events
+## platform_audit_events
 
-仅平台基础设施事件：
+仅保存追加式平台基础设施事件：
 
 ```text
-id
-workspace_id
-worker_id
-type
-payload
+id bigint cursor
+event_type
+actor_user_id nullable
+owner_user_id nullable
+workspace_id nullable
+worker_id nullable
+details jsonb
 created_at
 ```
 
@@ -1253,14 +1255,18 @@ created_at
 ```text
 workspace.created
 workspace.scheduled
-container.created
-container.started
-container.stopped
+workspace.running
+workspace.stopped
+workspace.opened
+workspace.deleted
+worker.runtime_reported
 worker.offline
-proxy.error
 ```
 
-不要第一版复制保存完整 Pi conversation。
+Workspace/Worker 的数据库生命周期事件与状态变更在同一事务追加，避免状态已经生效但 Audit 漏记。
+Workspace 删除后 Audit 仍保留，因此 subject ID 不作为级联删除外键。普通用户只能查询
+`owner_user_id` 为自己的事件；admin 可以查看平台事件。`details` 只允许平台控制的结构化 metadata，
+不得保存 Cookie、session exchange code、credential、Prompt、Pi message/tool stream 或文件内容。
 
 ## artifacts
 
@@ -1316,6 +1322,15 @@ POST   /api/workspaces/:id/stop
 GET /api/admin/workers
 GET /api/admin/workspaces
 ```
+
+## Audit
+
+```text
+GET /api/audit-events?limit=30&before=<event-id>
+```
+
+返回倒序、cursor pagination 的结构化平台事件。普通用户只看到自己的 Workspace 事件；admin 可看到
+全平台 Workspace/Worker 事件。响应禁止缓存，不提供 Pi conversation 或 tool stream 导出。
 
 ## Proxy
 
@@ -2255,16 +2270,27 @@ Base CLI / build tools
 
 ## Phase 8：比赛展示增强
 
-可加：
+本阶段完成：
 
-- Artifact
-- platform Audit Trail
-- runtime resource chart
-- Workspace CPU/memory
-- Worker dashboard
-- security panel
-- demo website
-- polished README
+- Artifact 主链继续复用 pi-web Files：Agent 在 `/workspace` 生成成果，用户在原生 pi-web 中查看或下载；
+  当前没有跨 Workspace 统一成果列表的必要，因此不新增平台 Artifact registry、文件副本或下载端点。
+- PostgreSQL-backed platform Audit Trail：记录 Workspace create/schedule/state/open/delete、Worker
+  register/online/offline/runtime capability report 等基础设施事件；不复制 Pi message/tool stream。
+- Portal demo dashboard：展示 Workspace placement、Worker authoritative assignment/max、heartbeat
+  observation、host capacity、实际 capability probe 结果、Artifact 路径说明和准确的安全边界。
+- E2E 分为确定性平台主链与真实 Docker Runtime 两层：前者覆盖 login、ownership、placement、
+  session exchange、HTTP/SSE/WebSocket、Stop/Start sticky；后者通过真实 pi-web bash tool 在
+  `/workspace` 生成成果，并验证 Files、持久化、reconciliation、安全与网络隔离。
+- polished README 与比赛 runbook：明确 preflight、演示路径、验收清单、cleanup 和自动化边界。
+
+Phase 8 验收：
+
+- User A/B 登录、创建/调度、打开 pi-web 和跨用户拒绝均正常；
+- 真实 Prompt streaming、Terminal/tool execution 和 pi-web Files 成果查看/下载正常；
+- Stop/Start 后文件和 Pi Session 恢复，sticky Worker ID 不改变；
+- Worker/Workspace/安全/Runtime capability/Audit 展示与真实状态一致；
+- Audit 中没有 Pi conversation、tool stream、credential 或文件正文；
+- 根质量门、确定性 E2E、真实 Docker Runtime E2E 通过，并按 runbook 完成人工验收。
 
 ---
 

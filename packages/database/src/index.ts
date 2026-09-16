@@ -64,3 +64,8 @@ export {
   type Phase6Repository,
   type WorkspaceRecoveryRecord,
 } from "./phase6.js";
+export {
+  createPhase8Repository,
+  type Phase8Repository,
+  type PlatformAuditEvent,
+} from "./phase8.js";

@@ -8,7 +8,9 @@
     "start": "tsx src/server.ts",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "vitest run src/gateway.test.ts",
+    "test:e2e:runtime": "vitest run src/runtime.integration.test.ts"
   },
   "dependencies": {
     "@agent-runtime/auth": "workspace:*",

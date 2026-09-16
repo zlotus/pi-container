@@ -4,12 +4,14 @@
 [pi-web](https://github.com/agegr/pi-web) 与 Pi Coding Agent，自身只负责认证、
 Workspace、Worker、Docker 生命周期、调度和安全代理。
 
-当前仓库已在已验收的 Phase 0～6 基线上实现 **Phase 7：完整 Runtime Toolchain**。Runtime 现包含
+当前仓库已在已验收的 Phase 0～7 基线上实现 **Phase 8：比赛展示增强与最终收口**。Runtime 现包含
 Python/uv、Node/pnpm、Rust、build tools、ffmpeg、PDF/Office 工具、Playwright/Chromium 和克制的
 Linux/network debugging CLI；Worker 在 hello 前通过本机精确镜像的实际探针上报 capability，不按
-architecture 猜测。Phase 7 功能已由人工验收确认通过；仓库记录的 ARM64 工程验证已通过，
-AMD64 native 自动验证记录仍待补齐，不由人工验收结论推断具体 matrix 结果。Phase 8 未开始。
-HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其 Chat、Terminal 或 streaming 实现。
+architecture 猜测。Portal 现在展示 Worker/Workspace placement、能力、容量、安全边界和结构化
+Platform Audit Trail。Artifact 继续复用 pi-web 的 `/workspace` Files 查看/下载，不复制文件或 Pi
+message/tool stream。Phase 8 工程实现等待人工验收；仓库记录的 ARM64 工程验证已通过，AMD64 native
+自动验证记录仍待补齐。HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其
+Chat、Terminal 或 streaming 实现。
 
 ## Prerequisites
 
@@ -33,7 +35,13 @@ pnpm db:migrate
 pnpm typecheck
 pnpm test
 pnpm lint
+pnpm test:e2e
+pnpm test:e2e:runtime
 ```
+
+`test:e2e` 是无需外部模型的确定性平台主链；`test:e2e:runtime` 使用本机真实 Docker image，经
+pi-web bash tool 生成 Artifact，并验证 Files、Stop/Start、reconciliation 和持久化。比赛演示与
+人工验收步骤见 [Phase 8 Demo Runbook](docs/demo-runbook.md)。
 
 `verify-image.sh` 接受 `amd64` 或 `arm64`，会检查本地镜像架构，并在 non-root、无 network、
 drop-all-capabilities、`no-new-privileges` 的容器中运行完整命令 smoke 和真实
@@ -311,6 +319,7 @@ POST   /api/auth/login
 POST   /api/auth/logout
 GET    /api/me
 GET    /api/workspaces
+GET    /api/audit-events
 POST   /api/workspaces
 GET    /api/workspaces/:id
 DELETE /api/workspaces/:id

@@ -19,7 +19,9 @@
     "worker:configure-gateway": "pnpm --filter @agent-runtime/control-plane worker:configure-gateway",
     "lint": "eslint .",
     "typecheck": "pnpm -r --if-present typecheck",
-    "test": "pnpm -r --if-present test"
+    "test": "pnpm -r --if-present test",
+    "test:e2e": "pnpm -r --workspace-concurrency=1 --if-present test:e2e",
+    "test:e2e:runtime": "TEST_DOCKER_RUNTIME=1 TEST_RUNTIME_IMAGE=agent-runtime:phase7-toolchain pnpm --filter @agent-runtime/worker test:e2e:runtime"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

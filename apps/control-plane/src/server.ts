@@ -1,7 +1,7 @@
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase6Repository,
+  createPhase8Repository,
   migrateDatabase,
 } from "@agent-runtime/database";
 import { parseWorkspaceBaseUrl } from "@agent-runtime/gateway";
@@ -105,7 +105,7 @@ const database = createDatabaseClient(config.DATABASE_URL);
 
 await migrateDatabase(database);
 
-const repository = createPhase6Repository(database, selectWorker);
+const repository = createPhase8Repository(database, selectWorker);
 await repository.markAllWorkersOfflineForRecovery(new Date());
 const sessionExchanges = new WorkspaceSessionExchange(
   config.WORKSPACE_SESSION_EXCHANGE_TTL_MS,

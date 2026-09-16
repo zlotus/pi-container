@@ -1,12 +1,13 @@
 # Project Progress
 
-Last reviewed: 2026-09-15
+Last reviewed: 2026-09-16
 
 ## Current Milestone
 
-Phase 0～7 已完成人工验收，Phase 7 功能由用户确认通过。当前仅做 probe 失败日志与 ping 安全说明的
-post-acceptance cleanup；不改变 capability、Runtime 安全基线或 fail-closed 行为。仓库已有 ARM64
-自动验证证据；AMD64 native 自动结果未新增记录，不由人工验收结论推断支持。Phase 8 尚未开始。
+Phase 0～7 及 Phase 7 post-acceptance cleanup 已完成人工验收。Phase 8 比赛展示增强的工程实现已完成：
+复用 pi-web Files 的 Artifact 主链、PostgreSQL-backed Platform Audit Trail、Worker/Workspace/安全/
+Runtime capability 展示、确定性平台 E2E、真实 Docker Runtime E2E 和比赛 runbook 均已落地并通过
+自动质量门。当前等待 Phase 8 人工验收；在验收结论前不声明 Phase 8 已验收，也不继续扩展功能。
 
 ## Current Baseline
 
@@ -87,15 +88,28 @@ post-acceptance cleanup；不改变 capability、Runtime 安全基线或 fail-cl
 - 新建 Runtime 配置 Docker `unless-stopped` restart policy；运行中的 Container 可随 Docker/宿主机
   恢复，显式停止的保持停止。缺少该新增 policy 或 default-cwd 的合法 legacy Runtime 仍可管理，
   recovery 不修改、不重建、不删除它。
+- Phase 8 使用 `platform_audit_events` 保存追加式结构化基础设施事件。Workspace create/schedule/state/
+  delete 与 Worker status/runtime report 由数据库 trigger 在原状态事务内记录；成功签发 Workspace open
+  exchange 时另记 `workspace.opened`。普通用户只查询自己的 Workspace 事件，admin 可查询平台事件；
+  details 不保存 Cookie、exchange code、credential、Prompt、Pi message/tool stream 或文件正文。
+- Portal 展示 Worker 实测 capability、Runtime 版本、host CPU/Memory、authoritative assignment/max 与
+  heartbeat reported observation，并展示 Workspace ID/placement、Artifact 路径、安全边界和最近 Audit。
+  资源条是 assignment capacity，不伪装成未采集的实时 CPU/Memory usage。
+- Artifact 不新增平台 registry/download endpoint。Agent 在 canonical `/workspace` 生成成果，用户继续
+  使用 pi-web Files 查看或下载；平台不复制文件或重新实现 Files UI。
+- 根级 `test:e2e` 串行覆盖 Control Plane/两级 Gateway 主链；`test:e2e:runtime` 使用真实 Docker、
+  pi-web Session/bash tool/Files 验证成果生成与 Stop/Start/reconciliation persistence。完整比赛步骤与
+  人工验收清单在 `docs/demo-runbook.md`。
 
 ## In Progress
 
-本轮 Phase 7 post-acceptance cleanup 已完成并通过质量门；没有进行中的功能扩展。
+Phase 8 工程实现与自动验证已完成，当前停在人工验收边界；没有进行中的功能扩展。
 
 ## Next
 
-1. 停止本轮工作，等待下一步明确指示。
-2. 保持 Phase 0～7 已验收行为和安全边界稳定，不进入 Phase 8。
+1. 按 `docs/demo-runbook.md` 在目标浏览器、真实模型和比赛多主机网络中完成人工验收。
+2. 记录人工验收结论；如发现问题，只做证据驱动的 Phase 8 修复或明确授权的 post-acceptance cleanup。
+3. 在收到人工结论前停止扩展，不进入 Kubernetes、复杂 RBAC、多 Agent、GPU scheduling 等 MVP 外范围。
 
 ## Risks And Blockers
 
@@ -116,8 +130,25 @@ post-acceptance cleanup；不改变 capability、Runtime 安全基线或 fail-cl
   start 或删除重建后才获得新 policy。
 - Phase 5 使用单 Control Plane 进程持有的 authenticated Worker channel 集合作为 connected
   eligibility；多 Control Plane 实例和共享 channel presence 不在 MVP 当前范围。
+- Audit migration 不回填 Phase 0～7 的历史事件，只从 migration 生效后记录；当前没有 retention/export
+  policy。Platform Audit 是基础设施轨迹，不是合规审计产品，也不复制 Pi 内部历史。
+- 自动 E2E 不带真实模型凭据。它已通过真实 pi-web bash tool 与 Files 验证 Runtime/Artifact 主链，
+  但目标模型 Prompt streaming、Terminal 交互、比赛浏览器视觉和真实多主机网络仍需人工验收。
 
 ## Verification
+
+- 2026-09-16：Phase 8 根质量门通过 `pnpm lint`、`pnpm typecheck`、`pnpm test`（77 passed，10 个
+  PostgreSQL/真实 Docker 条件测试按设计跳过）、`pnpm build:web` 与 `git diff --check`。
+- 2026-09-16：`pnpm test:e2e` 通过 Control Plane/Gateway 27/27 与 Worker Gateway 2/2，覆盖 login、
+  ownership、create/schedule/open、session exchange、HTTP/SSE/WebSocket、Stop/Start sticky 和二次认证。
+- 2026-09-16：`pnpm test:e2e:runtime` 在本机 ARM64 Docker Engine 29.7.2 和既有
+  `agent-runtime:phase7-toolchain` image 上 5/5 通过；真实 pi-web bash tool 生成 Artifact、Files 列出、
+  Stop/Start、Container restart、reconciliation、Workspace/Pi Session persistence 与隔离回归通过。
+- 2026-09-16：应用 `0005_phase8_audit` 后，连接本机 PostgreSQL 的 Control Plane 46/46 通过，覆盖
+  Audit trigger 生命周期序列、普通用户事件隔离、Workspace 删除后事件保留及既有 Phase 1～6 回归。
+- 2026-09-16：以生产 Web build、临时只读 mock API 和 Runtime image 内的 Playwright/Chromium 完成
+  1440px dashboard visual smoke；Worker table、capability chips、Workspace cards、安全/Artifact panel 与
+  Audit timeline 正常渲染。该检查不替代目标比赛浏览器上的人工交互验收。
 
 - 2026-09-15：用户确认 Phase 7 人工验收通过、功能通过；本次仅授权小范围 post-acceptance cleanup。
 - 2026-09-15：cleanup 通过 `pnpm lint`、`pnpm typecheck`、`pnpm test`（77 passed，10 个

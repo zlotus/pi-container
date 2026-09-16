@@ -12,7 +12,8 @@
     "worker:configure-gateway": "tsx src/provision-worker.ts configure-gateway",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "vitest run src/app.test.ts src/gateway.test.ts"
   },
   "dependencies": {
     "@agent-runtime/auth": "workspace:*",

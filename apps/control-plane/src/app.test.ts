@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { hashOpaqueToken, hashPassword } from "@agent-runtime/auth";
 import type {
   AuthenticatedSessionRecord,
+  PlatformAuditEvent,
   UserRecord,
   WorkerRecord,
   WorkspaceRecord,
@@ -86,6 +87,7 @@ async function createTestDependencies(
           : "STOPPED",
     ]),
   );
+  const auditEvents: PlatformAuditEvent[] = [];
   const workers: WorkerRecord[] = [WORKER_1_TOKEN, WORKER_2_TOKEN].map(
     (_token, index) => ({
       id: `worker-0${index + 1}`,
@@ -204,6 +206,31 @@ async function createTestDependencies(
       },
     },
     store: {
+      async recordWorkspaceOpened(input) {
+        auditEvents.unshift({
+          id: String(auditEvents.length + 1),
+          eventType: "workspace.opened",
+          actorUserId: input.actorUserId,
+          ownerUserId: input.ownerUserId,
+          workspaceId: input.workspaceId,
+          workerId: input.workerId,
+          details: {},
+          createdAt: NOW,
+        });
+      },
+      async listAuditEvents(input) {
+        return auditEvents
+          .filter(
+            (event) =>
+              input.includeAllUsers || event.ownerUserId === input.userId,
+          )
+          .filter(
+            (event) =>
+              input.beforeId === null ||
+              BigInt(event.id) < BigInt(input.beforeId),
+          )
+          .slice(0, input.limit);
+      },
       async findUserByLogin(login) {
         const normalized = login.trim().toLowerCase();
         return (
@@ -812,6 +839,28 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
     });
     expect(open.json<{ code: string }>().code).toHaveLength(43);
 
+    const ownerAudit = await app.inject({
+      method: "GET",
+      url: "/api/audit-events",
+      headers: { cookie: owner.cookie },
+    });
+    expect(ownerAudit.statusCode).toBe(200);
+    expect(ownerAudit.json()).toMatchObject({
+      events: [
+        {
+          eventType: "workspace.opened",
+          workspaceId,
+          workerId: "worker-01",
+        },
+      ],
+    });
+    const foreignAudit = await app.inject({
+      method: "GET",
+      url: "/api/audit-events",
+      headers: { cookie: other.cookie },
+    });
+    expect(foreignAudit.json()).toEqual({ events: [] });
+
     const foreignStop = await app.inject({
       method: "POST",
       url: `/api/workspaces/${workspaceId}/stop`,
@@ -849,6 +898,21 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
     });
     expect(stoppedOpen.statusCode).toBe(409);
 
+    const restart = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${workspaceId}/start`,
+      headers: {
+        cookie: owner.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": owner.csrfToken,
+      },
+      payload: {},
+    });
+    expect(restart.statusCode).toBe(200);
+    expect(restart.json()).toMatchObject({
+      workspace: { workerId: "worker-01", state: "RUNNING" },
+    });
+
     const deletion = await app.inject({
       method: "DELETE",
       url: `/api/workspaces/${workspaceId}`,
@@ -863,6 +927,8 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       "workspace.ensure",
       "workspace.start",
       "workspace.stop",
+      "workspace.ensure",
+      "workspace.start",
       "workspace.delete",
     ]);
 

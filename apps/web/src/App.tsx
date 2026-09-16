@@ -20,11 +20,26 @@ interface Worker {
   hostname: string | null;
   architecture: "amd64" | "arm64" | null;
   status: "ONLINE" | "OFFLINE" | "DISABLED";
+  runtimeImage: string | null;
   runtimeVersion: string | null;
+  capabilities: Record<string, boolean>;
   maxWorkspaces: number | null;
   assignedWorkspaces: number;
   allocatedWorkspaces: number;
+  systemResources: {
+    logicalCpuCount: number | null;
+    memoryBytes: number | null;
+  };
   lastHeartbeatAt: string | null;
+}
+
+interface AuditEvent {
+  id: string;
+  eventType: string;
+  workspaceId: string | null;
+  workerId: string | null;
+  details: Record<string, unknown>;
+  createdAt: string;
 }
 
 interface SessionResponse {
@@ -35,6 +50,47 @@ interface SessionResponse {
 interface WorkspaceOpenResponse {
   exchangeUrl: string;
   code: string;
+}
+
+const CAPABILITY_LABELS: Record<string, string> = {
+  browser: "Browser",
+  office: "Office",
+  ffmpeg: "Media",
+  python: "Python",
+  node: "Node",
+  rust: "Rust",
+};
+
+const AUDIT_LABELS: Record<string, string> = {
+  "workspace.created": "Workspace 已创建",
+  "workspace.scheduled": "Scheduler 已分配 Worker",
+  "workspace.starting": "Runtime 正在启动",
+  "workspace.running": "Runtime 已运行",
+  "workspace.opened": "已打开 pi-web",
+  "workspace.stopping": "Runtime 正在停止",
+  "workspace.stopped": "Runtime 已停止",
+  "workspace.deleting": "Workspace 正在删除",
+  "workspace.deleted": "Workspace 已永久删除",
+  "workspace.error": "Runtime 进入错误状态",
+  "workspace.worker_offline": "Worker 已离线",
+  "worker.registered": "Worker 已预注册",
+  "worker.online": "Worker 已上线",
+  "worker.offline": "Worker 已离线",
+  "worker.disabled": "Worker 已禁用",
+  "worker.runtime_reported": "Runtime 能力已上报",
+};
+
+function formatBytes(value: number | null): string {
+  if (value === null) return "—";
+  return `${(value / 1024 ** 3).toFixed(value >= 10 * 1024 ** 3 ? 0 : 1)} GiB`;
+}
+
+function stateTransition(details: Record<string, unknown>): string | null {
+  const from = details.fromState;
+  const to = details.toState;
+  return typeof from === "string" && typeof to === "string"
+    ? `${from} → ${to}`
+    : null;
 }
 
 class ApiError extends Error {
@@ -73,6 +129,7 @@ export function App() {
   const [session, setSession] = useState<SessionResponse | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workers, setWorkers] = useState<Worker[]>([]);
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pendingWorkspaceId, setPendingWorkspaceId] = useState<string | null>(null);
@@ -85,6 +142,11 @@ export function App() {
   const loadWorkers = useCallback(async () => {
     const result = await api<{ workers: Worker[] }>("/api/admin/workers");
     setWorkers(result.workers);
+  }, []);
+
+  const loadAuditEvents = useCallback(async () => {
+    const result = await api<{ events: AuditEvent[] }>("/api/audit-events?limit=30");
+    setAuditEvents(result.events);
   }, []);
 
   const refreshWorkers = useCallback(async () => {
@@ -100,7 +162,7 @@ export function App() {
       try {
         const current = await api<SessionResponse>("/api/me");
         setSession(current);
-        await loadWorkspaces();
+        await Promise.all([loadWorkspaces(), loadAuditEvents()]);
       } catch (caught) {
         if (!(caught instanceof ApiError) || caught.status !== 401) {
           setError(caught instanceof Error ? caught.message : "Unable to load portal");
@@ -109,7 +171,7 @@ export function App() {
         setLoading(false);
       }
     })();
-  }, [loadWorkspaces]);
+  }, [loadAuditEvents, loadWorkspaces]);
 
   useEffect(() => {
     if (session?.user.role !== "admin") return;
@@ -131,7 +193,7 @@ export function App() {
         }),
       });
       setSession(current);
-      await loadWorkspaces();
+      await Promise.all([loadWorkspaces(), loadAuditEvents()]);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Login failed");
     }
@@ -150,7 +212,7 @@ export function App() {
         body: JSON.stringify({ name: form.get("name") }),
       });
       formElement.reset();
-      await loadWorkspaces();
+      await Promise.all([loadWorkspaces(), loadAuditEvents()]);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Creation failed");
     }
@@ -166,7 +228,7 @@ export function App() {
         method: "DELETE",
         headers: { "x-csrf-token": session.csrfToken },
       });
-      await loadWorkspaces();
+      await Promise.all([loadWorkspaces(), loadAuditEvents()]);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Deletion failed");
     } finally {
@@ -187,7 +249,7 @@ export function App() {
         headers: { "x-csrf-token": session.csrfToken },
         body: "{}",
       });
-      await loadWorkspaces();
+      await Promise.all([loadWorkspaces(), loadAuditEvents()]);
       if (session.user.role === "admin") await loadWorkers();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Runtime operation failed");
@@ -226,6 +288,7 @@ export function App() {
       form.append(code);
       workspaceTab.document.body.append(form);
       form.submit();
+      void loadAuditEvents();
       setPendingWorkspaceId(null);
     } catch (caught) {
       workspaceTab.close();
@@ -245,6 +308,7 @@ export function App() {
     setSession(null);
     setWorkspaces([]);
     setWorkers([]);
+    setAuditEvents([]);
   }
 
   if (loading) {
@@ -301,6 +365,24 @@ export function App() {
             <button type="submit">新建 Workspace</button>
           </form>
         </div>
+        <section className="platform-summary" aria-label="平台概览">
+          <article>
+            <strong>{workspaces.length}</strong>
+            <span>持久 Workspace</span>
+          </article>
+          <article>
+            <strong>{workspaces.filter((workspace) => workspace.state === "RUNNING").length}</strong>
+            <span>正在运行</span>
+          </article>
+          <article>
+            <strong>{session.user.role === "admin" ? workers.filter((worker) => worker.status === "ONLINE").length : "隔离"}</strong>
+            <span>{session.user.role === "admin" ? "在线 Worker" : "每 Workspace Runtime"}</span>
+          </article>
+          <article>
+            <strong>{auditEvents.length}</strong>
+            <span>最近平台事件</span>
+          </article>
+        </section>
         {session.user.role === "admin" ? (
           <section className="worker-panel" aria-labelledby="worker-panel-title">
             <div className="section-heading">
@@ -318,16 +400,22 @@ export function App() {
               <div className="worker-table-wrap">
                 <table>
                   <thead>
-                    <tr><th>Worker</th><th>状态</th><th>架构</th><th>Workspace</th><th>最后心跳</th></tr>
+                    <tr><th>Worker</th><th>状态</th><th>架构 / 主机</th><th>Runtime</th><th>实测能力</th><th>Workspace</th><th>最后心跳</th></tr>
                   </thead>
                   <tbody>
                     {workers.map((worker) => (
                       <tr key={worker.id}>
                         <td><strong>{worker.id}</strong><small>{worker.hostname ?? "尚未连接"}</small></td>
                         <td><span className={`state worker-${worker.status.toLowerCase()}`}>{worker.status}</span></td>
-                        <td>{worker.architecture ?? "—"}</td>
-                        <td title={`Worker 最近上报 ${worker.allocatedWorkspaces} 个 Runtime`}>
-                          {worker.assignedWorkspaces}/{worker.maxWorkspaces ?? "—"}
+                        <td>{worker.architecture ?? "—"}<small>{worker.systemResources.logicalCpuCount ?? "—"} vCPU · {formatBytes(worker.systemResources.memoryBytes)}</small></td>
+                        <td><strong>{worker.runtimeVersion ?? "—"}</strong><small title={worker.runtimeImage ?? undefined}>{worker.runtimeImage ?? "尚未上报"}</small></td>
+                        <td><div className="capability-list">{Object.entries(CAPABILITY_LABELS).map(([key, label]) => (
+                          <span className={worker.capabilities[key] ? "capability pass" : "capability fail"} key={key}>{label}</span>
+                        ))}</div></td>
+                        <td title={`Worker 最近上报 ${worker.allocatedWorkspaces} 个 Runtime；调度以平台 assignment 为准`}>
+                          <strong>{worker.assignedWorkspaces}/{worker.maxWorkspaces ?? "—"}</strong>
+                          <span className="capacity-track" aria-label="authoritative assignment capacity"><i style={{ width: `${worker.maxWorkspaces === null || worker.maxWorkspaces === 0 ? 0 : Math.min(100, worker.assignedWorkspaces / worker.maxWorkspaces * 100)}%` }} /></span>
+                          <small>reported {worker.allocatedWorkspaces}</small>
                         </td>
                         <td>{worker.lastHeartbeatAt === null ? "—" : new Date(worker.lastHeartbeatAt).toLocaleString()}</td>
                       </tr>
@@ -356,8 +444,10 @@ export function App() {
                 </div>
                 <dl>
                   <div><dt>Worker</dt><dd>{workspace.workerId ?? "等待分配"}</dd></div>
+                  <div><dt>Workspace ID</dt><dd title={workspace.id}>{workspace.id.slice(0, 8)}…</dd></div>
                   <div><dt>创建时间</dt><dd>{new Date(workspace.createdAt).toLocaleString()}</dd></div>
                 </dl>
+                <p className="artifact-note">成果保存在 <code>/workspace</code>，运行后通过 pi-web Files 安全查看或下载。</p>
                 <div className="card-actions">
                   {workspace.state === "RUNNING" ? (
                     <button
@@ -392,6 +482,59 @@ export function App() {
             ))}
           </section>
         )}
+        <section className="demo-panels">
+          <article className="security-panel">
+            <p className="eyebrow">SECURITY BOUNDARY</p>
+            <h2>默认隔离，不绕过 Gateway</h2>
+            <ul>
+              <li>普通用户、非 privileged、无 Docker socket</li>
+              <li>每个 Workspace 独立 bridge 与持久目录</li>
+              <li>CPU / Memory / PID limits 由 Worker 强制执行</li>
+              <li>HTTP、SSE、WebSocket 每次均校验 session 与 ownership</li>
+            </ul>
+            <p className="scope-note">面向可信企业内部用户的 Docker-based isolation，不宣称 VM-grade 或绝对安全。</p>
+          </article>
+          <article className="artifact-panel">
+            <p className="eyebrow">ARTIFACT FLOW</p>
+            <h2>成果留在真实工作目录</h2>
+            <p>让 Agent 将报告、代码、PDF、Office 或媒体文件写入 <code>/workspace</code>，再使用 pi-web 已有 Files 能力预览和下载。</p>
+            <p className="scope-note">平台不复制文件、不扫描 Pi 会话，也不另建重复的 Artifact registry。</p>
+          </article>
+        </section>
+        <section className="audit-panel" aria-labelledby="audit-title">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">PLATFORM AUDIT</p>
+              <h2 id="audit-title">最近基础设施事件</h2>
+              <p className="muted">只记录平台生命周期与路由事件，不保存 Pi message 或 tool stream。</p>
+            </div>
+            <button className="secondary" onClick={() => void loadAuditEvents()}>刷新</button>
+          </div>
+          {auditEvents.length === 0 ? (
+            <p className="muted">尚无平台事件。</p>
+          ) : (
+            <ol className="audit-list">
+              {auditEvents.map((event) => {
+                const workspace = workspaces.find((candidate) => candidate.id === event.workspaceId);
+                const recordedName = event.details.name;
+                const subject = workspace?.name ??
+                  (typeof recordedName === "string" ? recordedName : null) ??
+                  (event.workspaceId === null ? "平台" : `${event.workspaceId.slice(0, 8)}…`);
+                const transition = stateTransition(event.details);
+                return (
+                  <li key={event.id}>
+                    <span className="audit-dot" aria-hidden="true" />
+                    <div>
+                      <strong>{AUDIT_LABELS[event.eventType] ?? event.eventType}</strong>
+                      <p>{subject}{event.workerId === null ? "" : ` · ${event.workerId}`}{transition === null ? "" : ` · ${transition}`}</p>
+                    </div>
+                    <time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </section>
       </main>
     </div>
   );

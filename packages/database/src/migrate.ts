@@ -22,6 +22,10 @@ const MIGRATIONS = [
       import.meta.url,
     ),
   },
+  {
+    name: "0005_phase8_audit",
+    url: new URL("../migrations/0005_phase8_audit.sql", import.meta.url),
+  },
 ] as const;
 
 export async function migrateDatabase(client: DatabaseClient): Promise<void> {
