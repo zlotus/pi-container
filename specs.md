@@ -2276,8 +2276,9 @@ Base CLI / build tools
   当前没有跨 Workspace 统一成果列表的必要，因此不新增平台 Artifact registry、文件副本或下载端点。
 - PostgreSQL-backed platform Audit Trail：记录 Workspace create/schedule/state/open/delete、Worker
   register/online/offline/runtime capability report 等基础设施事件；不复制 Pi message/tool stream。
-- Portal demo dashboard：展示 Workspace placement、Worker authoritative assignment/max、heartbeat
-  observation、host capacity、实际 capability probe 结果、Artifact 路径说明和准确的安全边界。
+- Portal 管理视图：展示 Workspace placement、Worker authoritative assignment/max、heartbeat
+  observation、host capacity、实际 capability probe 结果和紧凑的平台状态概览；安全与 Artifact
+  路径说明保留在文档及演示 runbook，不占用日常操作界面。
 - E2E 分为确定性平台主链与真实 Docker Runtime 两层：前者覆盖 login、ownership、placement、
   session exchange、HTTP/SSE/WebSocket、Stop/Start sticky；后者通过真实 pi-web bash tool 在
   `/workspace` 生成成果，并验证 Files、持久化、reconciliation、安全与网络隔离。

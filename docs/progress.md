@@ -1,6 +1,6 @@
 # Project Progress
 
-Last reviewed: 2026-09-16
+Last reviewed: 2026-09-17
 
 ## Current Milestone
 
@@ -93,8 +93,9 @@ Runtime capability 展示、确定性平台 E2E、真实 Docker Runtime E2E 和�
   exchange 时另记 `workspace.opened`。普通用户只查询自己的 Workspace 事件，admin 可查询平台事件；
   details 不保存 Cookie、exchange code、credential、Prompt、Pi message/tool stream 或文件正文。
 - Portal 展示 Worker 实测 capability、Runtime 版本、host CPU/Memory、authoritative assignment/max 与
-  heartbeat reported observation，并展示 Workspace ID/placement、Artifact 路径、安全边界和最近 Audit。
-  资源条是 assignment capacity，不伪装成未采集的实时 CPU/Memory usage。
+  heartbeat reported observation，并以紧凑状态栏、Workspace 卡片和可滚动的最近 Audit 呈现日常操作信息。
+  Artifact 路径和安全边界说明保留在文档及演示 runbook，不在 Portal 重复展示；资源条是
+  assignment capacity，不伪装成未采集的实时 CPU/Memory usage。
 - Artifact 不新增平台 registry/download endpoint。Agent 在 canonical `/workspace` 生成成果，用户继续
   使用 pi-web Files 查看或下载；平台不复制文件或重新实现 Files UI。
 - 根级 `test:e2e` 串行覆盖 Control Plane/两级 Gateway 主链；`test:e2e:runtime` 使用真实 Docker、
@@ -147,8 +148,9 @@ Phase 8 工程实现与自动验证已完成，当前停在人工验收边界；
 - 2026-09-16：应用 `0005_phase8_audit` 后，连接本机 PostgreSQL 的 Control Plane 46/46 通过，覆盖
   Audit trigger 生命周期序列、普通用户事件隔离、Workspace 删除后事件保留及既有 Phase 1～6 回归。
 - 2026-09-16：以生产 Web build、临时只读 mock API 和 Runtime image 内的 Playwright/Chromium 完成
-  1440px dashboard visual smoke；Worker table、capability chips、Workspace cards、安全/Artifact panel 与
-  Audit timeline 正常渲染。该检查不替代目标比赛浏览器上的人工交互验收。
+  当时版本的 1440px dashboard visual smoke；Worker table、capability chips、Workspace cards、
+  安全/Artifact panel 与 Audit timeline 正常渲染。安全/Artifact panel 后续已移除；该历史检查不替代
+  目标比赛浏览器上的人工交互验收。
 
 - 2026-09-15：用户确认 Phase 7 人工验收通过、功能通过；本次仅授权小范围 post-acceptance cleanup。
 - 2026-09-15：cleanup 通过 `pnpm lint`、`pnpm typecheck`、`pnpm test`（77 passed，10 个

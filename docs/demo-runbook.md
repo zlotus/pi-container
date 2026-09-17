@@ -91,7 +91,7 @@ socket、资源限制与 legacy Runtime 回归，并在结束时删除随机测�
    stopping/stopped 等事件；admin 还能看到 Worker online/offline/runtime report。
 2. 确认事件不包含 Prompt、assistant message、tool input/output、文件正文、Cookie、session exchange
    code 或 Worker credential。
-3. 展示安全面板，并使用准确表述：Docker-based、per-Workspace filesystem/process/resource
+3. 结合 Gateway 拒绝结果和 Worker/Workspace 信息说明安全边界，并使用准确表述：Docker-based、per-Workspace filesystem/process/resource
    isolation、authenticated reverse proxy；不要宣称 VM-grade、zero-trust 或绝对防逃逸。
 
 ## Acceptance Checklist
@@ -103,7 +103,7 @@ socket、资源限制与 legacy Runtime 回归，并在结束时删除随机测�
 - [ ] HTTP/SSE、WebSocket/Terminal 在目标浏览器和真实网络中正常。
 - [ ] 关闭浏览器不会停止 Workspace 或丢失 Pi Session。
 - [ ] Stop/Start 后 Workspace 文件和 Pi Session 恢复，Worker ID 不改变。
-- [ ] Portal 能展示实测 Runtime capabilities、Worker 资源容量、安全边界和平台 Audit Trail。
+- [ ] Portal 能展示实测 Runtime capabilities、Worker 资源容量和平台 Audit Trail；演示时能准确解释安全边界。
 - [ ] Audit 不包含 Pi 对话/tool stream 或 credential；普通用户只看到自己的 Workspace 事件。
 - [ ] 删除演示 Workspace 后，managed Container、network、persistent directory 和 metadata 均按既有
       destructive delete 语义清理；Worker offline 时不伪装删除成功。
