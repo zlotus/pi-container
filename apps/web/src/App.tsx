@@ -366,22 +366,24 @@ export function App() {
           </form>
         </div>
         <section className="platform-summary" aria-label="平台概览">
-          <article>
-            <strong>{workspaces.length}</strong>
+          <div className="summary-stat">
             <span>持久 Workspace</span>
-          </article>
-          <article>
-            <strong>{workspaces.filter((workspace) => workspace.state === "RUNNING").length}</strong>
+            <strong>{workspaces.length}</strong>
+          </div>
+          <div className="summary-stat">
             <span>正在运行</span>
-          </article>
-          <article>
-            <strong>{session.user.role === "admin" ? workers.filter((worker) => worker.status === "ONLINE").length : "隔离"}</strong>
-            <span>{session.user.role === "admin" ? "在线 Worker" : "每 Workspace Runtime"}</span>
-          </article>
-          <article>
-            <strong>{auditEvents.length}</strong>
+            <strong>{workspaces.filter((workspace) => workspace.state === "RUNNING").length}</strong>
+          </div>
+          {session.user.role === "admin" ? (
+            <div className="summary-stat">
+              <span>在线 Worker</span>
+              <strong>{workers.filter((worker) => worker.status === "ONLINE").length}</strong>
+            </div>
+          ) : null}
+          <div className="summary-stat">
             <span>最近平台事件</span>
-          </article>
+            <strong>{auditEvents.length}</strong>
+          </div>
         </section>
         {session.user.role === "admin" ? (
           <section className="worker-panel" aria-labelledby="worker-panel-title">
@@ -437,7 +439,6 @@ export function App() {
           <section className="workspace-grid">
             {workspaces.map((workspace) => (
               <article className="workspace-card" key={workspace.id}>
-                <div className="workspace-icon">{workspace.name.slice(0, 1).toUpperCase()}</div>
                 <div className="workspace-title">
                   <h2>{workspace.name}</h2>
                   <span className="state">{workspace.state}</span>
@@ -447,7 +448,6 @@ export function App() {
                   <div><dt>Workspace ID</dt><dd title={workspace.id}>{workspace.id.slice(0, 8)}…</dd></div>
                   <div><dt>创建时间</dt><dd>{new Date(workspace.createdAt).toLocaleString()}</dd></div>
                 </dl>
-                <p className="artifact-note">成果保存在 <code>/workspace</code>，运行后通过 pi-web Files 安全查看或下载。</p>
                 <div className="card-actions">
                   {workspace.state === "RUNNING" ? (
                     <button
@@ -482,25 +482,6 @@ export function App() {
             ))}
           </section>
         )}
-        <section className="demo-panels">
-          <article className="security-panel">
-            <p className="eyebrow">SECURITY BOUNDARY</p>
-            <h2>默认隔离，不绕过 Gateway</h2>
-            <ul>
-              <li>普通用户、非 privileged、无 Docker socket</li>
-              <li>每个 Workspace 独立 bridge 与持久目录</li>
-              <li>CPU / Memory / PID limits 由 Worker 强制执行</li>
-              <li>HTTP、SSE、WebSocket 每次均校验 session 与 ownership</li>
-            </ul>
-            <p className="scope-note">面向可信企业内部用户的 Docker-based isolation，不宣称 VM-grade 或绝对安全。</p>
-          </article>
-          <article className="artifact-panel">
-            <p className="eyebrow">ARTIFACT FLOW</p>
-            <h2>成果留在真实工作目录</h2>
-            <p>让 Agent 将报告、代码、PDF、Office 或媒体文件写入 <code>/workspace</code>，再使用 pi-web 已有 Files 能力预览和下载。</p>
-            <p className="scope-note">平台不复制文件、不扫描 Pi 会话，也不另建重复的 Artifact registry。</p>
-          </article>
-        </section>
         <section className="audit-panel" aria-labelledby="audit-title">
           <div className="section-heading">
             <div>
