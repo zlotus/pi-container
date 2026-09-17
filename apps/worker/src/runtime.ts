@@ -37,7 +37,7 @@ const MetadataSchema = z
     version: z.literal(1),
     workspaceId: WorkspaceIdSchema,
     workerId: z.string(),
-    runtimeImage: z.string(),
+    runtimeImage: z.string().min(1),
   })
   .strict();
 
@@ -47,6 +47,10 @@ interface WorkspacePaths {
   pi: string;
   metadata: string;
   metadataFile: string;
+}
+
+interface ManagedWorkspacePaths extends WorkspacePaths {
+  runtimeImage: string;
 }
 
 export interface WorkspaceRuntimeObservation {
@@ -230,6 +234,7 @@ export class DockerWorkspaceRuntime {
 
   async start(workspaceId: string): Promise<WorkspaceRuntimeObservation> {
     const paths = await this.#requireWorkspacePaths(workspaceId);
+    this.#assertRuntimeImage(paths.runtimeImage);
     const container = await this.#requireManagedContainer(workspaceId);
     let inspection = await container.inspect();
     this.#verifyManagedContainerIdentity(
@@ -276,13 +281,13 @@ export class DockerWorkspaceRuntime {
   }
 
   async stop(workspaceId: string): Promise<WorkspaceRuntimeObservation> {
-    await this.#requireWorkspacePaths(workspaceId);
+    const paths = await this.#requireWorkspacePaths(workspaceId);
     const container = await this.#requireManagedContainer(workspaceId);
     const inspection = await container.inspect();
     this.#verifyManagedContainerIdentity(
       inspection,
       workspaceId,
-      await this.#paths(workspaceId),
+      paths,
       this.#networkName(workspaceId),
     );
     if (inspection.State.Running) {
@@ -294,13 +299,15 @@ export class DockerWorkspaceRuntime {
         }
       }
     }
-    return this.#observation(workspaceId, "STOPPED");
+    return this.#observation(workspaceId, "STOPPED", paths.runtimeImage);
   }
 
   async inspect(workspaceId: string): Promise<WorkspaceRuntimeObservation> {
     const paths = await this.#requireWorkspacePaths(workspaceId);
     const container = await this.#findNamedContainer(workspaceId);
-    if (container === null) return this.#observation(workspaceId, "CREATED");
+    if (container === null) {
+      return this.#observation(workspaceId, "CREATED", paths.runtimeImage);
+    }
     const inspection = await container.inspect();
     this.#verifyManagedContainerIdentity(
       inspection,
@@ -311,6 +318,7 @@ export class DockerWorkspaceRuntime {
     return this.#observation(
       workspaceId,
       inspection.State.Running ? "RUNNING" : "STOPPED",
+      paths.runtimeImage,
     );
   }
 
@@ -325,19 +333,13 @@ export class DockerWorkspaceRuntime {
         paths,
         this.#networkName(workspaceId),
       );
-      try {
-        await container.remove({ force: true, v: false });
-      } catch (error) {
-        if (dockerStatus(error) !== 404) {
-          throw this.#engineError(error, "delete the managed Workspace container");
-        }
-      }
     }
 
     const network = await this.#findNamedNetwork(workspaceId);
     if (network !== null) {
       const inspection = await network.inspect();
       if (
+        inspection.Name !== this.#networkName(workspaceId) ||
         !labelsMatch(
           inspection.Labels,
           managedLabels(this.#workerId, workspaceId),
@@ -348,6 +350,19 @@ export class DockerWorkspaceRuntime {
           "Workspace network is not managed by this Worker",
         );
       }
+    }
+
+    if (container !== null) {
+      try {
+        await container.remove({ force: true, v: false });
+      } catch (error) {
+        if (dockerStatus(error) !== 404) {
+          throw this.#engineError(error, "delete the managed Workspace container");
+        }
+      }
+    }
+
+    if (network !== null) {
       try {
         await network.remove();
       } catch (error) {
@@ -358,7 +373,7 @@ export class DockerWorkspaceRuntime {
     }
 
     await rm(paths.root, { recursive: true, force: false });
-    return this.#observation(workspaceId, "CREATED");
+    return this.#observation(workspaceId, "CREATED", paths.runtimeImage);
   }
 
   async allocatedWorkspaces(): Promise<number> {
@@ -555,6 +570,7 @@ export class DockerWorkspaceRuntime {
 
   async gatewayTarget(workspaceId: string): Promise<URL> {
     const paths = await this.#requireWorkspacePaths(workspaceId);
+    this.#assertRuntimeImage(paths.runtimeImage);
     const container = await this.#requireManagedContainer(workspaceId);
     const inspection = await container.inspect();
     this.#verifyManagedContainerIdentity(
@@ -627,7 +643,7 @@ export class DockerWorkspaceRuntime {
     };
   }
 
-  async #ensureWorkspacePaths(workspaceId: string): Promise<WorkspacePaths> {
+  async #ensureWorkspacePaths(workspaceId: string): Promise<ManagedWorkspacePaths> {
     const paths = await this.#paths(workspaceId);
     let created = false;
     try {
@@ -638,7 +654,7 @@ export class DockerWorkspaceRuntime {
     }
 
     if (!created) {
-      await this.#verifyMetadata(paths, workspaceId);
+      this.#assertRuntimeImage(await this.#verifyMetadata(paths, workspaceId));
     }
     await mkdir(paths.workspace, { recursive: true, mode: 0o700 });
     await mkdir(paths.pi, { recursive: true, mode: 0o700 });
@@ -662,10 +678,10 @@ export class DockerWorkspaceRuntime {
       );
     }
     await this.#assertRealDirectories(paths);
-    return paths;
+    return { ...paths, runtimeImage: this.#runtimeImage };
   }
 
-  async #requireWorkspacePaths(workspaceId: string): Promise<WorkspacePaths> {
+  async #requireWorkspacePaths(workspaceId: string): Promise<ManagedWorkspacePaths> {
     const paths = await this.#paths(workspaceId);
     try {
       await access(paths.metadataFile, constants.R_OK);
@@ -675,14 +691,18 @@ export class DockerWorkspaceRuntime {
         "Workspace is not managed by this Worker",
       );
     }
-    await this.#verifyMetadata(paths, workspaceId);
+    const runtimeImage = await this.#verifyMetadata(paths, workspaceId);
     await this.#assertRealDirectories(paths);
-    return paths;
+    return { ...paths, runtimeImage };
   }
 
-  async #verifyMetadata(paths: WorkspacePaths, workspaceId: string): Promise<void> {
+  async #verifyMetadata(paths: WorkspacePaths, workspaceId: string): Promise<string> {
     let decoded: unknown;
     try {
+      const metadataFile = await lstat(paths.metadataFile);
+      if (!metadataFile.isFile() || metadataFile.isSymbolicLink()) {
+        throw new Error("Workspace metadata is not a regular file");
+      }
       decoded = JSON.parse(await readFile(paths.metadataFile, "utf8"));
     } catch {
       throw new WorkspaceRuntimeError(
@@ -694,14 +714,14 @@ export class DockerWorkspaceRuntime {
     if (
       !metadata.success ||
       metadata.data.workspaceId !== workspaceId ||
-      metadata.data.workerId !== this.#workerId ||
-      metadata.data.runtimeImage !== this.#runtimeImage
+      metadata.data.workerId !== this.#workerId
     ) {
       throw new WorkspaceRuntimeError(
         "WORKSPACE_METADATA_MISMATCH",
         "Workspace metadata does not match this Worker assignment",
       );
     }
+    return metadata.data.runtimeImage;
   }
 
   async #assertRealDirectories(paths: WorkspacePaths): Promise<void> {
@@ -842,6 +862,7 @@ export class DockerWorkspaceRuntime {
   ): Promise<WorkspaceRuntimeObservation> {
     this.#assertRuntimeImage(assignment.runtimeImage);
     const paths = await this.#requireWorkspacePaths(assignment.workspaceId);
+    this.#assertRuntimeImage(paths.runtimeImage);
     const container = await this.#requireManagedContainer(assignment.workspaceId);
     const networkName = this.#networkName(assignment.workspaceId);
     const network = await this.#findNamedNetwork(assignment.workspaceId);
@@ -1009,7 +1030,7 @@ export class DockerWorkspaceRuntime {
   #verifyManagedContainerIdentity(
     inspection: Docker.ContainerInspectInfo,
     workspaceId: string,
-    paths: WorkspacePaths,
+    paths: ManagedWorkspacePaths,
     networkName: string,
   ): void {
     const mounts = new Map(
@@ -1018,7 +1039,7 @@ export class DockerWorkspaceRuntime {
     const portBinding = inspection.HostConfig.PortBindings?.[PI_WEB_PORT]?.[0];
     if (
       inspection.Name !== `/${this.#containerName(workspaceId)}` ||
-      inspection.Config.Image !== this.#runtimeImage ||
+      inspection.Config.Image !== paths.runtimeImage ||
       inspection.Config.User !== this.#runtimeUser ||
       inspection.Config.WorkingDir !== "/workspace" ||
       !inspection.Config.Env.includes("PI_CODING_AGENT_DIR=/agent/pi") ||
@@ -1102,11 +1123,12 @@ export class DockerWorkspaceRuntime {
   #observation(
     workspaceId: string,
     state: WorkspaceState,
+    runtimeImage = this.#runtimeImage,
   ): WorkspaceRuntimeObservation {
     return {
       workspaceId,
       state,
-      runtimeImage: this.#runtimeImage,
+      runtimeImage,
       observedAt: new Date().toISOString(),
     };
   }

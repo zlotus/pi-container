@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -393,6 +393,116 @@ describe("Docker Workspace Runtime", () => {
     expect(docker.containers.has(name)).toBe(false);
     expect(docker.networks.has(name)).toBe(false);
     expect(existsSync(workspaceRoot)).toBe(false);
+  });
+
+  it("safely stops and deletes a Workspace whose recorded image predates the Worker image upgrade", async () => {
+    const { root, config, docker, runtime } = await fixture();
+    const historicalImage = "agent-runtime:phase4-legacy";
+    const legacyRuntime = new DockerWorkspaceRuntime(
+      { ...config, RUNTIME_IMAGE: historicalImage },
+      docker as unknown as Docker,
+      async () => true,
+    );
+    await legacyRuntime.ensure(WORKSPACE_ID, historicalImage, RESOURCES);
+    await legacyRuntime.start(WORKSPACE_ID);
+
+    const workspaceRoot = join(root, "workspaces", WORKSPACE_ID);
+    const metadataPath = join(workspaceRoot, "metadata", "managed.json");
+    const originalMetadata = await readFile(metadataPath, "utf8");
+    const persistentFile = join(workspaceRoot, "workspace", "legacy.txt");
+    await writeFile(persistentFile, "legacy data", "utf8");
+    expect(JSON.parse(originalMetadata)).toMatchObject({
+      workspaceId: WORKSPACE_ID,
+      workerId: config.WORKER_ID,
+      runtimeImage: historicalImage,
+    });
+
+    await expect(runtime.inspect(WORKSPACE_ID)).resolves.toMatchObject({
+      state: "RUNNING",
+      runtimeImage: historicalImage,
+    });
+    await expect(runtime.stop(WORKSPACE_ID)).resolves.toMatchObject({
+      state: "STOPPED",
+      runtimeImage: historicalImage,
+    });
+    await expect(runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES))
+      .rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({
+        code: "RUNTIME_CONFIGURATION_MISMATCH",
+      });
+    await expect(runtime.start(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "RUNTIME_CONFIGURATION_MISMATCH" });
+    await expect(runtime.gatewayTarget(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "RUNTIME_CONFIGURATION_MISMATCH" });
+    await expect(runtime.reconcile([{
+      workspaceId: WORKSPACE_ID,
+      runtimeImage: config.RUNTIME_IMAGE,
+      desiredState: "STOPPED",
+    }])).resolves.toMatchObject({
+      workspaces: [{
+        status: "INVALID",
+        code: "RUNTIME_CONFIGURATION_MISMATCH",
+      }],
+    });
+    expect(await readFile(metadataPath, "utf8")).toBe(originalMetadata);
+
+    const containerName = `agent-runtime-${WORKSPACE_ID}`;
+    const container = docker.containers.get(containerName);
+    const network = docker.networks.get(containerName);
+    if (container === undefined || network === undefined) {
+      throw new Error("managed Runtime fixture missing");
+    }
+
+    container.inspection.Config.Image = config.RUNTIME_IMAGE;
+    await expect(runtime.delete(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "RUNTIME_CONFIGURATION_MISMATCH" });
+    expect(docker.containers.has(containerName)).toBe(true);
+    container.inspection.Config.Image = historicalImage;
+
+    network.labels.worker_id = "foreign-worker";
+    await expect(runtime.delete(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "UNMANAGED_NETWORK_CONFLICT" });
+    expect(docker.containers.has(containerName)).toBe(true);
+    expect(existsSync(persistentFile)).toBe(true);
+    network.labels.worker_id = config.WORKER_ID;
+
+    await writeFile(metadataPath, JSON.stringify({
+      ...JSON.parse(originalMetadata) as Record<string, unknown>,
+      workerId: "foreign-worker",
+    }));
+    await expect(runtime.delete(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "WORKSPACE_METADATA_MISMATCH" });
+    expect(docker.containers.has(containerName)).toBe(true);
+    await writeFile(metadataPath, originalMetadata);
+
+    await expect(runtime.delete(WORKSPACE_ID)).resolves.toMatchObject({
+      state: "CREATED",
+      runtimeImage: historicalImage,
+    });
+    expect(docker.containers.has(containerName)).toBe(false);
+    expect(docker.networks.has(containerName)).toBe(false);
+    expect(existsSync(workspaceRoot)).toBe(false);
+  });
+
+  it("rejects a symlinked metadata file before destructive cleanup", async () => {
+    const { root, config, docker, runtime } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    const metadataPath = join(root, "workspaces", WORKSPACE_ID, "metadata", "managed.json");
+    const contents = await readFile(metadataPath, "utf8");
+    await rm(metadataPath);
+    const otherFile = join(root, "other-managed.json");
+    await writeFile(otherFile, contents);
+    await symlink(otherFile, metadataPath);
+
+    await expect(runtime.delete(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "WORKSPACE_METADATA_MISMATCH" });
+    expect(docker.containers.size).toBe(1);
+    expect(docker.networks.size).toBe(1);
   });
 
   it("strictly verifies the default cwd on a newly created container", async () => {

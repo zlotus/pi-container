@@ -1417,7 +1417,8 @@ inspect
 不要创建重复 Container。
 
 `managed identity / safe-to-manage` 与 `current desired runtime configuration` 必须分开验证。
-前者包含 workspace metadata、Worker/Workspace labels、managed name、runtime image、UID/GID、
+前者包含 workspace metadata、Worker/Workspace labels、managed name、metadata 中记录的历史 runtime image
+与实际 Container image 一致、UID/GID、
 managed bind mount、managed network、privileged/capability/security options 与 loopback port exposure
 等 ownership/security 边界；后续新增的功能性环境变量不得追溯性地使原本合法的 managed
 Container 变成不可 inspect/stop/delete。
@@ -1427,6 +1428,11 @@ Phase 5 post-acceptance baseline 明确支持：在引入 `PI_WEB_DEFAULT_CWD=/w
 和 delete，不自动重建、不自动删除持久数据。它在被明确删除/重建前保留旧 pi-web default-cwd
 行为。新建 Container 必须设置并在 create 后验证当前变量；显式设置冲突值时拒绝 ensure/start/
 Gateway，但只要 managed identity 仍完整，inspect/stop/delete 继续可用以完成安全清理。
+Worker 的当前 `RUNTIME_IMAGE` 升级后，旧 Workspace 的 `managed.json.runtimeImage` 保持原值；只要
+metadata 中的 workspace/Worker 身份、managed 路径、Container/Network labels 和 Container image 与
+历史 metadata 仍一致，inspect/stop/destructive delete 不因当前镜像 pin 改变而拒绝管理。delete 必须在
+移除任何资源前完成这些身份校验，并返回历史 runtime image 供 Control Plane 对照 Workspace metadata；
+ensure/start/Gateway 与 recovery 仍要求当前镜像兼容，不自动修改 metadata 或重建旧 Runtime。
 
 ---
 

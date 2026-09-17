@@ -26,6 +26,7 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
     process.env.TEST_RUNTIME_IMAGE ?? "agent-runtime:phase7-toolchain";
   const workspaceId = randomUUID();
   const legacyWorkspaceId = randomUUID();
+  const upgradedWorkspaceId = randomUUID();
   const isolationWorkspaceIds = [randomUUID(), randomUUID()] as const;
   const containerName = `agent-runtime-${workspaceId}`;
   const networkName = containerName;
@@ -113,6 +114,7 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
       for (const cleanupWorkspaceId of [
         workspaceId,
         legacyWorkspaceId,
+        upgradedWorkspaceId,
         ...isolationWorkspaceIds,
       ]) {
         try {
@@ -126,6 +128,7 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
     for (const cleanupWorkspaceId of [
       workspaceId,
       legacyWorkspaceId,
+      upgradedWorkspaceId,
       ...isolationWorkspaceIds,
     ]) {
       const cleanupName = `agent-runtime-${cleanupWorkspaceId}`;
@@ -448,6 +451,41 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
       ),
     ).toHaveLength(0);
     expect(existsSync(legacyRoot)).toBe(false);
+  }, 120_000);
+
+  it("deletes a same-Worker Runtime after its configured image changes without rewriting metadata", async () => {
+    await runtime.ensure(upgradedWorkspaceId, runtimeImage, resources);
+    const name = `agent-runtime-${upgradedWorkspaceId}`;
+    const workspaceRoot = join(managedRoot, "workspaces", upgradedWorkspaceId);
+    const metadataPath = join(workspaceRoot, "metadata", "managed.json");
+    const originalMetadata = await readFile(metadataPath, "utf8");
+    const artifactPath = join(workspaceRoot, "workspace", "legacy-artifact.txt");
+    await writeFile(artifactPath, "historical image data", "utf8");
+
+    const upgradedRuntime = new DockerWorkspaceRuntime(
+      { ...config, RUNTIME_IMAGE: "agent-runtime:future-toolchain" },
+      docker,
+    );
+    await expect(upgradedRuntime.inspect(upgradedWorkspaceId)).resolves.toMatchObject({
+      state: "STOPPED",
+      runtimeImage,
+    });
+    await expect(upgradedRuntime.start(upgradedWorkspaceId)).rejects.toMatchObject({
+      code: "RUNTIME_CONFIGURATION_MISMATCH",
+    });
+    expect(await readFile(metadataPath, "utf8")).toBe(originalMetadata);
+
+    await expect(upgradedRuntime.delete(upgradedWorkspaceId)).resolves.toMatchObject({
+      state: "CREATED",
+      runtimeImage,
+    });
+    await expect(docker.getContainer(name).inspect()).rejects.toThrow();
+    expect(
+      (await docker.listNetworks({ filters: { name: [name] } })).filter(
+        (network) => network.Name === name,
+      ),
+    ).toHaveLength(0);
+    expect(existsSync(workspaceRoot)).toBe(false);
   }, 120_000);
 
   it("keeps Workspace bridges isolated from each other and host loopback", async () => {
