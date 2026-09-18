@@ -441,7 +441,7 @@ export function App() {
               <article className="workspace-card" key={workspace.id}>
                 <div className="workspace-title">
                   <h2>{workspace.name}</h2>
-                  <span className="state">{workspace.state}</span>
+                  <span className={`state state-${workspace.state.toLowerCase()}`}>{workspace.state}</span>
                 </div>
                 <dl>
                   <div><dt>Worker</dt><dd>{workspace.workerId ?? "等待分配"}</dd></div>
