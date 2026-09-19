@@ -87,6 +87,7 @@ GATEWAY_HOST=127.0.0.1
 GATEWAY_PORT=3001
 
 PORTAL_ORIGIN=http://127.0.0.1:5173
+PORTAL_ALLOWED_ORIGINS=
 WORKSPACE_BASE_URL=http://agent.localhost:3001
 ```
 
@@ -106,8 +107,9 @@ pnpm dev:web
 ```
 
 打开 `http://127.0.0.1:5173`。Vite 将 `/api` 代理到 `127.0.0.1:3000`；该地址必须与
-`PORTAL_ORIGIN` 完全匹配。Control Plane 默认还在 `127.0.0.1:3001` 启动 Workspace
-Gateway；开发环境使用 `http://<workspace-id>.agent.localhost:3001`。`GET /health` 是
+canonical `PORTAL_ORIGIN` 或 `PORTAL_ALLOWED_ORIGINS` 中的一项完全匹配。Control Plane
+默认还在 `127.0.0.1:3001` 启动 Workspace Gateway；开发环境使用
+`http://<workspace-id>.agent.localhost:3001`。`GET /health` 是
 Control Plane 进程存活检查，`GET /ready` 会验证 PostgreSQL 连接。
 
 `*.agent.localhost` 只适合浏览器、Portal、Control Plane 和 Worker 位于同一台机器的本地开发，
@@ -116,7 +118,8 @@ Control Plane 进程存活检查，`GET /ready` 会验证 PostgreSQL 连接。
 本地 HTTP 开发环境显式设置 `SESSION_COOKIE_SECURE=false`，使用 host-only
 `platform-session` Cookie。HTTPS 部署必须设置 `SESSION_COOKIE_SECURE=true`，此时平台
 使用带 `Secure`、`HttpOnly`、`SameSite=Lax` 的 `__Host-platform-session` Cookie。
-所有修改状态的 API 同时校验配置的 Origin 和 session-bound CSRF token。
+所有修改状态的 API 同时校验配置的 Origin 和 session-bound CSRF token。Origin 校验始终为
+完整字符串 exact-match；缺失 Origin、未列入配置的 Origin、wildcard 和 `*` 均不放行。
 
 ## Provision and run Workers
 
@@ -208,6 +211,7 @@ GATEWAY_HOST=0.0.0.0
 GATEWAY_PORT=3001
 
 PORTAL_ORIGIN=http://192.168.1.124:5173
+PORTAL_ALLOWED_ORIGINS=http://127.0.0.1:5173,http://100.64.0.10:5173
 WORKSPACE_BASE_URL=http://agent.192.168.1.124.nip.io:3001
 ```
 
@@ -215,6 +219,10 @@ WORKSPACE_BASE_URL=http://agent.192.168.1.124.nip.io:3001
 - `GATEWAY_HOST=0.0.0.0` 让其他主机上的浏览器能访问 Workspace Gateway。
 - `PORTAL_ORIGIN` 是浏览器真正访问的 canonical origin，必须包含真实 hostname/IP 和端口；
   `0.0.0.0` 只是 bind address，不能写入 `PORTAL_ORIGIN`。
+- `PORTAL_ALLOWED_ORIGINS` 可选，用逗号分隔额外可信的完整 HTTP(S) origin，例如 localhost、
+  LAN IP 或 Tailscale IP 入口。每一项都执行 exact-match；不支持 hostname wildcard 或 `*`。
+  canonical origin 会始终自动受信，不需要在 allowlist 中重复；同一 allowlist 同时用于
+  Control Plane state-changing API 和 Workspace session exchange 的 Origin 校验。
 - `WORKSPACE_BASE_URL` 必须使用客户端可解析、且指向 Control Plane Gateway 的 wildcard hostname。
   `agent.192.168.1.124.nip.io` 会让 `<workspace-id>.agent.192.168.1.124.nip.io` 解析到该主机。
 
@@ -226,8 +234,8 @@ VITE_API_PROXY_TARGET=http://127.0.0.1:3000 \
   pnpm --filter @agent-runtime/web exec vite --host 0.0.0.0
 ```
 
-此处 `--host` 控制 Vite listener，`PORTAL_ORIGIN=http://192.168.1.124:5173` 仍控制浏览器/API
-安全语义，两者不能互相替代。`nip.io` 只作为开发/验收 wildcard DNS 示例；生产环境应使用企业
+此处 `--host` 控制 Vite listener，`PORTAL_ORIGIN` 与可选 `PORTAL_ALLOWED_ORIGINS` 仍控制
+浏览器/API 安全语义，两者不能替代 listener 配置。`nip.io` 只作为开发/验收 wildcard DNS 示例；生产环境应使用企业
 内部 DNS、wildcard certificate 和受信 TLS termination，本次验收没有证明生产 TLS 已完成。
 
 ### Remote Worker

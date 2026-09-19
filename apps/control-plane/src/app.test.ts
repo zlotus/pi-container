@@ -551,6 +551,37 @@ describe("local authentication", () => {
     await app.close();
   });
 
+  it("accepts the canonical Portal Origin and multiple exact-match allowed origins", async () => {
+    const dependencies = await createTestDependencies();
+    dependencies.portalAllowedOrigins = [
+      "http://192.168.1.124:5173",
+      "http://100.64.0.10:5173",
+    ];
+    const app = buildControlPlane(dependencies);
+
+    for (const origin of [
+      ORIGIN,
+      "http://192.168.1.124:5173",
+      "http://100.64.0.10:5173",
+    ]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        headers: { origin },
+        payload: { login: "user-a", password: "password-for-user-a" },
+      });
+      expect(response.statusCode).toBe(200);
+    }
+    const differentPort = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { origin: "http://192.168.1.124:5174" },
+      payload: { login: "user-a", password: "password-for-user-a" },
+    });
+    expect(differentPort.statusCode).toBe(403);
+    await app.close();
+  });
+
   it("uses the __Host- cookie contract when Secure cookies are enabled", async () => {
     const dependencies = await createTestDependencies();
     dependencies.secureCookies = true;
@@ -593,7 +624,7 @@ describe("local authentication", () => {
     await app.close();
   });
 
-  it("rejects invalid credentials and untrusted origins", async () => {
+  it("rejects invalid credentials, untrusted origins, and a missing Origin", async () => {
     const app = buildControlPlane(await createTestDependencies());
     const invalidPassword = await app.inject({
       method: "POST",
@@ -607,9 +638,15 @@ describe("local authentication", () => {
       headers: { origin: "https://attacker.test" },
       payload: { login: "user-a", password: "password-for-user-a" },
     });
+    const missingOrigin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { login: "user-a", password: "password-for-user-a" },
+    });
 
     expect(invalidPassword.statusCode).toBe(401);
     expect(invalidOrigin.statusCode).toBe(403);
+    expect(missingOrigin.statusCode).toBe(403);
     await app.close();
   });
 });
@@ -693,14 +730,26 @@ describe("workspace ownership", () => {
   });
 
   it("requires both a trusted Origin and the session-bound CSRF token", async () => {
-    const app = buildControlPlane(await createTestDependencies());
+    const dependencies = await createTestDependencies();
+    dependencies.portalAllowedOrigins = ["http://192.168.1.124:5173"];
+    const app = buildControlPlane(dependencies);
     const userA = await login(app, "user-a", "password-for-user-a");
 
     const missingCsrf = await app.inject({
       method: "POST",
       url: "/api/workspaces",
-      headers: { cookie: userA.cookie, origin: ORIGIN },
+      headers: { cookie: userA.cookie, origin: "http://192.168.1.124:5173" },
       payload: { name: "blocked" },
+    });
+    const allowedOrigin = await app.inject({
+      method: "POST",
+      url: "/api/workspaces",
+      headers: {
+        cookie: userA.cookie,
+        origin: "http://192.168.1.124:5173",
+        "x-csrf-token": userA.csrfToken,
+      },
+      payload: { name: "allowed" },
     });
     const wrongOrigin = await app.inject({
       method: "POST",
@@ -712,9 +761,20 @@ describe("workspace ownership", () => {
       },
       payload: { name: "blocked" },
     });
+    const missingOrigin = await app.inject({
+      method: "POST",
+      url: "/api/workspaces",
+      headers: {
+        cookie: userA.cookie,
+        "x-csrf-token": userA.csrfToken,
+      },
+      payload: { name: "blocked" },
+    });
 
     expect(missingCsrf.statusCode).toBe(403);
+    expect(allowedOrigin.statusCode).toBe(201);
     expect(wrongOrigin.statusCode).toBe(403);
+    expect(missingOrigin.statusCode).toBe(403);
     await app.close();
   });
 });

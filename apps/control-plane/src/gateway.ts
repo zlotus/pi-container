@@ -35,6 +35,7 @@ export interface WorkspaceGatewayDependencies {
   store: WorkspaceGatewayStore;
   exchanges: WorkspaceSessionExchange;
   portalOrigin: string;
+  portalAllowedOrigins?: readonly string[];
   workspaceBaseUrl: string;
   secureCookies: boolean;
   sessionTtlMs: number;
@@ -221,7 +222,8 @@ async function handleExchange(
   const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim();
   if (
     request.method !== "POST" ||
-    request.headers.origin !== dependencies.portalOrigin ||
+    (request.headers.origin !== dependencies.portalOrigin &&
+      !dependencies.portalAllowedOrigins?.includes(request.headers.origin ?? "")) ||
     contentType !== "application/x-www-form-urlencoded" ||
     (request.headers["sec-fetch-mode"] !== undefined &&
       request.headers["sec-fetch-mode"] !== "navigate") ||
@@ -289,6 +291,11 @@ export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies
     parseHttpOrigin(dependencies.portalOrigin).origin !== dependencies.portalOrigin
   ) {
     throw new Error("Portal Origin must be canonical");
+  }
+  for (const origin of dependencies.portalAllowedOrigins ?? []) {
+    if (origin.includes("*") || parseHttpOrigin(origin).origin !== origin) {
+      throw new Error("Allowed Portal Origins must be canonical and cannot use wildcards");
+    }
   }
   for (const [workerId, token] of Object.entries(dependencies.workerGatewayTokens)) {
     WorkerIdSchema.parse(workerId);

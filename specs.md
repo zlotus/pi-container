@@ -1167,8 +1167,9 @@ password
    `Sec-Fetch-Site`；
 4. exchange code 不放入 query string，不进入 pi-web、访问日志或 Referer；
 5. Gateway 保留平台 Cookie 名称空间，不能允许 upstream `Set-Cookie` 覆盖平台 session；
-6. 平台 state-changing API 校验 CSRF token 与 `Origin`，WebSocket upgrade 校验
-   session、`Origin`、Host 与 Workspace ownership。
+6. 平台 state-changing API 校验 CSRF token 与 canonical `PORTAL_ORIGIN` 加可选
+   `PORTAL_ALLOWED_ORIGINS` allowlist 中的 exact-match `Origin`（不允许 wildcard 或 `*`），
+   WebSocket upgrade 校验 session、`Origin`、Host 与 Workspace ownership。
 
 服务端注销或失效 session 后，Portal 和各 Workspace Host 的 Cookie 即使仍存在也不得
 继续获得访问权限。

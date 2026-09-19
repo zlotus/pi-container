@@ -151,6 +151,7 @@ describe("authenticated Workspace Gateway", () => {
       store,
       exchanges,
       portalOrigin: "http://portal.test",
+      portalAllowedOrigins: ["http://portal.lan.test", "http://portal.tailnet.test"],
       workspaceBaseUrl: "http://agent.test",
       secureCookies: false,
       sessionTtlMs: 60_000,
@@ -182,13 +183,26 @@ describe("authenticated Workspace Gateway", () => {
       },
       body,
     });
+    const missingOrigin = await request({
+      port,
+      method: "POST",
+      path: "/_platform/session",
+      headers: {
+        host: PUBLIC_HOST,
+        "content-type": "application/x-www-form-urlencoded",
+        "content-length": String(Buffer.byteLength(body)),
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+      },
+      body,
+    });
     const first = await request({
       port,
       method: "POST",
       path: "/_platform/session",
       headers: {
         host: PUBLIC_HOST,
-        origin: "http://portal.test",
+        origin: "http://portal.tailnet.test",
         "content-type": "application/x-www-form-urlencoded",
         "content-length": String(Buffer.byteLength(body)),
         "sec-fetch-site": "cross-site",
@@ -238,6 +252,7 @@ describe("authenticated Workspace Gateway", () => {
     });
 
     expect(rejectedOrigin.statusCode).toBe(400);
+    expect(missingOrigin.statusCode).toBe(400);
     expect(first.statusCode).toBe(200);
     expect(first.headers.location).toBeUndefined();
     expect(first.headers["content-type"]).toBe("text/html; charset=utf-8");

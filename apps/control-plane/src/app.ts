@@ -108,6 +108,7 @@ export interface ControlPlaneDependencies {
   workerStore: WorkerControlStore & WorkerAdminStore;
   sessionSecret: string;
   portalOrigin: string;
+  portalAllowedOrigins?: readonly string[];
   secureCookies: boolean;
   sessionTtlMs: number;
   defaultRuntimeImage: string;
@@ -477,7 +478,12 @@ export function buildControlPlane(
   }
 
   function validateOrigin(request: FastifyRequest, reply: FastifyReply): boolean {
-    if (request.headers.origin !== dependencies.portalOrigin) {
+    const origin = request.headers.origin;
+    if (
+      origin === undefined ||
+      (origin !== dependencies.portalOrigin &&
+        !dependencies.portalAllowedOrigins?.includes(origin))
+    ) {
       void reply
         .code(403)
         .send(errorBody("INVALID_ORIGIN", "Request origin is not allowed"));

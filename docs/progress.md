@@ -19,7 +19,8 @@ Runtime capability 展示、确定性平台 E2E、真实 Docker Runtime E2E 和�
   stop、delete 在发 Worker 命令前先持久化 intent。Control Plane 启动会把旧 ONLINE/assigned state
   统一 fail-closed 为 offline，避免重启前 heartbeat/state 继续放行 Gateway。
 - `apps/control-plane` 提供本地登录/注销、Workspace CRUD/start/stop/open、Worker control
-  channel 与 Admin Worker 页面；state-changing API 校验精确 Portal Origin 和 CSRF，跨用户
+  channel 与 Admin Worker 页面；state-changing API 校验 canonical Portal Origin、可选 exact-match
+  allowed-origin allowlist 和 CSRF（缺失、未授权或 wildcard Origin 均拒绝），跨用户
   API/Proxy 访问统一按不可见资源拒绝。
 - `apps/web` 提供 Portal；RUNNING Workspace 的“打开”由用户点击同步预开新标签页，再请求短时
   exchange code，并在新标签页以 top-level form POST 到 Workspace Host，不使用 query string、
