@@ -4,10 +4,12 @@
 [pi-web](https://github.com/agegr/pi-web) 与 Pi Coding Agent，自身只负责认证、
 Workspace、Worker、Docker 生命周期、调度和安全代理。
 
-当前仓库已在 Phase 0～8 主链上完成 **Phase 9：User Management Foundation** 的工程实现，等待
-人工验收。平台在既有本地认证与 Workspace ownership 上新增 `active | disabled` 用户生命周期、
-Admin Users 页面、Local User 创建、启停、role 修改、密码重置、session revoke 与只读 Workspace
-metadata 查看；不包含 OIDC/OAuth2，也不允许 admin 直接进入其他用户 Workspace 内容。Runtime 现包含
+当前仓库已在通过人工验收的 **Phase 9：User Management Foundation** 之上完成
+**Phase 10：Generic OIDC** 的工程实现，等待目标 IdP 人工验收。平台保留 Local Account / Local Admin，
+并增加单个 Generic OIDC Provider 的 Authorization Code Flow、PKCE、`state`、`nonce`、标准 ID token
+校验和显式 `(provider_id, sub) -> Platform User` 预绑定；认证成功后仍建立原有 server-side Platform
+Session 并沿用 Workspace ownership。默认 `AUTH_OIDC_AUTO_PROVISION=false`，不按 email 自动合并，
+不包含 JIT、多 Provider 管理、OAuth2 UserInfo compatibility 或完整 identity management。Runtime 现包含
 Python/uv、Node/pnpm、Rust、build tools、ffmpeg、PDF/Office 工具、Playwright/Chromium 和克制的
 Linux/network debugging CLI；Worker 在 hello 前通过本机精确镜像的实际探针上报 capability，不按
 architecture 猜测。Portal 现在展示 Worker/Workspace placement、能力、容量和结构化
@@ -77,6 +79,41 @@ unset LOCAL_USER_PASSWORD
 密码至少 12 个字符，以 scrypt 和随机 salt 保存。`LOCAL_USER_USERNAME` 可省略。首次创建的
 break-glass 账户应将 `LOCAL_USER_ROLE` 设置为 `admin`；Admin API 会拒绝禁用或降级最后一个
 `active` Local Admin。Admin Users 的创建接口固定创建普通 `user`，需要升权时再走独立 role 操作。
+
+## Configure Phase 10 Generic OIDC
+
+Phase 10 只支持一个服务端配置的 OIDC Provider。先在 IdP 注册 confidential client，并把唯一 callback
+精确设置为：
+
+```text
+<PORTAL_ORIGIN>/auth/oidc/callback
+```
+
+例如本地 Portal 的 callback 是 `http://127.0.0.1:5173/auth/oidc/callback`。Vite 开发代理同时转发
+`/api` 与 `/auth` 到 Control Plane；生产 Portal 前置代理也必须把这两个 path 转发到 Control Plane，
+且保持浏览器可见 origin 与 `PORTAL_ORIGIN` 完全一致。除 loopback HTTP 测试外，issuer 必须使用 HTTPS。
+
+在未提交的 `.env` 中配置：
+
+```env
+AUTH_OIDC_ENABLED=true
+AUTH_OIDC_PROVIDER_ID=enterprise-oidc
+AUTH_OIDC_ISSUER=https://idp.example.internal/realms/enterprise
+AUTH_OIDC_CLIENT_ID=agent-runtime-platform
+AUTH_OIDC_CLIENT_SECRET=<server-side-client-secret>
+AUTH_OIDC_AUTO_PROVISION=false
+```
+
+重启 Control Plane 后，Local Admin 登录 Portal，在 Admin Users 的目标用户行点击
+“绑定 OIDC subject”，输入 IdP 对该用户签发的精确 `sub`。该最小入口只允许绑定当前配置的
+`provider_id + subject`，没有 list/unbind/JIT；重复 identity 会被拒绝。绑定完成后，Login 页面显示
+“Sign in with SSO”。OIDC callback 查到 active Platform User 后创建现有 Platform Session；unknown
+identity 和 disabled User 都会被拒绝。同 email 不参与身份匹配。
+
+`AUTH_OIDC_CLIENT_SECRET`、authorization code、access/refresh/ID token 仅在 Control Plane 的协议处理
+期间使用，不返回 Portal、不写 localStorage/普通日志/Audit，也不进入 Worker、managed metadata 或
+Runtime。OIDC 不可用或配置错误时，既有 Local Admin 登录仍独立可用。Phase 10 不提供 JIT、OAuth2
+UserInfo compatibility 或 identity unbind；这些不应通过临时配置绕过。
 
 ## Single-host local development
 
@@ -327,8 +364,11 @@ Worker Gateway 默认仅监听 `127.0.0.1:3100`。多主机部署必须改为 Co
 Platform API：
 
 ```text
+GET    /api/auth/methods
 POST   /api/auth/login
 POST   /api/auth/logout
+GET    /auth/oidc/login
+GET    /auth/oidc/callback
 GET    /api/me
 GET    /api/workspaces
 GET    /api/audit-events
@@ -345,6 +385,7 @@ PATCH  /api/admin/users/:id
 POST   /api/admin/users/:id/reset-password
 POST   /api/admin/users/:id/revoke-sessions
 GET    /api/admin/users/:id/workspaces
+POST   /api/admin/users/:id/oidc-identities
 WS     /api/workers/connect
 ```
 
@@ -352,6 +393,10 @@ WS     /api/workers/connect
 `disabled` User 不能登录；disable/revoke 后 Portal 与 Workspace Host 的 Cookie 会在服务端立即失效，
 已建立的 Workspace WebSocket 也会被断开。User 管理 API 不提供 destructive delete 或 Workspace
 ownership 改写。
+
+OIDC identity 预绑定是 Phase 10 为人工验收保留的唯一最小 identity 写入口：只允许 active admin、
+exact-match Portal Origin、session-bound CSRF，并要求请求中的 `providerId` 与当前单 Provider 配置完全
+一致。它不提供 identity 查询、解绑、JIT 或 multi-provider CRUD。
 
 首次启动会从当前 Control Plane 已认证连接、在线、enabled、heartbeat 新鲜、容量未满且
 Runtime image/架构/capability 兼容的 Worker 中选择。load score 为 PostgreSQL 中该 Worker 的

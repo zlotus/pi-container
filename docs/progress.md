@@ -4,21 +4,32 @@ Last reviewed: 2026-09-20
 
 ## Current Milestone
 
-在现有 Phase 0～8 主链上，Phase 9 User Management Foundation 的工程实现与自动验证已完成，人工验收
-基本通过后的定向反馈也已修复。
-`active | disabled` 生命周期、Admin Users、Local User 创建、role/password/session 管理、只读 User
-Workspace metadata、最后一个 active Local Admin 保护，以及 Portal/Workspace Host 已建立 HTTP streaming/
-SSE/WebSocket 的统一 fail-closed 均已落地。当前只等待本轮反馈的精简人工回归；没有实现 OIDC/OAuth2
-或 Phase 10+。
+Phase 9 User Management Foundation 已完成人工验收；当前 Phase 10 Generic OIDC 的工程实现与自动验证
+已完成，等待一个目标标准 IdP 的人工验收。平台现在支持单 Generic OIDC Provider 的 discovery、
+Authorization Code Flow、PKCE、`state`、`nonce`、标准 ID token/issuer/audience/expiry/signature 校验，
+并把显式 `(provider_id, sub)` binding 解析为既有 Platform User 与 server-side Platform Session。
+`AUTH_OIDC_AUTO_PROVISION=false` 被配置层强制保持；未进入 Phase 11/12。
 
 ## Current Baseline
 
 - `packages/auth` 使用 Node.js scrypt、随机 salt、opaque session token hash 和
   session-bound HMAC CSRF token，不保存明文密码或 Portal session token。
-- `packages/database` 提供幂等 migration 和 Phase 1～9 repository；users、server-side
+- `packages/database` 提供幂等 migration 和 Phase 1～10 repository；users、server-side
   sessions、workspaces、workers 与预注册 `gateway_base_url` 均持久化到 PostgreSQL。
 - `0006_phase9_users` 为既有 User 增量增加 `status`、`last_login_at` 与 `updated_at`；现有用户回填为
   `active`，不改主键、Workspace ownership 或 Local password schema。
+- `0007_phase10_oidc` 新增 `user_identities` 与唯一 `(provider_id, provider_subject)`；email/display name
+  仅为登录时 profile snapshot，不参与 identity lookup 或账号合并。Phase 10 不放宽既有 User schema，
+  OIDC identity 只能预绑定到已存在的 Platform User。
+- `openid-client@6.8.8` 负责 issuer discovery、Authorization Code exchange、PKCE、`state`、`nonce`、
+  JWK/signature 和标准 ID token claims 校验；平台不手写 JWT/JWK validation。callback URL 固定为
+  `<PORTAL_ORIGIN>/auth/oidc/callback`，不读取请求 Host 或接受用户提供的 redirect target。
+- OIDC transaction 以随机 host-only、HttpOnly、SameSite=Lax Cookie 引用 Control Plane 内一次性短时
+  state/nonce/verifier；callback 消费后立即失效。token/code/client secret 不写 Portal storage、普通日志、
+  Audit、Worker metadata 或 Runtime，OIDC 完成后只签发原有 Platform Session。
+- Login 页面按公开 auth-method metadata 显示 SSO 入口。Admin Users 仅增加规范允许的最小预绑定动作：
+  为现有 User 写入当前唯一配置的 provider + 精确 subject；没有 identity list/unbind、JIT、multi-provider
+  CRUD、OAuth2 UserInfo compatibility 或 authentication audit 扩展。
 - Local login、Portal API、Workspace Host HTTP 与 WebSocket handshake 都通过 server-side session
   联表回查 active User。disable 会在同一事务 revoke 该用户全部 session；Admin revoke、disable 与
   logout 还会主动断开当前单 Control Plane 进程内已建立的 Workspace HTTP streaming、SSE 与 WebSocket。
@@ -28,7 +39,8 @@ SSE/WebSocket 的统一 fail-closed 均已落地。当前只等待本轮反馈�
   具体动作的确认弹窗；该区域独立就近显示含 API error code 的失败信息。请求 schema 严格拒绝 role
   注入、destructive delete 和 ownership 改写；admin 的普通 Workspace API 仍只返回自己的 Workspace。
 - 禁用或降级最后一个 active Local Admin 的操作在 PostgreSQL advisory-lock 保护的事务内被拒绝，保留
-  break-glass 登录入口。Phase 9 没有引入 external identity、复杂 RBAC 或 authentication audit 事件。
+  break-glass 登录入口。Phase 10 只增量加入预绑定 external identity，不引入复杂 RBAC 或
+  authentication audit 事件。
 - Phase 6 migration 为 Workspace 持久化 `RUNNING | STOPPED | DELETED | UNKNOWN` desired state；start、
   stop、delete 在发 Worker 命令前先持久化 intent。Control Plane 启动会把旧 ONLINE/assigned state
   统一 fail-closed 为 offline，避免重启前 heartbeat/state 继续放行 Gateway。
@@ -119,16 +131,17 @@ SSE/WebSocket 的统一 fail-closed 均已落地。当前只等待本轮反馈�
 
 ## In Progress
 
-Phase 9 人工验收反馈的 streaming revoke、Admin Users 确认弹窗和局部错误提示已完成自动验证；当前只
-等待这些修改点的精简人工回归，没有进行中的 Phase 10+ 扩展。
+Phase 10 代码与自动质量门已完成；当前等待使用企业现有 OIDC、Keycloak/Authentik 测试实例或等价
+标准 Provider 执行真实 discovery/redirect/callback 和浏览器人工验收。
 
 ## Next
 
-1. 用两个普通用户同时保持 Workspace Terminal/SSE；disable 或 revoke 其中一人后，确认其既有流立即
-   断开、新请求继续失败，而另一用户连接不受影响。
-2. 在 Admin Users 逐一取消并确认 enable/disable、user/admin role change，确认取消不发请求；再触发
-   `LAST_ACTIVE_LOCAL_ADMIN`、`USER_ALREADY_EXISTS`，确认错误在 Users 区域就近显示。
-3. 记录本轮精简人工回归结论；在明确授权前不进入 Phase 10 OIDC 或其他后续范围。
+1. 在目标 IdP 注册 exact callback，配置单 Provider，用 Local Admin 为一个既有普通 User 绑定精确
+   `provider + sub`，从 Login 页面完成 SSO 并打开该用户既有 Workspace。
+2. 验证 unknown subject、同 email 的另一个 subject 和 disabled Platform User 均被拒绝；暂停或错配
+   IdP 后确认 Local Admin 仍可登录。
+3. 回归 Workspace HTTP/SSE/WebSocket/Terminal 与 ownership；记录真实 IdP 人工验收结论。未获得新的
+   Phase 授权前不进入 Phase 11 provisioning/identity management/OAuth2 compatibility 或 Phase 12 audit。
 
 ## Risks And Blockers
 
@@ -139,6 +152,9 @@ Phase 9 人工验收反馈的 streaming revoke、Admin Users 确认弹窗和局�
   TLS termination、proxy timeout 和目标防火墙规则尚未验收。
 - session exchange 存储是单 Control Plane 进程内、短时且 fail-closed；Control Plane restart
   会使尚未消费的 code 失效。Phase 4 单实例不引入 Redis/多实例共享状态。
+- OIDC authorization transaction 同样是单 Control Plane 进程内、短时且一次消费；进程重启会使正在
+  进行的 SSO 回调失败，用户需重新点击 SSO。真实目标 IdP、TLS/反向代理 callback 和浏览器跳转尚待
+  人工验收，当前自动测试的 mock IdP 不能替代该环境验收。
 - Phase 9 对已建立 HTTP streaming/SSE/WebSocket 的主动撤销使用同一 Control Plane 进程内连接注册表；
   这与当前单实例边界一致。未来若引入多 Control Plane，必须增加跨实例 revocation fan-out，不能把
   当前机制宣称为多实例一致撤销。
@@ -159,6 +175,17 @@ Phase 9 人工验收反馈的 streaming revoke、Admin Users 确认弹窗和局�
 
 ## Verification
 
+- 2026-09-20：Phase 10 根质量门通过 `pnpm lint`、`pnpm typecheck`、`pnpm test`、
+  `pnpm build:web` 与 `git diff --check`；常规全仓测试 119 passed，13 个需显式 PostgreSQL/真实 Docker
+  开关的条件测试按设计跳过。协议测试使用本机 mock OIDC Provider 与签名 JWK，覆盖 PKCE、state、nonce、
+  issuer、audience、expired/invalid token、固定 redirect URI 与 profile claim snapshot。
+- 2026-09-20：在随机临时 PostgreSQL 数据库从零执行 `0001`～`0007` migration 后，完整 Control Plane
+  suite 84/84 通过；覆盖 `(provider_id, provider_subject)` 唯一绑定、unknown/active/disabled identity、
+  同 email 不合并和 Platform Session 持久化。临时数据库已删除。
+- 2026-09-20：`pnpm test:e2e` 通过 Control Plane/Gateway 38/38 与 Worker Gateway 2/2；
+  `pnpm test:e2e:runtime` 复用既有 `agent-runtime:phase7-toolchain`，真实 Docker Runtime 6/6 通过。
+  Phase 10 未修改 Worker Protocol、Runtime Image、Scheduler、Gateway ownership 或 pi-web 主链；真实目标
+  IdP 的 discovery/redirect/callback/TLS 仍待人工验收。
 - 2026-09-20：Phase 9 人工验收反馈回归通过 `pnpm lint`、`pnpm typecheck`、`pnpm build:web` 与
   `git diff --check`；常规全仓测试 101 passed，12 个需显式 PostgreSQL/真实 Docker 开关的条件测试
   按设计跳过。另在随机临时 PostgreSQL 数据库从零 migration 后运行完整 Control Plane suite，65/65

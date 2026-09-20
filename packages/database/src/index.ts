@@ -76,3 +76,10 @@ export {
   type Phase9Repository,
   type UpdateManagedUserResult,
 } from "./phase9.js";
+export {
+  createPhase10Repository,
+  type BindUserIdentityResult,
+  type CompleteOidcLoginResult,
+  type Phase10Repository,
+  type UserIdentityRecord,
+} from "./phase10.js";

@@ -56,6 +56,10 @@ interface SessionResponse {
   csrfToken: string;
 }
 
+interface AuthMethodsResponse {
+  oidc: { enabled: boolean; providerId: string | null };
+}
+
 interface WorkspaceOpenResponse {
   exchangeUrl: string;
   code: string;
@@ -188,6 +192,8 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function App() {
   const [session, setSession] = useState<SessionResponse | null>(null);
+  const [oidcEnabled, setOidcEnabled] = useState(false);
+  const [oidcProviderId, setOidcProviderId] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
@@ -239,6 +245,13 @@ export function App() {
 
   useEffect(() => {
     void (async () => {
+      try {
+        const methods = await api<AuthMethodsResponse>("/api/auth/methods");
+        setOidcEnabled(methods.oidc.enabled);
+        setOidcProviderId(methods.oidc.providerId);
+      } catch {
+        // Local login remains available if auth-method discovery fails.
+      }
       try {
         const current = await api<SessionResponse>("/api/me");
         setSession(current);
@@ -386,6 +399,32 @@ export function App() {
     } catch (caught) {
       setAdminUsersError(
         adminUsersErrorMessage(caught, "Unable to reset password"),
+      );
+    } finally {
+      setPendingUserId(null);
+    }
+  }
+
+  async function bindManagedOidcIdentity(user: AdminUser) {
+    if (session === null || oidcProviderId === null) return;
+    const providerSubject = window.prompt(
+      `将 ${oidcProviderId} 的精确 subject 绑定到 ${user.username ?? user.email}`,
+    );
+    if (providerSubject === null || providerSubject.length === 0) return;
+    setAdminUsersError(null);
+    setPendingUserId(user.id);
+    try {
+      await api(`/api/admin/users/${user.id}/oidc-identities`, {
+        method: "POST",
+        headers: { "x-csrf-token": session.csrfToken },
+        body: JSON.stringify({
+          providerId: oidcProviderId,
+          providerSubject,
+        }),
+      });
+    } catch (caught) {
+      setAdminUsersError(
+        adminUsersErrorMessage(caught, "Unable to bind OIDC identity"),
       );
     } finally {
       setPendingUserId(null);
@@ -564,6 +603,14 @@ export function App() {
           </label>
           {error === null ? null : <p className="error">{error}</p>}
           <button type="submit">登录</button>
+          {oidcEnabled ? (
+            <>
+              <div className="login-divider"><span>或</span></div>
+              <a className="sso-link" href="/auth/oidc/login">
+                Sign in with SSO
+              </a>
+            </>
+          ) : null}
         </form>
       </main>
     );
@@ -660,6 +707,9 @@ export function App() {
                                 onClick={() => void updateManagedUser(user, { role: user.role === "admin" ? "user" : "admin" })}
                               >设为 {user.role === "admin" ? "user" : "admin"}</button>
                               <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void resetManagedPassword(user)}>重置密码</button>
+                              {oidcProviderId === null ? null : (
+                                <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void bindManagedOidcIdentity(user)}>绑定 OIDC subject</button>
+                              )}
                               <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void revokeManagedSessions(user)}>撤销会话</button>
                               <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void toggleManagedWorkspaces(user)}>Workspace metadata</button>
                             </div>

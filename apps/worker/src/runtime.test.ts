@@ -258,6 +258,21 @@ describe("Docker Workspace Runtime", () => {
     expect(docker.createdOptions?.Env).toContain(
       "PI_WEB_DEFAULT_CWD=/workspace",
     );
+    const serializedRuntimeConfiguration = JSON.stringify(docker.createdOptions);
+    expect(serializedRuntimeConfiguration).not.toContain("AUTH_OIDC_");
+    expect(serializedRuntimeConfiguration).not.toContain("access_token");
+    expect(serializedRuntimeConfiguration).not.toContain("refresh_token");
+    expect(serializedRuntimeConfiguration).not.toContain("id_token");
+    expect(serializedRuntimeConfiguration).not.toContain("client_secret");
+    const managedMetadata = await readFile(
+      join(root, "workspaces", WORKSPACE_ID, "metadata", "managed.json"),
+      "utf8",
+    );
+    expect(managedMetadata).not.toContain("AUTH_OIDC_");
+    expect(managedMetadata).not.toContain("access_token");
+    expect(managedMetadata).not.toContain("refresh_token");
+    expect(managedMetadata).not.toContain("id_token");
+    expect(managedMetadata).not.toContain("client_secret");
     const workspaceFile = join(
       root,
       "workspaces",

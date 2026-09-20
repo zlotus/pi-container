@@ -1,7 +1,7 @@
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase9Repository,
+  createPhase10Repository,
   migrateDatabase,
 } from "@agent-runtime/database";
 import { buildControlPlane } from "./app.js";
@@ -10,18 +10,37 @@ import { buildWorkspaceGateway } from "./gateway.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
 import { SessionConnectionRegistry } from "./session-connections.js";
 import { selectWorker } from "./scheduler.js";
+import { GenericOidcClient, OidcTransactionStore } from "./oidc.js";
 
 const config = parseServerConfig(process.env);
 const database = createDatabaseClient(config.DATABASE_URL);
 
 await migrateDatabase(database);
 
-const repository = createPhase9Repository(database, selectWorker);
+const repository = createPhase10Repository(database, selectWorker);
 await repository.markAllWorkersOfflineForRecovery(new Date());
 const sessionExchanges = new WorkspaceSessionExchange(
   config.WORKSPACE_SESSION_EXCHANGE_TTL_MS,
 );
 const sessionConnections = new SessionConnectionRegistry();
+const oidcIssuer =
+  config.AUTH_OIDC_ISSUER === "" ? null : new URL(config.AUTH_OIDC_ISSUER);
+const oidc = config.AUTH_OIDC_ENABLED
+  ? {
+      providerId: config.AUTH_OIDC_PROVIDER_ID,
+      redirectUri: new URL(
+        "/auth/oidc/callback",
+        config.PORTAL_ORIGIN,
+      ).href,
+      client: new GenericOidcClient({
+        issuer: config.AUTH_OIDC_ISSUER,
+        clientId: config.AUTH_OIDC_CLIENT_ID,
+        clientSecret: config.AUTH_OIDC_CLIENT_SECRET,
+        allowInsecureIssuer: oidcIssuer?.protocol === "http:",
+      }),
+      transactions: new OidcTransactionStore(),
+    }
+  : undefined;
 const app = buildControlPlane({
   checkDatabase: async () => checkDatabase(database),
   store: repository,
@@ -42,6 +61,7 @@ const app = buildControlPlane({
   workspaceBaseUrl: config.WORKSPACE_BASE_URL,
   sessionExchanges,
   sessionConnections,
+  ...(oidc === undefined ? {} : { oidc }),
   reportRecoveryIssue: (issue) => {
     console.warn("Worker recovery issue", JSON.stringify(issue));
   },

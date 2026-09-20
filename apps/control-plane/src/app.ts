@@ -18,7 +18,9 @@ import type {
   Phase6Repository,
   Phase8Repository,
   Phase9Repository,
+  Phase10Repository,
   PlatformAuditEvent,
+  UserIdentityRecord,
   UserRecord,
   WorkerPlacementRecord,
   WorkspaceRecord,
@@ -45,6 +47,7 @@ import {
 } from "./worker-control.js";
 import type { WorkspaceSessionExchange } from "./session-exchange.js";
 import type { SessionConnectionRegistry } from "./session-connections.js";
+import type { OidcIdentityClaims, OidcRuntime } from "./oidc.js";
 
 const LoginBodySchema = z
   .object({
@@ -80,6 +83,13 @@ const ResetLocalPasswordBodySchema = z
   .object({ password: z.string().min(12).max(1_024) })
   .strict();
 
+const BindOidcIdentityBodySchema = z
+  .object({
+    providerId: z.string().min(1).max(128),
+    providerSubject: z.string().min(1).max(1_024),
+  })
+  .strict();
+
 const CreateWorkspaceBodySchema = z
   .object({
     name: z.string().trim().min(1).max(80),
@@ -106,7 +116,8 @@ type Phase1Store = Pick<
     Phase5Repository &
     Phase6Repository &
     Phase8Repository &
-    Phase9Repository,
+    Phase9Repository &
+    Phase10Repository,
   | "findUserByLogin"
   | "createSession"
   | "findActiveSession"
@@ -133,6 +144,8 @@ type Phase1Store = Pick<
   | "resetLocalPassword"
   | "revokeUserSessions"
   | "listManagedUserWorkspaces"
+  | "bindUserIdentity"
+  | "completeOidcLogin"
 >;
 
 type WorkerAdminStore = Pick<
@@ -156,6 +169,7 @@ export interface ControlPlaneDependencies {
   workspaceBaseUrl: string;
   sessionExchanges: WorkspaceSessionExchange;
   sessionConnections?: SessionConnectionRegistry;
+  oidc?: OidcRuntime;
   reportRecoveryIssue?: (
     issue: WorkerRecoveryIssue & { workerId: string },
   ) => void;
@@ -237,6 +251,16 @@ function publicAdminUser(user: AdminUserRecord) {
   };
 }
 
+function publicUserIdentity(identity: UserIdentityRecord) {
+  return {
+    id: identity.id,
+    userId: identity.userId,
+    providerId: identity.providerId,
+    providerSubject: identity.providerSubject,
+    createdAt: identity.createdAt.toISOString(),
+  };
+}
+
 function publicWorkspace(workspace: WorkspaceRecord) {
   return {
     id: workspace.id,
@@ -312,6 +336,9 @@ export function buildControlPlane(
   const cookieName = dependencies.secureCookies
     ? "__Host-platform-session"
     : "platform-session";
+  const oidcTransactionCookieName = dependencies.secureCookies
+    ? "__Host-oidc-transaction"
+    : "oidc-transaction";
 
   type DispatchResult =
     | {
@@ -622,6 +649,146 @@ export function buildControlPlane(
     }
   });
 
+  app.get("/api/auth/methods", async (_request, reply) => {
+    reply.header("cache-control", "no-store");
+    return {
+      oidc: {
+        enabled: dependencies.oidc !== undefined,
+        providerId: dependencies.oidc?.providerId ?? null,
+      },
+    };
+  });
+
+  app.get("/auth/oidc/login", async (_request, reply) => {
+    if (dependencies.oidc === undefined) {
+      return reply
+        .code(404)
+        .send(errorBody("OIDC_DISABLED", "OIDC login is not enabled"));
+    }
+    try {
+      const authorization =
+        await dependencies.oidc.client.createAuthorizationRequest(
+          dependencies.oidc.redirectUri,
+        );
+      const handle = dependencies.oidc.transactions.create(
+        authorization.transaction,
+        now(),
+      );
+      reply.header(
+        "set-cookie",
+        sessionCookie(
+          oidcTransactionCookieName,
+          handle,
+          10 * 60,
+          dependencies.secureCookies,
+        ),
+      );
+      reply.header("cache-control", "no-store");
+      return reply.redirect(authorization.url.href);
+    } catch {
+      return reply
+        .code(503)
+        .send(errorBody("OIDC_UNAVAILABLE", "OIDC login is unavailable"));
+    }
+  });
+
+  app.get("/auth/oidc/callback", async (request, reply) => {
+    if (dependencies.oidc === undefined) {
+      return reply
+        .code(404)
+        .send(errorBody("OIDC_DISABLED", "OIDC login is not enabled"));
+    }
+    const clearedTransactionCookie = sessionCookie(
+      oidcTransactionCookieName,
+      "",
+      0,
+      dependencies.secureCookies,
+    );
+    reply.header("set-cookie", clearedTransactionCookie);
+    reply.header("cache-control", "no-store");
+    const handle = parseCookie(
+      request.headers.cookie,
+      oidcTransactionCookieName,
+    );
+    const transaction =
+      handle === null
+        ? null
+        : dependencies.oidc.transactions.consume(handle, now());
+    if (transaction === null) {
+      return reply
+        .code(400)
+        .send(
+          errorBody(
+            "OIDC_TRANSACTION_INVALID",
+            "OIDC login transaction is missing, expired, or already used",
+          ),
+        );
+    }
+
+    let identity: OidcIdentityClaims;
+    try {
+      const requestUrl = new URL(
+        request.raw.url ?? "/",
+        "http://callback.invalid",
+      );
+      const callbackUrl = new URL(dependencies.oidc.redirectUri);
+      callbackUrl.search = requestUrl.search;
+      identity = await dependencies.oidc.client.exchangeAuthorizationCode({
+        callbackUrl,
+        redirectUri: dependencies.oidc.redirectUri,
+        transaction,
+      });
+    } catch {
+      return reply
+        .code(401)
+        .send(
+          errorBody(
+            "OIDC_AUTHENTICATION_FAILED",
+            "OIDC authentication failed",
+          ),
+        );
+    }
+
+    const rawToken = generateOpaqueToken();
+    const authenticatedAt = now();
+    const result = await dependencies.store.completeOidcLogin({
+      providerId: dependencies.oidc.providerId,
+      providerSubject: identity.subject,
+      emailSnapshot: identity.emailSnapshot,
+      displayNameSnapshot: identity.displayNameSnapshot,
+      sessionId: randomUUID(),
+      tokenHash: hashOpaqueToken(rawToken),
+      expiresAt: new Date(authenticatedAt.getTime() + dependencies.sessionTtlMs),
+      authenticatedAt,
+    });
+    if (result.outcome === "UNKNOWN_IDENTITY") {
+      return reply
+        .code(403)
+        .send(
+          errorBody(
+            "OIDC_IDENTITY_NOT_BOUND",
+            "OIDC identity is not authorized for this platform",
+          ),
+        );
+    }
+    if (result.outcome === "USER_DISABLED") {
+      return reply
+        .code(403)
+        .send(errorBody("OIDC_USER_DISABLED", "Platform User is disabled"));
+    }
+
+    reply.header("set-cookie", [
+      clearedTransactionCookie,
+      sessionCookie(
+        cookieName,
+        rawToken,
+        Math.floor(dependencies.sessionTtlMs / 1_000),
+        dependencies.secureCookies,
+      ),
+    ]);
+    return reply.redirect(dependencies.portalOrigin);
+  });
+
   app.post("/api/auth/login", async (request, reply) => {
     if (!validateOrigin(request, reply)) {
       return reply;
@@ -794,6 +961,64 @@ export function buildControlPlane(
       }
       throw error;
     }
+  });
+
+  app.post("/api/admin/users/:id/oidc-identities", async (request, reply) => {
+    const auth = await authenticateAdmin(request, reply);
+    if (auth === null) return reply;
+    if (
+      !validateOrigin(request, reply) ||
+      !validateCsrf(request, reply, auth.rawToken)
+    ) {
+      return reply;
+    }
+    if (dependencies.oidc === undefined) {
+      return reply
+        .code(409)
+        .send(errorBody("OIDC_DISABLED", "OIDC login is not enabled"));
+    }
+    const params = AdminUserParamsSchema.safeParse(request.params);
+    const body = BindOidcIdentityBodySchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return reply
+        .code(400)
+        .send(errorBody("INVALID_REQUEST", "Invalid OIDC identity binding"));
+    }
+    if (body.data.providerId !== dependencies.oidc.providerId) {
+      return reply
+        .code(400)
+        .send(
+          errorBody(
+            "OIDC_PROVIDER_MISMATCH",
+            "Identity provider does not match the configured provider",
+          ),
+        );
+    }
+    const result = await dependencies.store.bindUserIdentity({
+      id: randomUUID(),
+      userId: params.data.id,
+      providerId: body.data.providerId,
+      providerSubject: body.data.providerSubject,
+    });
+    if (result.outcome === "USER_NOT_FOUND") {
+      return reply
+        .code(404)
+        .send(errorBody("USER_NOT_FOUND", "User was not found"));
+    }
+    if (result.outcome === "IDENTITY_ALREADY_BOUND") {
+      return reply
+        .code(409)
+        .send(
+          errorBody(
+            "OIDC_IDENTITY_ALREADY_BOUND",
+            "OIDC identity is already bound",
+          ),
+        );
+    }
+    reply.header("cache-control", "no-store");
+    return reply
+      .code(201)
+      .send({ identity: publicUserIdentity(result.identity) });
   });
 
   app.patch("/api/admin/users/:id", async (request, reply) => {

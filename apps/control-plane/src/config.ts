@@ -73,6 +73,29 @@ const WorkerGatewayTokensSchema = z
     "Each Worker Gateway must use a distinct token",
   );
 
+const OidcIssuerSchema = z
+  .string()
+  .trim()
+  .default("")
+  .refine((value) => {
+    if (value === "") return true;
+    try {
+      const url = new URL(value);
+      const loopbackHttp =
+        url.protocol === "http:" &&
+        ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+      return (
+        (url.protocol === "https:" || loopbackHttp) &&
+        url.username === "" &&
+        url.password === "" &&
+        url.search === "" &&
+        url.hash === ""
+      );
+    } catch {
+      return false;
+    }
+  }, "AUTH_OIDC_ISSUER must use HTTPS (or loopback HTTP) without credentials, query, or fragment");
+
 export const ServerConfigSchema = z
   .object({
     DATABASE_URL: z.string().min(1),
@@ -82,6 +105,22 @@ export const ServerConfigSchema = z
     GATEWAY_PORT: z.coerce.number().int().min(1).max(65_535).default(3001),
     PORTAL_ORIGIN: PortalOriginSchema.default("http://127.0.0.1:5173"),
     PORTAL_ALLOWED_ORIGINS: PortalAllowedOriginsSchema,
+    AUTH_OIDC_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    AUTH_OIDC_PROVIDER_ID: z
+      .string()
+      .trim()
+      .regex(/^[a-z0-9][a-z0-9._-]{0,127}$/)
+      .default("generic-oidc"),
+    AUTH_OIDC_ISSUER: OidcIssuerSchema,
+    AUTH_OIDC_CLIENT_ID: z.string().trim().default(""),
+    AUTH_OIDC_CLIENT_SECRET: z.string().default(""),
+    AUTH_OIDC_AUTO_PROVISION: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
     SESSION_SECRET: z.string().min(32),
     SESSION_COOKIE_SECURE: z
       .enum(["true", "false"])
@@ -138,7 +177,30 @@ export const ServerConfigSchema = z
       .default(4 * 1024 ** 3),
     WORKSPACE_PIDS_LIMIT: z.coerce.number().int().positive().default(512),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((config, context) => {
+    if (config.AUTH_OIDC_AUTO_PROVISION) {
+      context.addIssue({
+        code: "custom",
+        path: ["AUTH_OIDC_AUTO_PROVISION"],
+        message: "Phase 10 requires AUTH_OIDC_AUTO_PROVISION=false",
+      });
+    }
+    if (!config.AUTH_OIDC_ENABLED) return;
+    for (const key of [
+      "AUTH_OIDC_ISSUER",
+      "AUTH_OIDC_CLIENT_ID",
+      "AUTH_OIDC_CLIENT_SECRET",
+    ] as const) {
+      if (config[key] === "") {
+        context.addIssue({
+          code: "custom",
+          path: [key],
+          message: `${key} is required when AUTH_OIDC_ENABLED=true`,
+        });
+      }
+    }
+  });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
 

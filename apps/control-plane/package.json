@@ -22,10 +22,12 @@
     "@agent-runtime/protocol": "workspace:*",
     "@fastify/websocket": "11.3.0",
     "fastify": "5.12.3",
+    "openid-client": "6.8.8",
     "ws": "8.21.3",
     "zod": "4.5.4"
   },
   "devDependencies": {
-    "@types/ws": "8.18.1"
+    "@types/ws": "8.18.1",
+    "jose": "6.2.12"
   }
 }

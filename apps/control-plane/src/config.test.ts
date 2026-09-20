@@ -54,3 +54,64 @@ describe("Portal Origin configuration", () => {
     ).toThrow();
   });
 });
+
+describe("Phase 10 OIDC configuration", () => {
+  it("keeps OIDC disabled and auto-provisioning off by default", () => {
+    const config = parseServerConfig(REQUIRED_ENV);
+
+    expect(config.AUTH_OIDC_ENABLED).toBe(false);
+    expect(config.AUTH_OIDC_AUTO_PROVISION).toBe(false);
+    expect(config.AUTH_OIDC_PROVIDER_ID).toBe("generic-oidc");
+  });
+
+  it("accepts one fully configured Generic OIDC provider", () => {
+    const config = parseServerConfig({
+      ...REQUIRED_ENV,
+      AUTH_OIDC_ENABLED: "true",
+      AUTH_OIDC_PROVIDER_ID: "enterprise-oidc",
+      AUTH_OIDC_ISSUER: "https://idp.example.test/realms/enterprise",
+      AUTH_OIDC_CLIENT_ID: "agent-runtime",
+      AUTH_OIDC_CLIENT_SECRET: "not-a-real-secret",
+      AUTH_OIDC_AUTO_PROVISION: "false",
+    });
+
+    expect(config).toMatchObject({
+      AUTH_OIDC_ENABLED: true,
+      AUTH_OIDC_PROVIDER_ID: "enterprise-oidc",
+      AUTH_OIDC_ISSUER: "https://idp.example.test/realms/enterprise",
+      AUTH_OIDC_CLIENT_ID: "agent-runtime",
+      AUTH_OIDC_CLIENT_SECRET: "not-a-real-secret",
+      AUTH_OIDC_AUTO_PROVISION: false,
+    });
+  });
+
+  it("rejects incomplete providers and Phase 11 auto-provisioning", () => {
+    expect(() =>
+      parseServerConfig({
+        ...REQUIRED_ENV,
+        AUTH_OIDC_ENABLED: "true",
+      }),
+    ).toThrow();
+    expect(() =>
+      parseServerConfig({
+        ...REQUIRED_ENV,
+        AUTH_OIDC_AUTO_PROVISION: "true",
+      }),
+    ).toThrow("AUTH_OIDC_AUTO_PROVISION=false");
+  });
+
+  it.each([
+    "ftp://idp.example.test",
+    "http://idp.internal.test",
+    "https://user:password@idp.example.test",
+    "https://idp.example.test?tenant=a",
+    "not-an-issuer",
+  ])("rejects an unsafe issuer value: %s", (issuer) => {
+    expect(() =>
+      parseServerConfig({
+        ...REQUIRED_ENV,
+        AUTH_OIDC_ISSUER: issuer,
+      }),
+    ).toThrow();
+  });
+});

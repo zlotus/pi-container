@@ -119,6 +119,11 @@ label { display: grid; gap: var(--space-2); font-size: .8rem; font-weight: 600; 
 .login-card p { margin: 0; color: var(--text-secondary); font-size: .8rem; }
 .login-card .error { color: var(--danger); }
 .login-card button { width: 100%; }
+.login-divider { display: flex; align-items: center; gap: var(--space-2); color: var(--text-muted); font-size: .72rem; }
+.login-divider::before, .login-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.sso-link { min-height: 36px; display: inline-flex; align-items: center; justify-content: center; padding: 7px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-primary); font-size: .78rem; font-weight: 650; text-decoration: none; }
+.sso-link:hover { background: var(--background); border-color: #a5b2a8; }
+.sso-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .portal-shell { min-height: 100vh; }
 header {
