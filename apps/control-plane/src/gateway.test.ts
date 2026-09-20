@@ -16,6 +16,7 @@ import {
   type WorkspaceGatewayStore,
 } from "./gateway.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
+import { SessionConnectionRegistry } from "./session-connections.js";
 
 const NOW = new Date("2026-09-12T08:00:00.000Z");
 const WORKSPACE_ID = "90b38efc-aa9a-4bc6-8eee-528b4e0c7c60";
@@ -55,7 +56,10 @@ function session(userId: string): AuthenticatedSessionRecord {
       email: `${userId}@example.test`,
       username: null,
       role: "user",
+      status: "active",
+      lastLoginAt: NOW,
       createdAt: NOW,
+      updatedAt: NOW,
     },
   };
 }
@@ -471,6 +475,16 @@ describe("authenticated Workspace Gateway", () => {
         "sec-fetch-dest": "document",
       },
     });
+    active.delete(hashOpaqueToken(SESSION_A));
+    const revoked = await request({
+      port: gatewayPort,
+      path: "/",
+      headers: {
+        host: PUBLIC_HOST,
+        cookie: `platform-session=${SESSION_A}`,
+      },
+    });
+    active.set(hashOpaqueToken(SESSION_A), session(USER_A_ID));
     ownedWorkspace.state = "WORKER_OFFLINE";
     const reconciling = await request({
       port: gatewayPort,
@@ -506,6 +520,7 @@ describe("authenticated Workspace Gateway", () => {
     expect(crossSiteSubresource.statusCode).toBe(404);
     expect(crossSiteIframe.statusCode).toBe(404);
     expect(noCookie.statusCode).toBe(404);
+    expect(revoked.statusCode).toBe(404);
     expect(reconciling.statusCode).toBe(404);
     expect(stopped.statusCode).toBe(404);
   });
@@ -537,6 +552,7 @@ describe("authenticated Workspace Gateway", () => {
         };
       },
     };
+    const sessionConnections = new SessionConnectionRegistry();
     const gateway = buildWorkspaceGateway({
       store,
       exchanges: new WorkspaceSessionExchange(60_000),
@@ -546,6 +562,7 @@ describe("authenticated Workspace Gateway", () => {
       sessionTtlMs: 60_000,
       workerOfflineAfterMs: 35_000,
       workerGatewayTokens: { [WORKER_ID]: GATEWAY_TOKEN },
+      sessionConnections,
       now: () => NOW,
     });
     const port = await listen(gateway);
@@ -580,7 +597,60 @@ describe("authenticated Workspace Gateway", () => {
 
     expect(message.toString()).toBe("terminal-data");
     expect(upstreamPath).toBe(`/socket?workspaceId=${foreignWorkspace}`);
-    client.close();
+    sessionConnections.closeUser(USER_A_ID);
+    await once(client, "close");
+    wss.close();
+  });
+
+  it("revalidates a session after registering an in-flight WebSocket", async () => {
+    const upstream = createServer();
+    const wss = new WebSocketServer({ noServer: true });
+    upstream.on("upgrade", (request, socket, head) => {
+      wss.handleUpgrade(request, socket, head, () => undefined);
+    });
+    const upstreamPort = await listen(upstream);
+    let sessionLookups = 0;
+    const store: WorkspaceGatewayStore = {
+      async findActiveSession(tokenHash) {
+        if (tokenHash !== hashOpaqueToken(SESSION_A)) return null;
+        sessionLookups += 1;
+        return sessionLookups === 1 ? session(USER_A_ID) : null;
+      },
+      async findOwnedWorkspace(id, userId) {
+        return id === WORKSPACE_ID && userId === USER_A_ID ? workspace() : null;
+      },
+      async findWorkerGatewayRoute() {
+        return {
+          workerId: WORKER_ID,
+          gatewayBaseUrl: `http://127.0.0.1:${upstreamPort}`,
+        };
+      },
+    };
+    const gateway = buildWorkspaceGateway({
+      store,
+      exchanges: new WorkspaceSessionExchange(60_000),
+      portalOrigin: "http://portal.test",
+      workspaceBaseUrl: "http://agent.test",
+      secureCookies: false,
+      sessionTtlMs: 60_000,
+      workerOfflineAfterMs: 35_000,
+      workerGatewayTokens: { [WORKER_ID]: GATEWAY_TOKEN },
+      now: () => NOW,
+    });
+    const port = await listen(gateway);
+    const client = new WebSocket(`ws://127.0.0.1:${port}/socket`, {
+      headers: {
+        host: PUBLIC_HOST,
+        origin: PUBLIC_ORIGIN,
+        cookie: `platform-session=${SESSION_A}`,
+      },
+    });
+    const closed = once(client, "close");
+
+    await once(client, "open");
+    await closed;
+
+    expect(sessionLookups).toBe(2);
     wss.close();
   });
 });

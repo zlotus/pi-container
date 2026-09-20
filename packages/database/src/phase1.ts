@@ -1,6 +1,7 @@
 import type { DatabaseClient } from "./index.js";
 
 export type UserRole = "user" | "admin";
+export type UserStatus = "active" | "disabled";
 
 export interface UserRecord {
   id: string;
@@ -8,7 +9,10 @@ export interface UserRecord {
   username: string | null;
   passwordHash: string;
   role: UserRole;
+  status: UserStatus;
+  lastLoginAt: Date | null;
   createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface AuthenticatedSessionRecord {
@@ -44,7 +48,10 @@ interface UserRow {
   username: string | null;
   password_hash: string;
   role: UserRole;
+  status: UserStatus;
+  last_login_at: Date | null;
   created_at: Date;
+  updated_at: Date;
 }
 
 interface WorkspaceRow {
@@ -66,7 +73,10 @@ function mapUser(row: UserRow): UserRecord {
     username: row.username,
     passwordHash: row.password_hash,
     role: row.role,
+    status: row.status,
+    lastLoginAt: row.last_login_at,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -89,7 +99,9 @@ export function createPhase1Repository(database: DatabaseClient) {
     async findUserByLogin(login: string): Promise<UserRecord | null> {
       const normalized = login.trim().toLowerCase();
       const rows = await database<UserRow[]>`
-        select id, email, username, password_hash, role, created_at
+        select
+          id, email, username, password_hash, role, status,
+          last_login_at, created_at, updated_at
         from users
         where email = ${normalized} or username = ${normalized}
         limit 1
@@ -114,7 +126,9 @@ export function createPhase1Repository(database: DatabaseClient) {
           ${input.passwordHash},
           ${input.role}
         )
-        returning id, email, username, password_hash, role, created_at
+        returning
+          id, email, username, password_hash, role, status,
+          last_login_at, created_at, updated_at
       `;
       const row = rows[0];
       if (row === undefined) {
@@ -128,11 +142,23 @@ export function createPhase1Repository(database: DatabaseClient) {
       userId: string;
       tokenHash: string;
       expiresAt: Date;
-    }): Promise<void> {
-      await database`
-        insert into user_sessions (id, user_id, token_hash, expires_at)
-        values (${input.id}, ${input.userId}, ${input.tokenHash}, ${input.expiresAt})
-      `;
+    }): Promise<boolean> {
+      return database.begin(async (transaction) => {
+        const rows = await transaction<{ id: string }[]>`
+          insert into user_sessions (id, user_id, token_hash, expires_at)
+          select ${input.id}, id, ${input.tokenHash}, ${input.expiresAt}
+          from users
+          where id = ${input.userId} and status = 'active'
+          returning id
+        `;
+        if (rows.length === 0) return false;
+        await transaction`
+          update users
+          set last_login_at = now(), updated_at = now()
+          where id = ${input.userId} and status = 'active'
+        `;
+        return true;
+      });
     },
 
     async findActiveSession(
@@ -147,7 +173,10 @@ export function createPhase1Repository(database: DatabaseClient) {
           email: string;
           username: string | null;
           role: UserRole;
+          status: UserStatus;
+          last_login_at: Date | null;
           created_at: Date;
+          updated_at: Date;
         }>
       >`
         select
@@ -157,12 +186,16 @@ export function createPhase1Repository(database: DatabaseClient) {
           users.email,
           users.username,
           users.role,
-          users.created_at
+          users.status,
+          users.last_login_at,
+          users.created_at,
+          users.updated_at
         from user_sessions sessions
         join users on users.id = sessions.user_id
         where sessions.token_hash = ${tokenHash}
           and sessions.revoked_at is null
           and sessions.expires_at > ${now}
+          and users.status = 'active'
         limit 1
       `;
       const row = rows[0];
@@ -177,7 +210,10 @@ export function createPhase1Repository(database: DatabaseClient) {
           email: row.email,
           username: row.username,
           role: row.role,
+          status: row.status,
+          lastLoginAt: row.last_login_at,
           createdAt: row.created_at,
+          updatedAt: row.updated_at,
         },
       };
     },

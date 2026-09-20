@@ -4,7 +4,7 @@ import { hashOpaqueToken, hashPassword } from "@agent-runtime/auth";
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase8Repository,
+  createPhase9Repository,
   migrateDatabase,
   type DatabaseClient,
 } from "@agent-runtime/database";
@@ -18,12 +18,14 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithPostgres = databaseUrl === undefined ? describe.skip : describe;
 const NOW = new Date("2026-09-10T08:00:00.000Z");
 
-describeWithPostgres("Phase 1 through 8 PostgreSQL integration", () => {
+describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   const userAId = randomUUID();
   const userBId = randomUUID();
   const phase3UserId = randomUUID();
   const phase5UserId = randomUUID();
   const phase6UserId = randomUUID();
+  const phase9AdminId = randomUUID();
+  const phase9UserId = randomUUID();
   const suffix = randomUUID();
   const workerId = `worker-${suffix}`;
   const phase3WorkerId = `runtime-${suffix}`;
@@ -42,9 +44,9 @@ describeWithPostgres("Phase 1 through 8 PostgreSQL integration", () => {
   });
 
   afterAll(async () => {
-    await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId})`;
+    await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId})`;
     await database`delete from workers where id = ${workerId} or id = ${phase3WorkerId} or id = ${phase6WorkerId} or id = any(${phase5WorkerIds})`;
-    await database`delete from users where id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId})`;
+    await database`delete from users where id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId})`;
     await database`
       delete from platform_audit_events
       where owner_user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId})
@@ -57,8 +59,70 @@ describeWithPostgres("Phase 1 through 8 PostgreSQL integration", () => {
     await database.end({ timeout: 5 });
   });
 
+  it("persists Phase 9 status, revocation, password reset, and User Workspace metadata", async () => {
+    const repository = createPhase9Repository(database, selectWorker);
+    await repository.createUser({
+      id: phase9AdminId,
+      email: `phase9-admin-${suffix}@example.test`,
+      username: null,
+      passwordHash: await hashPassword("phase9-admin-password"),
+      role: "admin",
+    });
+    await repository.createUser({
+      id: phase9UserId,
+      email: `phase9-user-${suffix}@example.test`,
+      username: null,
+      passwordHash: await hashPassword("phase9-user-password"),
+      role: "user",
+    });
+    const workspace = await repository.createWorkspace({
+      id: randomUUID(),
+      userId: phase9UserId,
+      name: "phase9-metadata",
+      runtimeImage: "agent-runtime:phase9-integration",
+    });
+    const tokenHash = hashOpaqueToken(`phase9-${suffix}`);
+    await expect(
+      repository.createSession({
+        id: randomUUID(),
+        userId: phase9UserId,
+        tokenHash,
+        expiresAt: new Date(NOW.getTime() + 60_000),
+      }),
+    ).resolves.toBe(true);
+
+    const listed = await repository.listUsers();
+    expect(listed.find((user) => user.id === phase9UserId)).toMatchObject({
+      status: "active",
+      source: "local",
+      workspaceCount: 1,
+    });
+    await expect(
+      repository.listManagedUserWorkspaces(phase9UserId),
+    ).resolves.toMatchObject([{ id: workspace.id, userId: phase9UserId }]);
+    await expect(
+      repository.updateManagedUser({
+        userId: phase9UserId,
+        status: "disabled",
+      }),
+    ).resolves.toMatchObject({
+      outcome: "UPDATED",
+      user: { status: "disabled" },
+    });
+    await expect(repository.findActiveSession(tokenHash, NOW)).resolves.toBeNull();
+    await expect(
+      repository.resetLocalPassword({
+        userId: phase9UserId,
+        passwordHash: await hashPassword("phase9-replacement-password"),
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      repository.revokeUserSessions(phase9UserId, NOW),
+    ).resolves.toBe(true);
+  });
+
   it("logs in two persisted users and isolates their workspaces", async () => {
-    const repository = createPhase8Repository(database, selectWorker);
+    const repository = createPhase9Repository(database, selectWorker);
     await repository.createUser({
       id: userAId,
       email: `a-${suffix}@example.test`,
@@ -175,7 +239,7 @@ describeWithPostgres("Phase 1 through 8 PostgreSQL integration", () => {
   });
 
   it("persists a bound Worker credential and rotates it atomically", async () => {
-    const repository = createPhase8Repository(database, selectWorker);
+    const repository = createPhase9Repository(database, selectWorker);
     const originalToken = "originalworker0123456789abcdef0123456789abcdef";
     const rotatedToken = "rotatedworker0123456789abcdef0123456789abcdef";
     const originalHash = hashOpaqueToken(originalToken);
@@ -231,7 +295,7 @@ describeWithPostgres("Phase 1 through 8 PostgreSQL integration", () => {
   });
 
   it("persists minimal placement and lifecycle transitions atomically", async () => {
-    const repository = createPhase8Repository(database, selectWorker);
+    const repository = createPhase9Repository(database, selectWorker);
     await repository.createUser({
       id: phase3UserId,
       email: `runtime-${suffix}@example.test`,
@@ -412,7 +476,7 @@ describeWithPostgres("Phase 1 through 8 PostgreSQL integration", () => {
   });
 
   it("persists desired state and conditionally recovers or finalizes deletion", async () => {
-    const repository = createPhase8Repository(database, selectWorker);
+    const repository = createPhase9Repository(database, selectWorker);
     const runtimeImage = `agent-runtime:recovery-${suffix}`;
     const credentialHash = hashOpaqueToken(
       `recovery-${suffix}-credential-token`,
@@ -523,7 +587,7 @@ describeWithPostgres("Phase 1 through 8 PostgreSQL integration", () => {
   });
 
   it("schedules compatible Workers by authoritative load and reserves the final slot once", async () => {
-    const repository = createPhase8Repository(database, selectWorker);
+    const repository = createPhase9Repository(database, selectWorker);
     const runtimeImage = `agent-runtime:scheduler-${suffix}`;
     const finalSlotImage = `agent-runtime:last-slot-${suffix}`;
     await repository.createUser({

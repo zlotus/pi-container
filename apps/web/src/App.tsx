@@ -1,10 +1,19 @@
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { Fragment, type FormEvent, useCallback, useEffect, useState } from "react";
 
 interface User {
   id: string;
   email: string;
   username: string | null;
   role: "user" | "admin";
+  status: "active" | "disabled";
+}
+
+interface AdminUser extends User {
+  source: "local";
+  workspaceCount: number;
+  lastLoginAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface Workspace {
@@ -129,10 +138,14 @@ export function App() {
   const [session, setSession] = useState<SessionResponse | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workers, setWorkers] = useState<Worker[]>([]);
+  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
+  const [managedWorkspaces, setManagedWorkspaces] = useState<Workspace[]>([]);
+  const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pendingWorkspaceId, setPendingWorkspaceId] = useState<string | null>(null);
+  const [pendingUserId, setPendingUserId] = useState<string | null>(null);
 
   const loadWorkspaces = useCallback(async () => {
     const result = await api<{ workspaces: Workspace[] }>("/api/workspaces");
@@ -149,6 +162,11 @@ export function App() {
     setAuditEvents(result.events);
   }, []);
 
+  const loadAdminUsers = useCallback(async () => {
+    const result = await api<{ users: AdminUser[] }>("/api/admin/users");
+    setAdminUsers(result.users);
+  }, []);
+
   const refreshWorkers = useCallback(async () => {
     try {
       await loadWorkers();
@@ -156,6 +174,14 @@ export function App() {
       setError(caught instanceof Error ? caught.message : "Unable to load Workers");
     }
   }, [loadWorkers]);
+
+  const refreshAdminUsers = useCallback(async () => {
+    try {
+      await loadAdminUsers();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to load Users");
+    }
+  }, [loadAdminUsers]);
 
   useEffect(() => {
     void (async () => {
@@ -176,9 +202,10 @@ export function App() {
   useEffect(() => {
     if (session?.user.role !== "admin") return;
     void refreshWorkers();
+    void refreshAdminUsers();
     const timer = window.setInterval(() => void refreshWorkers(), 5_000);
     return () => window.clearInterval(timer);
-  }, [refreshWorkers, session?.user.role]);
+  }, [refreshAdminUsers, refreshWorkers, session?.user.role]);
 
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -215,6 +242,122 @@ export function App() {
       await Promise.all([loadWorkspaces(), loadAuditEvents()]);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Creation failed");
+    }
+  }
+
+  async function createLocalUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (session === null) return;
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    setError(null);
+    try {
+      await api("/api/admin/users", {
+        method: "POST",
+        headers: { "x-csrf-token": session.csrfToken },
+        body: JSON.stringify({
+          email: form.get("email"),
+          username: form.get("username") || undefined,
+          password: form.get("password"),
+        }),
+      });
+      formElement.reset();
+      await loadAdminUsers();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to create Local User");
+    }
+  }
+
+  async function updateManagedUser(
+    user: AdminUser,
+    update: { role?: User["role"]; status?: User["status"] },
+  ) {
+    if (session === null) return;
+    setError(null);
+    setPendingUserId(user.id);
+    try {
+      const result = await api<{ user: AdminUser }>(`/api/admin/users/${user.id}`, {
+        method: "PATCH",
+        headers: { "x-csrf-token": session.csrfToken },
+        body: JSON.stringify(update),
+      });
+      if (user.id === session.user.id) {
+        if (result.user.status === "disabled") {
+          setSession(null);
+          return;
+        }
+        setSession({
+          ...session,
+          user: { ...session.user, role: result.user.role, status: result.user.status },
+        });
+      }
+      await loadAdminUsers();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to update User");
+    } finally {
+      setPendingUserId(null);
+    }
+  }
+
+  async function resetManagedPassword(user: AdminUser) {
+    if (session === null) return;
+    const password = window.prompt(`为 ${user.username ?? user.email} 设置新密码（至少 12 个字符）`);
+    if (password === null) return;
+    setError(null);
+    setPendingUserId(user.id);
+    try {
+      await api(`/api/admin/users/${user.id}/reset-password`, {
+        method: "POST",
+        headers: { "x-csrf-token": session.csrfToken },
+        body: JSON.stringify({ password }),
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to reset password");
+    } finally {
+      setPendingUserId(null);
+    }
+  }
+
+  async function revokeManagedSessions(user: AdminUser) {
+    if (session === null) return;
+    if (!window.confirm(`撤销 ${user.username ?? user.email} 的全部登录会话？`)) return;
+    setError(null);
+    setPendingUserId(user.id);
+    try {
+      await api(`/api/admin/users/${user.id}/revoke-sessions`, {
+        method: "POST",
+        headers: { "x-csrf-token": session.csrfToken },
+        body: "{}",
+      });
+      if (user.id === session.user.id) {
+        setSession(null);
+        return;
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to revoke sessions");
+    } finally {
+      setPendingUserId(null);
+    }
+  }
+
+  async function toggleManagedWorkspaces(user: AdminUser) {
+    if (expandedUserId === user.id) {
+      setExpandedUserId(null);
+      setManagedWorkspaces([]);
+      return;
+    }
+    setError(null);
+    setPendingUserId(user.id);
+    try {
+      const result = await api<{ workspaces: Workspace[] }>(
+        `/api/admin/users/${user.id}/workspaces`,
+      );
+      setManagedWorkspaces(result.workspaces);
+      setExpandedUserId(user.id);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Unable to load Workspace metadata");
+    } finally {
+      setPendingUserId(null);
     }
   }
 
@@ -308,6 +451,9 @@ export function App() {
     setSession(null);
     setWorkspaces([]);
     setWorkers([]);
+    setAdminUsers([]);
+    setManagedWorkspaces([]);
+    setExpandedUserId(null);
     setAuditEvents([]);
   }
 
@@ -385,6 +531,84 @@ export function App() {
             <strong>{auditEvents.length}</strong>
           </div>
         </section>
+        {session.user.role === "admin" ? (
+          <section className="user-panel" aria-labelledby="user-panel-title">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">ADMIN</p>
+                <h2 id="user-panel-title">Users</h2>
+              </div>
+              <button className="secondary" onClick={() => void refreshAdminUsers()}>
+                刷新
+              </button>
+            </div>
+            <form className="user-create-form" onSubmit={createLocalUser}>
+              <input name="email" type="email" placeholder="email@example.com" maxLength={320} required />
+              <input name="username" placeholder="username（可选）" minLength={3} maxLength={64} pattern="[a-z0-9][a-z0-9._-]{2,63}" />
+              <input name="password" type="password" placeholder="初始密码（至少 12 位）" minLength={12} maxLength={1024} autoComplete="new-password" required />
+              <button type="submit">创建 Local User</button>
+            </form>
+            {adminUsers.length === 0 ? (
+              <p className="muted">尚无用户记录。</p>
+            ) : (
+              <div className="worker-table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>User</th><th>来源</th><th>Role</th><th>状态</th><th>Workspace</th><th>操作</th></tr>
+                  </thead>
+                  <tbody>
+                    {adminUsers.map((user) => (
+                      <Fragment key={user.id}>
+                        <tr>
+                          <td><strong>{user.username ?? user.email}</strong><small>{user.email}{user.lastLoginAt === null ? "" : ` · 最近登录 ${new Date(user.lastLoginAt).toLocaleString()}`}</small></td>
+                          <td>Local</td>
+                          <td><span className="state">{user.role}</span></td>
+                          <td><span className={`state user-${user.status}`}>{user.status}</span></td>
+                          <td>{user.workspaceCount}</td>
+                          <td>
+                            <div className="table-actions">
+                              <button
+                                className="secondary"
+                                disabled={pendingUserId === user.id}
+                                onClick={() => void updateManagedUser(user, { status: user.status === "active" ? "disabled" : "active" })}
+                              >{user.status === "active" ? "禁用" : "启用"}</button>
+                              <button
+                                className="secondary"
+                                disabled={pendingUserId === user.id}
+                                onClick={() => void updateManagedUser(user, { role: user.role === "admin" ? "user" : "admin" })}
+                              >设为 {user.role === "admin" ? "user" : "admin"}</button>
+                              <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void resetManagedPassword(user)}>重置密码</button>
+                              <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void revokeManagedSessions(user)}>撤销会话</button>
+                              <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void toggleManagedWorkspaces(user)}>Workspace metadata</button>
+                            </div>
+                          </td>
+                        </tr>
+                        {expandedUserId === user.id ? (
+                          <tr className="metadata-row" key={`${user.id}-workspaces`}>
+                            <td colSpan={6}>
+                              {managedWorkspaces.length === 0 ? (
+                                <span className="muted">该用户没有 Workspace。</span>
+                              ) : (
+                                <ul>
+                                  {managedWorkspaces.map((workspace) => (
+                                    <li key={workspace.id}>
+                                      <strong>{workspace.name}</strong>
+                                      <span>{workspace.state} · {workspace.workerId ?? "未分配"} · {workspace.id}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        ) : null}
         {session.user.role === "admin" ? (
           <section className="worker-panel" aria-labelledby="worker-panel-title">
             <div className="section-heading">

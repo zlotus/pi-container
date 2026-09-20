@@ -31,6 +31,7 @@ export {
   type Phase1Repository,
   type UserRecord,
   type UserRole,
+  type UserStatus,
   type WorkspaceRecord,
 } from "./phase1.js";
 export {
@@ -69,3 +70,9 @@ export {
   type Phase8Repository,
   type PlatformAuditEvent,
 } from "./phase8.js";
+export {
+  createPhase9Repository,
+  type AdminUserRecord,
+  type Phase9Repository,
+  type UpdateManagedUserResult,
+} from "./phase9.js";

@@ -23,6 +23,7 @@ import type { Duplex } from "node:stream";
 import { z } from "zod";
 
 import type { WorkspaceSessionExchange } from "./session-exchange.js";
+import type { SessionConnectionRegistry } from "./session-connections.js";
 
 const ExchangeBodySchema = z.object({ code: z.string().min(32).max(256) }).strict();
 
@@ -41,11 +42,15 @@ export interface WorkspaceGatewayDependencies {
   sessionTtlMs: number;
   workerOfflineAfterMs: number;
   workerGatewayTokens: Readonly<Record<string, string>>;
+  sessionConnections?: SessionConnectionRegistry;
   now?: () => Date;
 }
 
 interface AuthorizedWorkspace {
   workspace: WorkspaceRecord;
+  userId: string;
+  sessionId: string;
+  sessionTokenHash: string;
   workerGatewayBaseUrl: URL;
   workerGatewayToken: string;
 }
@@ -157,9 +162,10 @@ async function resolveAuthorizedWorkspace(
     : "platform-session";
   const rawToken = parseCookie(request.headers.cookie, cookieName);
   if (rawToken === null) return null;
+  const sessionTokenHash = hashOpaqueToken(rawToken);
   const currentTime = dependencies.now?.() ?? new Date();
   const session = await dependencies.store.findActiveSession(
-    hashOpaqueToken(rawToken),
+    sessionTokenHash,
     currentTime,
   );
   if (session === null) return null;
@@ -191,6 +197,9 @@ async function resolveAuthorizedWorkspace(
   WorkerTokenSchema.parse(workerGatewayToken);
   return {
     workspace,
+    userId: session.user.id,
+    sessionId: session.sessionId,
+    sessionTokenHash,
     workerGatewayBaseUrl: parseHttpOrigin(route.gatewayBaseUrl),
     workerGatewayToken,
   };
@@ -355,6 +364,31 @@ export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies
       proxyWebSocketUpgrade(request, socket, head, {
         target: authorized.workerGatewayBaseUrl,
         requestHeaders: workerRequestHeaders(request, authorized, expectedOrigin),
+        onConnected: (disconnect) => {
+          const unregister = dependencies.sessionConnections?.register(
+            {
+              userId: authorized.userId,
+              sessionId: authorized.sessionId,
+            },
+            disconnect,
+          );
+          void dependencies.store
+            .findActiveSession(
+              authorized.sessionTokenHash,
+              dependencies.now?.() ?? new Date(),
+            )
+            .then((session) => {
+              if (
+                session === null ||
+                session.sessionId !== authorized.sessionId ||
+                session.user.id !== authorized.userId
+              ) {
+                disconnect();
+              }
+            })
+            .catch(disconnect);
+          return unregister;
+        },
       });
     })().catch(() => {
       rejectUpgrade(socket, 503, "Workspace Gateway is unavailable");

@@ -1,20 +1,31 @@
 # Project Progress
 
-Last reviewed: 2026-09-17
+Last reviewed: 2026-09-20
 
 ## Current Milestone
 
-Phase 0～7 及 Phase 7 post-acceptance cleanup 已完成人工验收。Phase 8 比赛展示增强的工程实现已完成：
-复用 pi-web Files 的 Artifact 主链、PostgreSQL-backed Platform Audit Trail、Worker/Workspace/安全/
-Runtime capability 展示、确定性平台 E2E、真实 Docker Runtime E2E 和比赛 runbook 均已落地并通过
-自动质量门。当前等待 Phase 8 人工验收；在验收结论前不声明 Phase 8 已验收，也不继续扩展功能。
+在现有 Phase 0～8 主链上，Phase 9 User Management Foundation 的工程实现与自动验证已完成。
+`active | disabled` 生命周期、Admin Users、Local User 创建、role/password/session 管理、只读 User
+Workspace metadata、最后一个 active Local Admin 保护，以及 Portal/Workspace Host/WebSocket 的统一
+fail-closed 均已落地。当前等待 Phase 9 人工验收；本轮没有实现 OIDC/OAuth2 或 Phase 10+。
 
 ## Current Baseline
 
 - `packages/auth` 使用 Node.js scrypt、随机 salt、opaque session token hash 和
   session-bound HMAC CSRF token，不保存明文密码或 Portal session token。
-- `packages/database` 提供幂等 migration 和 Phase 1～6 repository；users、server-side
+- `packages/database` 提供幂等 migration 和 Phase 1～9 repository；users、server-side
   sessions、workspaces、workers 与预注册 `gateway_base_url` 均持久化到 PostgreSQL。
+- `0006_phase9_users` 为既有 User 增量增加 `status`、`last_login_at` 与 `updated_at`；现有用户回填为
+  `active`，不改主键、Workspace ownership 或 Local password schema。
+- Local login、Portal API、Workspace Host HTTP 与 WebSocket handshake 都通过 server-side session
+  联表回查 active User。disable 会在同一事务 revoke 该用户全部 session；Admin revoke、disable 与
+  logout 还会主动断开当前单 Control Plane 进程内已建立的 Workspace WebSocket，握手登记后再做一次
+  session 校验以关闭 revoke/disable 竞态窗口。
+- Admin Users API/UI 支持列表、创建普通 Local User、enable/disable、`user/admin` 切换、Local password
+  reset、session revoke 与只读 Workspace metadata。请求 schema 严格拒绝 role 注入、destructive delete
+  和 ownership 改写；admin 的普通 Workspace API 仍只返回自己的 Workspace。
+- 禁用或降级最后一个 active Local Admin 的操作在 PostgreSQL advisory-lock 保护的事务内被拒绝，保留
+  break-glass 登录入口。Phase 9 没有引入 external identity、复杂 RBAC 或 authentication audit 事件。
 - Phase 6 migration 为 Workspace 持久化 `RUNNING | STOPPED | DELETED | UNKNOWN` desired state；start、
   stop、delete 在发 Worker 命令前先持久化 intent。Control Plane 启动会把旧 ONLINE/assigned state
   统一 fail-closed 为 offline，避免重启前 heartbeat/state 继续放行 Gateway。
@@ -105,13 +116,14 @@ Runtime capability 展示、确定性平台 E2E、真实 Docker Runtime E2E 和�
 
 ## In Progress
 
-Phase 8 工程实现与自动验证已完成，当前停在人工验收边界；没有进行中的功能扩展。
+Phase 9 工程实现与自动验证已完成，当前停在人工验收边界；没有进行中的 Phase 10+ 扩展。
 
 ## Next
 
-1. 按 `docs/demo-runbook.md` 在目标浏览器、真实模型和比赛多主机网络中完成人工验收。
-2. 记录人工验收结论；如发现问题，只做证据驱动的 Phase 8 修复或明确授权的 post-acceptance cleanup。
-3. 在收到人工结论前停止扩展，不进入 Kubernetes、复杂 RBAC、多 Agent、GPU scheduling 等 MVP 外范围。
+1. 按 `specs.md` Phase 9 的 10 步清单，在目标浏览器用现有 Local Admin 与 `user-phase9` 完成人工验收。
+2. 重点确认已打开的 Portal/Workspace/WebSocket 在 disable/revoke 后立即拒绝或断开，enable 后原
+   Workspace 与 `/workspace` 数据保持不变。
+3. 记录人工验收结论；在明确授权前不进入 Phase 10 OIDC 或其他后续范围。
 
 ## Risks And Blockers
 
@@ -122,6 +134,9 @@ Phase 8 工程实现与自动验证已完成，当前停在人工验收边界；
   TLS termination、proxy timeout 和目标防火墙规则尚未验收。
 - session exchange 存储是单 Control Plane 进程内、短时且 fail-closed；Control Plane restart
   会使尚未消费的 code 失效。Phase 4 单实例不引入 Redis/多实例共享状态。
+- Phase 9 对已建立 WebSocket 的主动撤销使用同一 Control Plane 进程内连接注册表；这与当前单实例
+  边界一致。未来若引入多 Control Plane，必须增加跨实例 revocation fan-out，不能把当前机制宣称为
+  多实例一致撤销。
 - `*.agent.localhost` 仅适合单机开发；跨主机验收已使用 `nip.io` wildcard 示例。生产必须配置
   受管内部 wildcard DNS，不能回退到 `/w/<id>/` base-path rewrite，也不能把 `nip.io` 当作生产依赖。
 - 2026-09-14 记录的 Phase 7 自动 Docker 验证仅覆盖 arm64；当时本机没有 amd64/binfmt Docker
@@ -138,6 +153,15 @@ Phase 8 工程实现与自动验证已完成，当前停在人工验收边界；
   但目标模型 Prompt streaming、Terminal 交互、比赛浏览器视觉和真实多主机网络仍需人工验收。
 
 ## Verification
+
+- 2026-09-20：Phase 9 根静态门通过 `pnpm lint`、`pnpm typecheck`、`pnpm build:web` 与
+  `git diff --check`。使用健康的 PostgreSQL 17.6 容器创建临时空数据库，从零执行 `0001`～`0006`
+  后串行运行全仓测试，101 passed；仅 6 个需要显式 Docker 开关的 Worker 条件测试按设计跳过。
+- 2026-09-20：`pnpm test:e2e` 通过 Control Plane/Gateway 33/33 与 Worker Gateway 2/2；Phase 9
+  回归覆盖非 admin 拒绝、普通 Local User 创建、status/role/password/session 管理、最后一个 Local
+  Admin 保护、ownership 不可改写、Workspace Host session 失效、已建立 WebSocket 主动断开与握手竞态。
+- 2026-09-20：`pnpm test:e2e:runtime` 复用既有 `agent-runtime:phase7-toolchain`，真实 Docker Runtime
+  6/6 通过；Phase 9 未修改 Worker Protocol、Scheduler、Runtime Image 或 pi-web 集成逻辑。
 
 - 2026-09-16：Phase 8 根质量门通过 `pnpm lint`、`pnpm typecheck`、`pnpm test`（77 passed，10 个
   PostgreSQL/真实 Docker 条件测试按设计跳过）、`pnpm build:web` 与 `git diff --check`。

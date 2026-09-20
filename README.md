@@ -4,13 +4,16 @@
 [pi-web](https://github.com/agegr/pi-web) 与 Pi Coding Agent，自身只负责认证、
 Workspace、Worker、Docker 生命周期、调度和安全代理。
 
-当前仓库已在已验收的 Phase 0～7 基线上实现 **Phase 8：比赛展示增强与最终收口**。Runtime 现包含
+当前仓库已在 Phase 0～8 主链上完成 **Phase 9：User Management Foundation** 的工程实现，等待
+人工验收。平台在既有本地认证与 Workspace ownership 上新增 `active | disabled` 用户生命周期、
+Admin Users 页面、Local User 创建、启停、role 修改、密码重置、session revoke 与只读 Workspace
+metadata 查看；不包含 OIDC/OAuth2，也不允许 admin 直接进入其他用户 Workspace 内容。Runtime 现包含
 Python/uv、Node/pnpm、Rust、build tools、ffmpeg、PDF/Office 工具、Playwright/Chromium 和克制的
 Linux/network debugging CLI；Worker 在 hello 前通过本机精确镜像的实际探针上报 capability，不按
 architecture 猜测。Portal 现在展示 Worker/Workspace placement、能力、容量和结构化
 Platform Audit Trail。Artifact 继续复用 pi-web 的 `/workspace` Files 查看/下载，不复制文件或 Pi
-message/tool stream。Phase 8 工程实现等待人工验收；仓库记录的 ARM64 工程验证已通过，AMD64 native
-自动验证记录仍待补齐。HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其
+message/tool stream。仓库记录的 ARM64 工程验证已通过，AMD64 native 自动验证记录仍待补齐。
+HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其
 Chat、Terminal 或 streaming 实现。
 
 ## Prerequisites
@@ -58,8 +61,8 @@ Runtime 已安装 `ping` binary，但默认 Workspace 使用 `CapDrop=ALL`，ICM
 
 ## Create local users
 
-本地账户不开放公共注册。为验收创建两个账户时，分别执行以下命令，并为每次命令设置不同
-的邮箱、用户名和密码：
+本地账户不开放公共注册。已有 admin 可在 Portal 的 Admin Users 页面创建普通 Local User，并执行
+启停、role、密码与 session 管理。首次部署或恢复 break-glass Local Admin 时，使用以下运维命令：
 
 ```bash
 export LOCAL_USER_EMAIL=user-a@example.internal
@@ -71,8 +74,9 @@ pnpm user:create
 unset LOCAL_USER_PASSWORD
 ```
 
-密码至少 12 个字符，以 scrypt 和随机 salt 保存。`LOCAL_USER_USERNAME` 可省略。查看
-Worker 管理页的账户应将 `LOCAL_USER_ROLE` 设置为 `admin`。
+密码至少 12 个字符，以 scrypt 和随机 salt 保存。`LOCAL_USER_USERNAME` 可省略。首次创建的
+break-glass 账户应将 `LOCAL_USER_ROLE` 设置为 `admin`；Admin API 会拒绝禁用或降级最后一个
+`active` Local Admin。Admin Users 的创建接口固定创建普通 `user`，需要升权时再走独立 role 操作。
 
 ## Single-host local development
 
@@ -335,8 +339,19 @@ POST   /api/workspaces/:id/start
 POST   /api/workspaces/:id/stop
 POST   /api/workspaces/:id/open
 GET    /api/admin/workers
+GET    /api/admin/users
+POST   /api/admin/users
+PATCH  /api/admin/users/:id
+POST   /api/admin/users/:id/reset-password
+POST   /api/admin/users/:id/revoke-sessions
+GET    /api/admin/users/:id/workspaces
 WS     /api/workers/connect
 ```
+
+所有 Admin Users 写操作都要求 active admin session、exact-match Portal Origin 与 session-bound CSRF。
+`disabled` User 不能登录；disable/revoke 后 Portal 与 Workspace Host 的 Cookie 会在服务端立即失效，
+已建立的 Workspace WebSocket 也会被断开。User 管理 API 不提供 destructive delete 或 Workspace
+ownership 改写。
 
 首次启动会从当前 Control Plane 已认证连接、在线、enabled、heartbeat 新鲜、容量未满且
 Runtime image/架构/capability 兼容的 Worker 中选择。load score 为 PostgreSQL 中该 Worker 的

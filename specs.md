@@ -5,7 +5,7 @@
 **Prototype Product & Technical Specification**
 
 版本：`0.2 MVP`
-状态：原型设计稿
+状态：原型设计稿；Phase 0–8 为既有主链，Phase 9–12 为用户管理与企业认证增量规划
 核心依赖：`pi-web + pi-agent + Docker`
 
 ---
@@ -176,8 +176,6 @@ MVP：
 - Python
 - ffmpeg
 - 编译工具
-
-镜像体积较大。
 
 如果：
 
@@ -1114,11 +1112,11 @@ MVP 使用 local persistent storage：
 
 # 29. 用户与权限
 
-MVP：
+基础 role 保持：
 
 ```text
-User
-Admin
+user
+admin
 ```
 
 User：
@@ -1132,30 +1130,78 @@ Admin：
 - 查看 Worker
 - 查看 Workspace placement
 - disable Worker scheduling
+- 查看用户列表与用户状态
+- 创建 Local User
+- enable / disable User
+- 修改 `user/admin`
+- 重置 Local User 密码
+- revoke User sessions
+- 查看某用户的 Workspace metadata
 
-Admin 不必默认访问用户 Workspace 内容。
+Admin **不因 admin role 自动获得用户 Workspace 内容访问权**。已有 Workspace ownership 边界保持不变；如果未来需要 support impersonation / break-glass content access，必须另做显式设计与 Audit，不在 Phase 9–12 范围。
+
+用户删除不是日常管理动作。Phase 9–12 以：
+
+```text
+active
+disabled
+```
+
+作为用户生命周期主状态。避免因为删除 User 连带破坏 Workspace、Audit 与历史 metadata。
 
 ---
 
 # 30. Authentication
 
-MVP 可本地账户：
+平台支持两类登录入口：
 
 ```text
-email / username
-password
+Local Account
+External Identity Provider
 ```
 
-要求：
+Local Account 延续 Phase 1 已有用户名/邮箱 + 密码登录。
 
-- modern password hash
+External Identity Provider：
+
+```text
+OIDC                <- 标准路径，Phase 10
+OAuth2 + UserInfo   <- 兼容路径，仅在 Phase 11 有明确需要时实现
+```
+
+认证与授权边界固定为：
+
+```text
+OIDC / OAuth2
+    |
+    v
+External Identity
+    |
+    v
+Platform User
+    |
+    v
+Platform server-side session
+    |
+    v
+Authorization / Workspace ownership
+```
+
+**IdP token 不是平台内部通用 session。**
+
+OIDC/OAuth2 完成后，后续 Portal API、Workspace Host、Gateway、HTTP/WebSocket proxy 仍使用平台自己的 server-side session 和既有 Workspace ownership 逻辑。
+
+Local 与 External login 共同要求：
+
+- modern password hash（Local Account）
 - HTTP-only cookie
 - HTTPS 时 Secure
-- CSRF 策略与选用 Auth 方式匹配
+- CSRF 策略与 Auth 方式匹配
 - Server-side ownership check
+- `users.status=disabled` 必须 fail-closed
+- session revoke 必须立即使服务端 session 无效
 
-由于 Portal 与 `<workspace-id>.agent.example.internal` 分属不同 Host，MVP 不依赖一个
-宽域 `Domain=.agent.example.internal` Cookie 覆盖所有 Workspace。固定采用：
+由于 Portal 与 `<workspace-id>.agent.example.internal` 分属不同 Host，平台继续沿用既有 session exchange 设计，不因为引入 OIDC 改成宽域 Cookie：
 
 1. Portal 登录建立 server-side session，并设置 `Secure`、`HttpOnly`、`SameSite=Lax`
    的 `__Host-` host-only Cookie；
@@ -1171,32 +1217,128 @@ password
    `PORTAL_ALLOWED_ORIGINS` allowlist 中的 exact-match `Origin`（不允许 wildcard 或 `*`），
    WebSocket upgrade 校验 session、`Origin`、Host 与 Workspace ownership。
 
-服务端注销或失效 session 后，Portal 和各 Workspace Host 的 Cookie 即使仍存在也不得
-继续获得访问权限。
+服务端注销、User disable 或 session revoke 后，Portal 和各 Workspace Host 的 Cookie 即使仍存在也不得继续获得访问权限。
 
-Runtime 内 pi-web 的 `PI_WEB_PASSWORD` 在 MVP 默认不启用。平台用户只登录一次，由 Control Plane / Gateway 完成身份认证和 Workspace ownership 授权。
+Runtime 内 pi-web 的 `PI_WEB_PASSWORD` 默认不启用。平台用户只登录一次，由 Control Plane / Gateway 完成身份认证和 Workspace ownership 授权。
 
 该设计依赖网络边界：用户不能直接访问 pi-web，也不能绕过 Control Plane 直接访问 Worker Gateway。
 
-未来再加：
+## 30.1 OIDC 固定原则
 
-- OIDC
-- LDAP
-- 企业 SSO
+Phase 10 先支持 **一个 Generic OIDC Provider**，不要一开始设计 multi-provider framework。
+
+要求使用：
+
+```text
+Authorization Code Flow
+PKCE
+state
+nonce
+issuer validation
+audience/client_id validation
+redirect URI exact match
+```
+
+External Identity 的稳定键：
+
+```text
+(provider_id, subject)
+```
+
+其中 `subject` 对应 OIDC `sub`。
+
+禁止：
+
+```text
+email == identity primary key
+```
+
+email、display name 只作为 profile snapshot / display data；不得因为 email 相同就静默把两个外部身份合并成同一 Platform User。
+
+OIDC Provider 第一版优先通过服务端配置 / environment 配置，不要求先做 Provider CRUD UI。client secret 不得返回 Browser、写入 Audit details 或注入 Workspace。
+
+## 30.2 Local Admin / break-glass
+
+平台必须保留至少一个可用的 Local Admin 管理入口。
+
+引入 OIDC 后不得出现：
+
+> IdP 配置错误 / IdP 故障 -> 所有管理员都无法登录 -> 无法修复 IdP 配置
+
+Phase 9–12 不要求自研 MFA；如企业要求 MFA，应交给上游 IdP。
 
 ---
 
 # 31. 数据模型
 
+既有主键与 Workspace ownership 不重构，以增量 migration 为主。
+
 ## users
+
+建议在当前 users 基础上补齐：
 
 ```text
 id uuid
-email text
-password_hash text
-role text
+email text nullable
+username text nullable
+display_name text nullable
+password_hash text nullable
+role text                  # user | admin
+status text                # active | disabled
+last_login_at nullable
 created_at
+updated_at
 ```
+
+约束：
+
+- Local User 必须存在可登录的 local identifier 与 `password_hash`。
+- External-only User 可以没有 `password_hash`。
+- `role` 与 `status` 属于 Platform User，而不是由 IdP token 每次直接覆盖。
+- External Identity 默认创建/绑定后 role 仍为 `user`，除非平台 admin 显式修改。
+
+具体字段命名应优先兼容当前已实现 schema；如果代码现状与上述名称不同，使用最小 migration 保持语义，不为了文档重命名既有字段。
+
+## user_identities
+
+Phase 10 新增：
+
+```text
+id uuid
+user_id uuid
+provider_id text
+provider_subject text
+email_snapshot text nullable
+display_name_snapshot text nullable
+created_at
+last_login_at nullable
+```
+
+必须有：
+
+```text
+UNIQUE(provider_id, provider_subject)
+```
+
+不要对 `email_snapshot` 做身份唯一约束。
+
+Phase 10 单 Provider 时 `provider_id` 仍保留，避免以后 migration 时把 identity 语义重新拆表。
+
+## auth provider configuration
+
+Phase 10 第一版优先通过服务端配置：
+
+```text
+AUTH_OIDC_ENABLED
+AUTH_OIDC_ISSUER
+AUTH_OIDC_CLIENT_ID
+AUTH_OIDC_CLIENT_SECRET
+AUTH_OIDC_AUTO_PROVISION
+```
+
+Provider secret 不进入普通数据库 API / Browser。
+
+如果 Phase 11 后确有 multi-provider 管理需求，再独立设计 `auth_providers` 表；不要在 Phase 10 提前实现。
 
 ## workers
 
@@ -1238,7 +1380,7 @@ last_activity_at
 
 ## platform_audit_events
 
-仅保存追加式平台基础设施事件：
+仅保存追加式平台基础设施与认证管理事件：
 
 ```text
 id bigint cursor
@@ -1251,7 +1393,7 @@ details jsonb
 created_at
 ```
 
-例如：
+既有例如：
 
 ```text
 workspace.created
@@ -1264,10 +1406,37 @@ worker.runtime_reported
 worker.offline
 ```
 
+Phase 12 增加例如：
+
+```text
+auth.login_succeeded
+auth.login_failed
+auth.logout
+auth.session_revoked
+user.created
+user.enabled
+user.disabled
+user.role_changed
+user.password_reset
+identity.bound
+identity.unbound
+```
+
 Workspace/Worker 的数据库生命周期事件与状态变更在同一事务追加，避免状态已经生效但 Audit 漏记。
 Workspace 删除后 Audit 仍保留，因此 subject ID 不作为级联删除外键。普通用户只能查询
-`owner_user_id` 为自己的事件；admin 可以查看平台事件。`details` 只允许平台控制的结构化 metadata，
-不得保存 Cookie、session exchange code、credential、Prompt、Pi message/tool stream 或文件内容。
+`owner_user_id` 为自己的 Workspace 事件；admin 可以查看平台事件。
+
+`details` 只允许平台控制的结构化 metadata，不得保存：
+
+- Cookie
+- session token / exchange code
+- password / password hash
+- OIDC authorization code
+- access token / refresh token / ID token 原文
+- OAuth/OIDC client secret
+- Prompt
+- Pi message/tool stream
+- 文件内容
 
 ## artifacts
 
@@ -1289,11 +1458,59 @@ created_at
 
 ## Auth
 
+既有：
+
 ```text
 POST /api/auth/login
 POST /api/auth/logout
 GET  /api/me
 ```
+
+Phase 10 新增：
+
+```text
+GET /auth/oidc/login
+GET /auth/oidc/callback
+```
+
+具体 callback path 可以根据当前 Web 框架约定调整，但必须固定、可配置为 IdP exact redirect URI，不允许 open redirect。
+
+Phase 11 如实现 OAuth2 compatibility，应与 OIDC adapter 边界分离，不要把不同协议验证逻辑揉成一个宽松 callback。
+
+## Admin Users
+
+Phase 9 增加语义等价 API：
+
+```text
+GET    /api/admin/users
+POST   /api/admin/users
+PATCH  /api/admin/users/:id
+POST   /api/admin/users/:id/reset-password
+POST   /api/admin/users/:id/revoke-sessions
+GET    /api/admin/users/:id/workspaces
+```
+
+具体 REST path 可按现有代码风格微调，但必须覆盖：
+
+- list
+- create Local User
+- enable / disable
+- role change
+- password reset
+- session revoke
+- read-only Workspace metadata lookup
+
+禁止通过通用 PATCH 暗中支持 user destructive delete。
+
+Phase 11 identity management 可增加：
+
+```text
+GET    /api/admin/users/:id/identities
+POST   /api/admin/users/:id/identities/...     # 仅在有明确人工绑定流程时
+DELETE /api/admin/users/:id/identities/:identityId
+```
+
+所有 identity bind/unbind 必须有严格 authorization 与 Audit。
 
 ## Workspace
 
@@ -1331,7 +1548,7 @@ GET /api/audit-events?limit=30&before=<event-id>
 ```
 
 返回倒序、cursor pagination 的结构化平台事件。普通用户只看到自己的 Workspace 事件；admin 可看到
-全平台 Workspace/Worker 事件。响应禁止缓存，不提供 Pi conversation 或 tool stream 导出。
+全平台 Workspace/Worker/Authentication 管理事件。响应禁止缓存，不提供 Pi conversation 或 tool stream 导出。
 
 ## Proxy
 
@@ -1680,6 +1897,8 @@ MVP：
 用户通过 pi-web 配置的模型凭据可能由 Pi 持久化到 `/agent/pi`，该目录必须按 Workspace
 隔离、不得进入 Artifact，并以当前 pinned Pi 的实际格式为准。
 
+OIDC/OAuth2 的 `client_secret`、authorization code、access token、refresh token、ID token 原文属于 Control Plane authentication secret，**不得注入 Runtime**。
+
 未来再做 per-user Secret。
 
 ---
@@ -1810,6 +2029,15 @@ User A -> Workspace B = 403/404
 
 > 已经建立 WebSocket 后是否可以通过参数切换到另一个 Workspace。
 
+Phase 9–12 增加：
+
+```text
+disabled User -> Portal API = 401/403
+disabled User -> existing Workspace Host session = denied
+revoked session -> existing Portal/Workspace cookies cannot continue
+OIDC login -> still cannot access another user's Workspace
+```
+
 ---
 
 # 48. Worker 安全测试
@@ -1826,6 +2054,7 @@ User A -> Workspace B = 403/404
 - Container path 不来自用户直接输入
 - Worker credential 不能冒充其他 `worker_id`
 - Workspace A 不能连接 Workspace B 或 Worker management endpoint
+- Runtime 中不存在 OIDC/OAuth2 provider credential 或用户 SSO token
 
 ---
 
@@ -1927,6 +2156,8 @@ Vitest
 Playwright
 ```
 
+OIDC 应优先使用成熟、维护中的标准协议库完成 discovery / token validation / PKCE 等基础协议工作，不自行手写 JWT / JWK / signature validation。
+
 ## Worker
 
 ```text
@@ -1988,10 +2219,20 @@ pi-agent
 
 ## Login
 
+Phase 9：
+
 ```text
-username
+username / email
 password
 ```
+
+Phase 10 在同一 Login 页面增加：
+
+```text
+Sign in with SSO
+```
+
+不要为了 OIDC 自己实现 IdP 风格复杂登录页。跳转、MFA、条件访问等交给上游 IdP。
 
 ## Workspace List
 
@@ -2019,7 +2260,31 @@ worker-a      ONLINE   amd64    3/8
 worker-b      ONLINE   arm64    2/4
 ```
 
-点击 Open 后进入：
+## Admin Users
+
+Phase 9 增加紧凑用户管理页，例如：
+
+```text
+User          Source      Role     Status      Workspace
+zhangsan      OIDC        user     active      3
+lisi          Local       user     disabled    1
+admin         Local       admin    active      0
+```
+
+需要的管理动作仅限：
+
+```text
+Create Local User
+Enable / Disable
+Change Role
+Reset Local Password
+Revoke Sessions
+View Workspace Metadata
+```
+
+Phase 11 可展示 Identity binding，但不要做 Organization / Department / group-policy 管理后台。
+
+点击 Open Workspace 后进入：
 
 ```text
 pi-web
@@ -2302,6 +2567,318 @@ Phase 8 验收：
 
 ---
 
+## Phase 9：User Management Foundation
+
+目标：
+
+> 在不改变 Workspace / Worker / Runtime 主链的前提下，把 Phase 1 的基础本地登录补成可管理的 Platform User 生命周期。
+
+本阶段 **不接 OIDC**。
+
+完成：
+
+- 兼容现有 User schema 的增量 migration
+- `user | admin` 保持不变
+- User `active | disabled`
+- Admin Users 页面
+- 创建 Local User
+- enable / disable User
+- change role
+- reset Local User password
+- revoke sessions
+- 查看用户 Workspace metadata
+- 保留至少一个 Local Admin / break-glass 管理入口
+- 对 Portal API、Workspace Host session、Gateway/WebSocket 统一执行 disabled-user / revoked-session fail-closed
+
+约束：
+
+- 不实现 User destructive delete
+- 不实现复杂 RBAC
+- admin 不自动获得用户 Workspace 内容权限
+- 不修改 Worker Protocol
+- 不修改 Runtime Image
+- 不为了用户管理重写既有 session exchange 机制
+
+自动测试至少覆盖：
+
+- 非 admin 访问 `/api/admin/users*` 被拒绝
+- admin 可以创建普通 Local User
+- 新用户可以登录并只看到自己的 Workspace
+- disabled User 不能新登录
+- 已登录 User 被 disabled 后，已有 Portal session 与 Workspace Host session 均失效
+- revoke sessions 后，既有 Cookie 不能继续使用
+- role change 生效且不能通过客户端字段伪造 admin
+- password reset 后旧密码失效
+- 不能通过用户管理 API 改写其他用户的 Workspace ownership
+
+人工验收：
+
+1. 用现有 admin 登录。
+2. 打开 Admin Users，创建 `user-phase9`。
+3. 使用新用户登录并创建/打开自己的 Workspace。
+4. admin 将该用户 disable。
+5. 已打开 Portal 和 Workspace 页面刷新/继续请求均被拒绝。
+6. 重新 enable，用户可再次登录，原 Workspace 和数据保持不变。
+7. admin reset password，验证旧密码失败、新密码成功。
+8. admin revoke sessions，验证当前会话立即失效。
+9. 将测试用户 role 改为 admin，再改回 user，验证 Admin 页面权限随服务端 role 变化。
+10. 回归 Phase 4/5/6 主链：Gateway、Worker、Runtime、sticky placement、Stop/Start 不受影响。
+
+---
+
+## Phase 10：Generic OIDC
+
+目标：
+
+> 在 Phase 9 的 Platform User / Session 之上增加一个标准 OIDC 登录入口，不改变下游授权模型。
+
+第一版只支持：
+
+```text
+1 Generic OIDC Provider
+```
+
+Provider 配置优先采用服务端 config / environment，不做 multi-provider Admin UI。
+
+完成：
+
+- OIDC discovery / issuer 配置
+- Authorization Code Flow
+- PKCE
+- `state`
+- `nonce`
+- ID token 标准校验
+- issuer / audience(client_id) 校验
+- exact redirect URI
+- `user_identities`
+- `(provider_id, provider_subject)` 唯一身份
+- OIDC callback -> Platform User -> 现有 server-side session
+- Login 页面增加 SSO 入口
+- unknown identity 默认按 `auto_provision=false` 拒绝
+- Local Admin 继续可登录
+
+本阶段默认：
+
+```text
+AUTH_OIDC_AUTO_PROVISION=false
+```
+
+即管理员必须先准备 Platform User / identity binding，或通过本阶段规定的最小预绑定机制建立关系；不要因为 email 相同就自动绑定。
+
+如果实现时发现“完全不提供任何绑定入口会导致 Phase 10 无法人工验收”，允许实现一个**仅 admin 可用、最小化、明确 subject/provider 的预绑定入口**，但不要提前做 Phase 11 的完整 provisioning UI。
+
+安全要求：
+
+- 不手写 JWT signature / JWK validation
+- authorization code 只能在服务端交换
+- access/refresh/ID token 原文不进入普通日志/Audit/Browser storage
+- External Identity 登录成功后仍检查 User `status`
+- External Identity 不自动成为 admin
+- OIDC token 不进入 Workspace Container
+- callback 不允许 open redirect
+- 登录失败返回稳定错误，不回显 provider secret/token 原文
+
+自动测试至少覆盖：
+
+- state mismatch 拒绝
+- nonce mismatch 拒绝
+- issuer mismatch 拒绝
+- audience mismatch 拒绝
+- expired/invalid token 拒绝
+- unknown identity + auto_provision=false 拒绝
+- known active identity 登录成功并得到 Platform session
+- known disabled User 即使 IdP 认证成功也拒绝
+- 同 email、不同 `(provider, sub)` 不会静默合并
+- OIDC User 仍不能访问其他 User Workspace
+- Runtime env / managed metadata 中不存在 IdP token/client secret
+
+人工验收建议使用一个可控测试 IdP（例如企业现有 OIDC、Keycloak/Authentik 测试实例或等价标准 Provider）：
+
+1. Local Admin 正常登录。
+2. 配置一个 OIDC client 与 callback。
+3. 为测试用户建立明确 identity binding。
+4. 从 Login 点击 SSO，完成 IdP 登录。
+5. 回到 Portal 后显示对应 Platform User。
+6. 打开其既有 Workspace，Gateway / WebSocket / Terminal 正常。
+7. disable 该 Platform User，再次 SSO 应被拒绝。
+8. 暂停/错误配置 OIDC 后，Local Admin 仍能进入平台处理配置。
+9. 回归 Local login、Workspace、Worker、Runtime 主链。
+
+---
+
+## Phase 11：Provisioning / Identity Binding / OAuth2 Compatibility
+
+目标：
+
+> 在单 OIDC 登录已经稳定后，再补齐账号建立策略和少量企业兼容能力；不把平台扩成通用 IAM。
+
+完成优先级：
+
+### 11.1 Provisioning
+
+支持两种明确模式：
+
+```text
+manual provisioning
+JIT auto provisioning
+```
+
+默认仍建议：
+
+```text
+auto_provision=false
+```
+
+当开启 JIT：
+
+- 新 External Identity 可创建 Platform User
+- 默认 `role=user`
+- 不允许 IdP claim 直接授予 admin
+- 可选 `allowed_domains` allowlist
+- 如实现 group allowlist，只用于“允许登录/创建”这种简单 gate，不实现通用 group policy / RBAC
+
+### 11.2 Identity Binding
+
+Admin 可以查看：
+
+```text
+Platform User
+  -> External Identities
+```
+
+支持明确的 bind / unbind。
+
+约束：
+
+- bind 目标必须由稳定的 provider + subject 标识
+- 不允许仅凭 email 自动绑定
+- unbind 前确保用户仍有至少一个可用登录方式；尤其不能让最后一个 Local Admin 被锁死
+- 所有 bind/unbind 写 Audit
+
+### 11.3 OAuth2 + UserInfo Compatibility（可选）
+
+只有实际企业系统不支持 OIDC 时才实现。
+
+配置概念：
+
+```text
+authorization_url
+token_url
+userinfo_url
+
+subject_field
+username_field
+email_field
+display_name_field
+```
+
+要求：
+
+- 仍然映射为 `External Identity -> Platform User`
+- `subject_field` 必须是 Provider 内稳定标识
+- 不因 OAuth2 compatibility 降低 OIDC 原有校验
+- Provider-specific 字段映射集中在 adapter，不散落到 User / Workspace / Gateway
+- access token 仅在 Control Plane 调 UserInfo 所需的最短生命周期内使用，不进入 Runtime
+
+不做：
+
+- LDAP 全量 sync
+- SCIM
+- Organization / Department hierarchy
+- group -> arbitrary RBAC
+- Workspace sharing
+- 自研 MFA
+
+自动测试至少覆盖：
+
+- manual provisioning
+- JIT off / on 两种行为
+- JIT User 默认 role=user
+- allowed domain 拒绝与允许
+- bind/unbind authorization
+- 同 email 不自动合并
+- 最后可用登录方式保护
+- OAuth2 UserInfo 字段缺失/类型错误 fail-closed（如果实现 compatibility）
+- OAuth2 token 不进入 Runtime / Audit
+
+人工验收：
+
+1. 验证 manual provisioning 正常。
+2. 打开 JIT 后用一个全新 OIDC subject 首次登录，自动产生 `role=user` 的 Platform User。
+3. 验证其不能访问 Admin。
+4. 验证 allowed domain 策略。
+5. 在 Admin Users 查看该用户 identity。
+6. 测试 bind / unbind。
+7. 如当前企业系统需要 OAuth2 compatibility，再用真实/测试 UserInfo endpoint 联调字段映射；若不需要，本小节可以保持未实现并在 Phase 结果中明确说明。
+
+---
+
+## Phase 12：Authentication Audit / Hardening
+
+目标：
+
+> 把 Phase 9–11 的认证功能纳入现有 Platform Audit 与安全回归，使其达到可演示、可运维、可排障状态。
+
+完成：
+
+- Authentication / User Management Audit events
+- login success / failure
+- logout
+- session revoke
+- user create / enable / disable
+- role change
+- password reset（只记动作，不记密码）
+- identity bind / unbind
+- OIDC/OAuth2 failure 的安全分类日志
+- session fixation regression
+- CSRF regression
+- redirect / callback validation
+- Cookie security regression
+- disabled user / revoked session regression
+- Workspace Host session exchange regression
+- WebSocket auth regression
+- token / secret redaction test
+- README / deployment config / runbook 更新
+- OIDC 故障时 Local Admin break-glass runbook
+
+Audit 原则：
+
+- `auth.login_failed` 可以记录 provider、稳定错误类别、request correlation、IP/user-agent 等必要 metadata
+- 不记录 password
+- 不记录 authorization code
+- 不记录 access/refresh/ID token 原文
+- 不记录 client secret
+- 不把完整 UserInfo response 原样写入 Audit
+- 不把 Pi conversation/tool stream 混入认证 Audit
+
+自动测试至少覆盖：
+
+- session fixation：登录前 session id 不可被固定后继续复用为认证 session
+- CSRF：Local 与 OIDC 引入后既有 state-changing API 保护不退化
+- callback open redirect 被拒绝
+- Cookie `HttpOnly` / `Secure`（生产配置）/ `SameSite` / host-only 语义
+- logout / disable / revoke 后 Portal + Workspace Host + WebSocket 一致失效
+- OIDC/OAuth2 secret redaction
+- Audit authorization：普通用户不能读取 admin-only auth events
+- Phase 4–8 E2E 全量回归
+
+人工验收：
+
+1. 完成一次 Local login / logout。
+2. 完成一次 OIDC login。
+3. 故意制造一次 OIDC failure。
+4. admin disable / enable 一个用户。
+5. change role。
+6. reset password。
+7. revoke sessions。
+8. 检查 Audit：事件完整，但没有任何 credential/token/password/Pi 内容。
+9. 验证已有 Workspace HTTP / SSE / WebSocket / Terminal / Files / Stop/Start / recovery 不退化。
+10. 按 runbook 模拟 IdP 不可用，Local Admin 仍可进入并排障。
+
+**Phase 12 完成后，Phase 9–12 才视为一个完整的 User Management / Enterprise Authentication 增量里程碑。**
+
+---
+
 # 56. 比赛 Demo
 
 推荐完整演示：
@@ -2405,6 +2982,19 @@ Stop Workspace。
 
 文件与 Pi Session 恢复。
 
+Phase 9–12 完成后可在不替换上述主 Demo 的情况下补充一个很短的企业认证展示：
+
+```text
+Local Admin
+-> Admin Users
+-> OIDC User SSO
+-> same Workspace/Gateway/Runtime path
+-> disable User
+-> access immediately denied
+```
+
+重点展示“认证入口可替换，但 Platform User / Workspace ownership / Runtime 主链不变”。
+
 ---
 
 # 57. 与 Dify 类系统的区别
@@ -2462,6 +3052,15 @@ Authenticated gateway
 Platform lifecycle
 ```
 
+Phase 9–12 进一步补充：
+
+```text
+User lifecycle
+OIDC enterprise login
+External identity binding
+Auth audit
+```
+
 因此 pi-web 是底层 Runtime 产品，而不是竞争关系。
 
 ---
@@ -2484,13 +3083,25 @@ Docker 提供：
 
 > hostile arbitrary code VM sandbox。
 
+OIDC / OAuth2 提供身份认证入口，但不等于：
+
+> 完整 IAM / Zero Trust Identity Platform。
+
 文档必须准确说明。
 
 ---
 
 # 60. 后续方向
 
-MVP 后再考虑：
+Phase 9–12 已纳入当前规划：
+
+- User Management
+- Generic OIDC
+- Provisioning / Identity Binding
+- 可选 OAuth2 + UserInfo compatibility
+- Authentication Audit / Hardening
+
+这些完成后再考虑：
 
 - Human-in-the-loop approval
 - egress ACL
@@ -2502,7 +3113,9 @@ MVP 后再考虑：
 - gVisor
 - Kata
 - microVM
-- OIDC
+- LDAP directory sync
+- SCIM
+- complex RBAC / organization hierarchy
 - per-user Secret
 - GPU Worker
 - quota
@@ -2560,6 +3173,23 @@ MVP 后再考虑：
 - [ ] README 有单机部署说明。
 - [ ] README 有第二台 Worker 接入说明。
 
+## Phase 9–12 Additional Acceptance
+
+- [ ] Admin 可以管理 Local User 的创建、启停、role、password reset 与 session revoke。
+- [ ] disabled User 与 revoked session 对 Portal / Workspace Host / WebSocket 一致 fail-closed。
+- [ ] 平台保留可用 Local Admin / break-glass 登录。
+- [ ] Generic OIDC Authorization Code Flow + PKCE 可用。
+- [ ] OIDC `state` / `nonce` / issuer / audience 校验完整。
+- [ ] External Identity 使用 `(provider, subject)`，不以 email 自动合并。
+- [ ] OIDC/OAuth2 登录最终建立 Platform server-side session，而不是把 IdP token 当内部 bearer token。
+- [ ] External User 不会自动获得 admin。
+- [ ] manual provisioning / JIT 行为与配置一致。
+- [ ] Identity bind/unbind 有 authorization 与 Audit。
+- [ ] 如实现 OAuth2 + UserInfo compatibility，Provider adapter 不污染 Workspace / Gateway ownership 模型。
+- [ ] IdP credential/token 不进入 Runtime、Artifact、普通 Audit 或 Browser localStorage。
+- [ ] Authentication Audit 不包含密码、token、authorization code、client secret、Pi conversation/tool stream。
+- [ ] Phase 4–8 的 Gateway / Worker / Runtime / persistence / scheduler E2E 在 Phase 12 后仍通过。
+
 ---
 
 # 62. 第一阶段真正要跑通的最小主链
@@ -2589,6 +3219,20 @@ Worker A != Worker B
 
 只要这条主链稳定，后面的 Runtime Toolchain、Artifact、Audit 都可以自然追加。
 
+Phase 9–12 不改变这条主链，只在最前端把：
+
+```text
+User Login
+```
+
+扩展为：
+
+```text
+Local Login
+or
+External Identity -> Platform User -> Platform Session
+```
+
 ---
 
 # 63. 最终架构原则
@@ -2612,8 +3256,25 @@ Worker A != Worker B
 └──────────────────────────────────────────┘
 ```
 
-项目的主要工程价值在第一层和第四层的组织方式：
+Phase 9–12 只扩展 Platform Layer 的身份入口与用户生命周期：
+
+```text
+External IdP
+    |
+    v
+Platform User
+    |
+    v
+Platform Session
+    |
+    v
+Authorization / Gateway
+```
+
+Worker、Docker Runtime、pi-web、pi-agent 不认识 OIDC/OAuth2。
+
+项目的主要工程价值仍在第一层和第四层的组织方式：
 
 > 把成熟的 CLI Agent + Web Wrapper 变成一个可以被企业多用户安全共享的分布式 Agent Runtime Platform。
 
-不应通过重写 pi-web 来制造不必要的工作量。
+不应通过重写 pi-web 或把平台扩成通用 IAM 来制造不必要的工作量。

@@ -244,25 +244,43 @@ Workspace 操作语义必须明确区分：
 
 ## 7. Authentication / Authorization
 
-MVP role：
+基础 role 保持：
 
 ```text
 user | admin
 ```
 
-所有 Gateway 请求必须做 authentication + Workspace ownership check。
+Phase 9–12 在既有本地认证基础上补齐用户生命周期与企业身份认证，但不得把外部 IdP 侵入 Worker、Workspace 或 pi-web。
 
-MVP 用户入口固定采用 Workspace subdomain：
+平台身份模型保持：
 
 ```text
-https://<workspace-id>.agent.example.internal/
+External Identity
+      |
+      v
+Platform User
+      |
+      v
+Platform Session
+      |
+      v
+Authorization / Workspace ownership
 ```
 
-不要把 `/w/<workspace-id>/...` 作为主访问方案；避免为 pi-web 强行引入复杂 base-path rewrite。
+长期不变量：
 
-UUID 只是 locator，不是 credential。
-
-Runtime 内的 pi-web 不启用第二层用户密码认证。用户身份与 Workspace ownership 统一由 Platform Gateway 负责；这一前提成立的条件是 pi-web endpoint 不能被最终用户直接访问。
+- Local Account 与 External Identity 最终都必须解析为同一个 Platform User。
+- OIDC 是标准企业登录的首选协议；仅对没有 OIDC、只有 OAuth2 + UserInfo API 的系统提供受限兼容适配。
+- 外部身份的稳定键使用 `(provider, subject)`；不得把 email 当作唯一身份键或自动账号合并依据。
+- OIDC/OAuth2 登录成功不等于平台授权成功；`users.status=disabled`、role 与 Workspace ownership 仍由平台判定。
+- External Identity 默认不得自动获得 `admin`；管理员权限只能由平台现有 admin 显式赋予。
+- 平台应保留至少一个可用的 Local Admin / break-glass 管理入口，避免外部 IdP 故障导致整个平台无法管理。
+- OIDC/OAuth2 access token、refresh token、client secret 不得进入 Workspace Container、Pi state、Artifact、浏览器 localStorage 或平台普通日志。
+- 外部认证完成后继续使用 Platform server-side session；不要把 IdP token 作为 Gateway、Worker 或 Runtime 的通用 bearer token。
+- Runtime 内的 pi-web 不启用第二层用户密码认证；用户身份与 Workspace ownership 统一由 Platform Gateway 负责。
+- User disable / session revoke 后，Portal 与已经签发到 Workspace Host 的 session 都必须 fail-closed，不能仅依赖浏览器 Cookie 过期。
+- 所有 Gateway 请求必须做 authentication + Workspace ownership check；UUID 只是 locator，不是 credential。
+- HTTP proxy 与已经建立的 WebSocket 都不能通过参数、Host 或 session 混淆切换到其他用户 Workspace。
 
 用户不得：
 
@@ -271,7 +289,7 @@ Runtime 内的 pi-web 不启用第二层用户密码认证。用户身份与 Wor
 - 获取 Worker Docker 信息
 - 指定任意 container id / host path
 
-尤其测试 HTTP proxy 与已经建立的 WebSocket 都不能切换到其他用户 Workspace。
+Phase 9–12 仍不引入复杂组织模型或细粒度 RBAC。具体数据模型、API、Phase scope 与验收以 `specs.md` 为准。
 
 ---
 
@@ -363,6 +381,9 @@ Workspace Container
 - persistence / reconciliation
 - Runtime capability
 - pi-web 集成边界
+- user status / role authorization
+- session revoke / disabled-user fail-closed
+- OIDC state / nonce / issuer / audience / redirect validation（进入对应 Phase 后）
 
 不要为了“让测试绿”而降低原本应保证的安全或语义要求。
 
@@ -384,23 +405,29 @@ git add -A
 
 ---
 
-## 12. MVP 明确不做
+## 12. MVP / 当前扩展阶段明确不做
 
-MVP 完成前不要自行扩展到：
+当前阶段不要自行扩展到：
 
 - Multi-Agent / Agent Team / Supervisor / Workflow DAG
 - Kubernetes / Docker Swarm
 - Workspace 热迁移
 - Distributed Filesystem
 - GPU Scheduler / Autoscaling
-- 企业 SSO / 复杂 RBAC / 计费
+- 复杂 RBAC / Organization / Department hierarchy
+- LDAP 全量目录同步 / SCIM provisioning
+- 自研 MFA / OTP / FIDO / 短信认证
+- Workspace sharing / group policy
+- 计费
 - VM / microVM / gVisor / Kata
 - 完整零信任网络隔离
 - Plugin Marketplace
 - 自研 Pi Agent Loop
 - 自研 pi-web 替代品
 
-研究重点是 **Agent Runtime Infrastructure**，不是 Multi-Agent。
+企业身份认证只做 `specs.md` Phase 9–12 明确列出的 Local User Management、OIDC、受限 OAuth2 compatibility、Provisioning / Identity Binding 与 Auth Audit / Hardening。
+
+研究重点仍是 **Agent Runtime Infrastructure**，不是通用 IAM 产品，也不是 Multi-Agent。
 
 ---
 
@@ -430,6 +457,7 @@ MVP 必须证明 Agent 能在 `/workspace` 生成一个真实成果，并由用�
 - authenticated reverse proxy
 - no remote Docker socket exposure
 - application authorization
+- OIDC-based enterprise authentication（完成对应 Phase 并实际验证后）
 
 不能宣称：
 
@@ -438,6 +466,7 @@ MVP 必须证明 Agent 能在 `/workspace` 生成一个真实成果，并由用�
 - zero-trust sandbox
 - 防全部 container escape
 - production-ready arbitrary-code execution cloud
+- 完整 IAM / Zero Trust Identity Platform
 
 MVP 面向可信企业内部用户之间的隔离需求。
 
@@ -456,6 +485,8 @@ MVP 面向可信企业内部用户之间的隔离需求。
 - Playwright / Chromium 环境
 - AMD64 / ARM64 差异
 - TLS / Certificate / Cookie / CSP
+- OIDC discovery / redirect URI / issuer / callback / SameSite Cookie
+- 企业 IdP / OAuth2 UserInfo 字段映射
 - iptables / nftables / 防火墙
 - 外部模型 API、npm/pypi/crates.io 可达性
 
@@ -476,5 +507,7 @@ MVP 面向可信企业内部用户之间的隔离需求。
 - 关闭 Authorization
 - 将 pi-web 裸端口暴露给用户
 - 使用 host network 绕过网络问题
+- 关闭 OIDC `state` / `nonce` / issuer / audience 校验
+- 为了联调把 IdP token 注入 Workspace
 
 如确需临时诊断，必须明确标记为 DEBUG ONLY，且不得作为最终实现提交。

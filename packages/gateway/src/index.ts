@@ -40,6 +40,10 @@ export interface ProxyOptions {
   publicOrigin?: string;
 }
 
+export interface WebSocketProxyOptions extends ProxyOptions {
+  onConnected?: (disconnect: () => void) => (() => void) | undefined;
+}
+
 function connectionHeaderTokens(headers: IncomingHttpHeaders): Set<string> {
   const values = headers.connection;
   const combined = Array.isArray(values) ? values.join(",") : (values ?? "");
@@ -250,7 +254,7 @@ export function proxyWebSocketUpgrade(
   request: IncomingMessage,
   socket: Duplex,
   head: Buffer,
-  options: ProxyOptions,
+  options: WebSocketProxyOptions,
 ): void {
   const path = targetPath(request);
   if (path === null) {
@@ -303,6 +307,14 @@ export function proxyWebSocketUpgrade(
     );
     if (upstreamHead.length > 0) socket.write(upstreamHead);
     if (head.length > 0) upstreamSocket.write(head);
+    const unregister = options.onConnected?.(() => {
+      socket.destroy();
+      upstreamSocket.destroy();
+    });
+    if (unregister !== undefined) {
+      socket.once("close", unregister);
+      upstreamSocket.once("close", unregister);
+    }
     socket.once("error", () => upstreamSocket.destroy());
     upstreamSocket.once("error", () => socket.destroy());
     socket.once("close", () => upstreamSocket.destroy());

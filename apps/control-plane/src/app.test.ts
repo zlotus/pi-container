@@ -21,6 +21,7 @@ import {
 } from "./app.js";
 import { selectWorker } from "./scheduler.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
+import { SessionConnectionRegistry } from "./session-connections.js";
 
 const ORIGIN = "http://portal.test";
 const NOW = new Date("2026-09-10T08:00:00.000Z");
@@ -34,6 +35,7 @@ interface TestControlPlaneDependencies extends ControlPlaneDependencies {
   testState: {
     workspaces: WorkspaceRecord[];
     workers: WorkerRecord[];
+    users: UserRecord[];
     markWorkersOffline(cutoff: Date): number;
     setDesiredState(workspaceId: string, state: WorkspaceDesiredState): void;
   };
@@ -49,7 +51,10 @@ async function createTestDependencies(
       username: "user-a",
       passwordHash: await hashPassword("password-for-user-a"),
       role: "user",
+      status: "active",
+      lastLoginAt: null,
       createdAt: NOW,
+      updatedAt: NOW,
     },
     {
       id: USER_B_ID,
@@ -57,7 +62,10 @@ async function createTestDependencies(
       username: "user-b",
       passwordHash: await hashPassword("password-for-user-b"),
       role: "user",
+      status: "active",
+      lastLoginAt: null,
       createdAt: NOW,
+      updatedAt: NOW,
     },
     {
       id: ADMIN_ID,
@@ -65,7 +73,10 @@ async function createTestDependencies(
       username: "admin",
       passwordHash: await hashPassword("password-for-admin"),
       role: "admin",
+      status: "active",
+      lastLoginAt: null,
       createdAt: NOW,
+      updatedAt: NOW,
     },
   ];
   const sessions = new Map<
@@ -115,6 +126,7 @@ async function createTestDependencies(
     testState: {
       workspaces,
       workers,
+      users,
       markWorkersOffline(cutoff) {
         const offlineWorkerIds = new Set(
           workers
@@ -240,13 +252,37 @@ async function createTestDependencies(
           ) ?? null
         );
       },
+      async createUser(input) {
+        if (
+          users.some(
+            (user) =>
+              user.email === input.email ||
+              (input.username !== null && user.username === input.username),
+          )
+        ) {
+          throw Object.assign(new Error("duplicate user"), { code: "23505" });
+        }
+        const user: UserRecord = {
+          ...input,
+          status: "active",
+          lastLoginAt: null,
+          createdAt: NOW,
+          updatedAt: NOW,
+        };
+        users.push(user);
+        return user;
+      },
       async createSession(input) {
+        const user = users.find((candidate) => candidate.id === input.userId);
+        if (user === undefined || user.status !== "active") return false;
         sessions.set(input.tokenHash, {
           id: input.id,
           userId: input.userId,
           expiresAt: input.expiresAt,
           revoked: false,
         });
+        user.lastLoginAt = NOW;
+        return true;
       },
       async findActiveSession(tokenHash, currentTime) {
         const session = sessions.get(tokenHash);
@@ -258,7 +294,7 @@ async function createTestDependencies(
           return null;
         }
         const user = users.find((candidate) => candidate.id === session.userId);
-        if (user === undefined) return null;
+        if (user === undefined || user.status !== "active") return null;
         const result: AuthenticatedSessionRecord = {
           sessionId: session.id,
           expiresAt: session.expiresAt,
@@ -267,7 +303,10 @@ async function createTestDependencies(
             email: user.email,
             username: user.username,
             role: user.role,
+            status: user.status,
+            lastLoginAt: user.lastLoginAt,
             createdAt: user.createdAt,
+            updatedAt: user.updatedAt,
           },
         };
         return result;
@@ -275,6 +314,84 @@ async function createTestDependencies(
       async revokeSession(tokenHash) {
         const session = sessions.get(tokenHash);
         if (session !== undefined) session.revoked = true;
+      },
+      async listUsers() {
+        return users.map((user) => ({
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          role: user.role,
+          status: user.status,
+          source: "local" as const,
+          workspaceCount: workspaces.filter(
+            (workspace) => workspace.userId === user.id,
+          ).length,
+          lastLoginAt: user.lastLoginAt,
+          createdAt: user.createdAt,
+          updatedAt: user.updatedAt,
+        }));
+      },
+      async updateManagedUser(input) {
+        const user = users.find((candidate) => candidate.id === input.userId);
+        if (user === undefined) return { outcome: "NOT_FOUND" as const };
+        const role = input.role ?? user.role;
+        const status = input.status ?? user.status;
+        if (
+          user.role === "admin" &&
+          user.status === "active" &&
+          (role !== "admin" || status !== "active") &&
+          !users.some(
+            (candidate) =>
+              candidate.id !== user.id &&
+              candidate.role === "admin" &&
+              candidate.status === "active",
+          )
+        ) {
+          return { outcome: "LAST_ACTIVE_LOCAL_ADMIN" as const };
+        }
+        user.role = role;
+        user.status = status;
+        user.updatedAt = NOW;
+        if (status === "disabled") {
+          for (const session of sessions.values()) {
+            if (session.userId === user.id) session.revoked = true;
+          }
+        }
+        return {
+          outcome: "UPDATED" as const,
+          user: {
+            id: user.id,
+            email: user.email,
+            username: user.username,
+            role: user.role,
+            status: user.status,
+            source: "local" as const,
+            workspaceCount: workspaces.filter(
+              (workspace) => workspace.userId === user.id,
+            ).length,
+            lastLoginAt: user.lastLoginAt,
+            createdAt: user.createdAt,
+            updatedAt: user.updatedAt,
+          },
+        };
+      },
+      async resetLocalPassword(input) {
+        const user = users.find((candidate) => candidate.id === input.userId);
+        if (user === undefined) return false;
+        user.passwordHash = input.passwordHash;
+        user.updatedAt = NOW;
+        return true;
+      },
+      async revokeUserSessions(userId) {
+        if (!users.some((user) => user.id === userId)) return false;
+        for (const session of sessions.values()) {
+          if (session.userId === userId) session.revoked = true;
+        }
+        return true;
+      },
+      async listManagedUserWorkspaces(userId) {
+        if (!users.some((user) => user.id === userId)) return null;
+        return workspaces.filter((workspace) => workspace.userId === userId);
       },
       async listWorkspaces(userId) {
         return workspaces.filter((workspace) => workspace.userId === userId);
@@ -647,6 +764,300 @@ describe("local authentication", () => {
     expect(invalidPassword.statusCode).toBe(401);
     expect(invalidOrigin.statusCode).toBe(403);
     expect(missingOrigin.statusCode).toBe(403);
+    await app.close();
+  });
+});
+
+describe("Phase 9 Admin Users", () => {
+  it("rejects every Admin Users route for a non-admin", async () => {
+    const app = buildControlPlane(await createTestDependencies());
+    const user = await login(app, "user-a", "password-for-user-a");
+    const headers = {
+      cookie: user.cookie,
+      origin: ORIGIN,
+      "x-csrf-token": user.csrfToken,
+    };
+    const requests = [
+      app.inject({ method: "GET", url: "/api/admin/users", headers }),
+      app.inject({
+        method: "POST",
+        url: "/api/admin/users",
+        headers,
+        payload: {
+          email: "blocked@example.test",
+          password: "blocked-password",
+        },
+      }),
+      app.inject({
+        method: "PATCH",
+        url: `/api/admin/users/${USER_B_ID}`,
+        headers,
+        payload: { role: "admin" },
+      }),
+      app.inject({
+        method: "POST",
+        url: `/api/admin/users/${USER_B_ID}/reset-password`,
+        headers,
+        payload: { password: "replacement-password" },
+      }),
+      app.inject({
+        method: "POST",
+        url: `/api/admin/users/${USER_B_ID}/revoke-sessions`,
+        headers,
+        payload: {},
+      }),
+      app.inject({
+        method: "GET",
+        url: `/api/admin/users/${USER_B_ID}/workspaces`,
+        headers,
+      }),
+    ];
+
+    const responses = await Promise.all(requests);
+    expect(responses.map((response) => response.statusCode)).toEqual([
+      403, 403, 403, 403, 403, 403,
+    ]);
+    await app.close();
+  });
+
+  it("creates only ordinary Local Users and exposes read-only Workspace metadata", async () => {
+    const dependencies = await createTestDependencies();
+    const app = buildControlPlane(dependencies);
+    const admin = await login(app, "admin", "password-for-admin");
+    const adminHeaders = {
+      cookie: admin.cookie,
+      origin: ORIGIN,
+      "x-csrf-token": admin.csrfToken,
+    };
+    const forgedAdmin = await app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: adminHeaders,
+      payload: {
+        email: "forged-admin@example.test",
+        username: "forged-admin",
+        password: "phase-nine-password",
+        role: "admin",
+      },
+    });
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: adminHeaders,
+      payload: {
+        email: "phase9@example.test",
+        username: "user-phase9",
+        password: "phase-nine-password",
+      },
+    });
+    const createdUserId = created.json<{ user: { id: string } }>().user.id;
+    const newUser = await login(app, "user-phase9", "phase-nine-password");
+    const workspace = await app.inject({
+      method: "POST",
+      url: "/api/workspaces",
+      headers: {
+        cookie: newUser.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": newUser.csrfToken,
+      },
+      payload: { name: "phase9-owned" },
+    });
+    const metadata = await app.inject({
+      method: "GET",
+      url: `/api/admin/users/${createdUserId}/workspaces`,
+      headers: { cookie: admin.cookie },
+    });
+    const adminOwnWorkspaces = await app.inject({
+      method: "GET",
+      url: "/api/workspaces",
+      headers: { cookie: admin.cookie },
+    });
+    const ownershipRewrite = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${createdUserId}`,
+      headers: adminHeaders,
+      payload: { workspaceOwnerId: ADMIN_ID },
+    });
+
+    expect(forgedAdmin.statusCode).toBe(400);
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({
+      user: { role: "user", status: "active", email: "phase9@example.test" },
+    });
+    expect(workspace.statusCode).toBe(201);
+    expect(metadata.json()).toMatchObject({
+      workspaces: [{ name: "phase9-owned" }],
+    });
+    expect(adminOwnWorkspaces.json()).toEqual({ workspaces: [] });
+    expect(ownershipRewrite.statusCode).toBe(400);
+    expect(
+      dependencies.testState.workspaces.find(
+        (candidate) => candidate.name === "phase9-owned",
+      )?.userId,
+    ).toBe(createdUserId);
+    await app.close();
+  });
+
+  it("fails closed after disable or revoke and applies role and password changes", async () => {
+    const dependencies = await createTestDependencies();
+    const sessionConnections = new SessionConnectionRegistry();
+    dependencies.sessionConnections = sessionConnections;
+    const disabledConnection = vi.fn();
+    sessionConnections.register(
+      { userId: USER_A_ID, sessionId: "workspace-disabled" },
+      disabledConnection,
+    );
+    const app = buildControlPlane(dependencies);
+    const admin = await login(app, "admin", "password-for-admin");
+    const user = await login(app, "user-a", "password-for-user-a");
+    const preservedWorkspace = await app.inject({
+      method: "POST",
+      url: "/api/workspaces",
+      headers: {
+        cookie: user.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": user.csrfToken,
+      },
+      payload: { name: "preserved-after-disable" },
+    });
+    const adminHeaders = {
+      cookie: admin.cookie,
+      origin: ORIGIN,
+      "x-csrf-token": admin.csrfToken,
+    };
+    const disable = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${USER_A_ID}`,
+      headers: adminHeaders,
+      payload: { status: "disabled" },
+    });
+    const existingDisabledSession = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { cookie: user.cookie },
+    });
+    const disabledLogin = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { origin: ORIGIN },
+      payload: { login: "user-a", password: "password-for-user-a" },
+    });
+    const enable = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${USER_A_ID}`,
+      headers: adminHeaders,
+      payload: { status: "active" },
+    });
+    const reset = await app.inject({
+      method: "POST",
+      url: `/api/admin/users/${USER_A_ID}/reset-password`,
+      headers: adminHeaders,
+      payload: { password: "replacement-password" },
+    });
+    const oldPassword = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { origin: ORIGIN },
+      payload: { login: "user-a", password: "password-for-user-a" },
+    });
+    const replacementSession = await login(app, "user-a", "replacement-password");
+    const preservedAfterEnable = await app.inject({
+      method: "GET",
+      url: "/api/workspaces",
+      headers: { cookie: replacementSession.cookie },
+    });
+    const promote = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${USER_A_ID}`,
+      headers: adminHeaders,
+      payload: { role: "admin" },
+    });
+    const promotedAccess = await app.inject({
+      method: "GET",
+      url: "/api/admin/users",
+      headers: { cookie: replacementSession.cookie },
+    });
+    const demote = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${USER_A_ID}`,
+      headers: adminHeaders,
+      payload: { role: "user" },
+    });
+    const demotedAccess = await app.inject({
+      method: "GET",
+      url: "/api/admin/users",
+      headers: { cookie: replacementSession.cookie },
+    });
+    const revoke = await app.inject({
+      method: "POST",
+      url: `/api/admin/users/${USER_A_ID}/revoke-sessions`,
+      headers: adminHeaders,
+      payload: {},
+    });
+    const revokedSession = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { cookie: replacementSession.cookie },
+    });
+
+    expect(disable.statusCode).toBe(200);
+    expect(preservedWorkspace.statusCode).toBe(201);
+    expect(existingDisabledSession.statusCode).toBe(401);
+    expect(disabledLogin.statusCode).toBe(401);
+    expect(disabledConnection).toHaveBeenCalledOnce();
+    expect(enable.statusCode).toBe(200);
+    expect(reset.statusCode).toBe(204);
+    expect(oldPassword.statusCode).toBe(401);
+    expect(preservedAfterEnable.json()).toMatchObject({
+      workspaces: [{ name: "preserved-after-disable" }],
+    });
+    expect(promote.statusCode).toBe(200);
+    expect(promotedAccess.statusCode).toBe(200);
+    expect(demote.statusCode).toBe(200);
+    expect(demotedAccess.statusCode).toBe(403);
+    const revokedConnection = vi.fn();
+    sessionConnections.register(
+      { userId: USER_A_ID, sessionId: "workspace-revoked" },
+      revokedConnection,
+    );
+    await app.inject({
+      method: "POST",
+      url: `/api/admin/users/${USER_A_ID}/revoke-sessions`,
+      headers: adminHeaders,
+      payload: {},
+    });
+    expect(revoke.statusCode).toBe(204);
+    expect(revokedSession.statusCode).toBe(401);
+    expect(revokedConnection).toHaveBeenCalledOnce();
+    await app.close();
+  });
+
+  it("refuses to disable or demote the last active Local Admin", async () => {
+    const app = buildControlPlane(await createTestDependencies());
+    const admin = await login(app, "admin", "password-for-admin");
+    const headers = {
+      cookie: admin.cookie,
+      origin: ORIGIN,
+      "x-csrf-token": admin.csrfToken,
+    };
+    const disable = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${ADMIN_ID}`,
+      headers,
+      payload: { status: "disabled" },
+    });
+    const demote = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${ADMIN_ID}`,
+      headers,
+      payload: { role: "user" },
+    });
+
+    expect(disable.statusCode).toBe(409);
+    expect(disable.json()).toMatchObject({
+      error: { code: "LAST_ACTIVE_LOCAL_ADMIN" },
+    });
+    expect(demote.statusCode).toBe(409);
     await app.close();
   });
 });

@@ -4,17 +4,20 @@ import {
   constantTimeTextEqual,
   deriveCsrfToken,
   generateOpaqueToken,
+  hashPassword,
   hashOpaqueToken,
   verifyPassword,
 } from "@agent-runtime/auth";
 import type {
   AuthenticatedSessionRecord,
+  AdminUserRecord,
   Phase1Repository,
   Phase2Repository,
   Phase3Repository,
   Phase5Repository,
   Phase6Repository,
   Phase8Repository,
+  Phase9Repository,
   PlatformAuditEvent,
   UserRecord,
   WorkerPlacementRecord,
@@ -41,12 +44,40 @@ import {
   type WorkerControlStore,
 } from "./worker-control.js";
 import type { WorkspaceSessionExchange } from "./session-exchange.js";
+import type { SessionConnectionRegistry } from "./session-connections.js";
 
 const LoginBodySchema = z
   .object({
     login: z.string().trim().min(3).max(320),
     password: z.string().min(1).max(1_024),
   })
+  .strict();
+
+const AdminUserParamsSchema = z.object({ id: z.string().uuid() }).strict();
+
+const CreateLocalUserBodySchema = z
+  .object({
+    email: z.string().trim().toLowerCase().email().max(320),
+    username: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .regex(/^[a-z0-9][a-z0-9._-]{2,63}$/)
+      .optional(),
+    password: z.string().min(12).max(1_024),
+  })
+  .strict();
+
+const UpdateManagedUserBodySchema = z
+  .object({
+    role: z.enum(["user", "admin"]).optional(),
+    status: z.enum(["active", "disabled"]).optional(),
+  })
+  .strict()
+  .refine((value) => value.role !== undefined || value.status !== undefined);
+
+const ResetLocalPasswordBodySchema = z
+  .object({ password: z.string().min(12).max(1_024) })
   .strict();
 
 const CreateWorkspaceBodySchema = z
@@ -74,7 +105,8 @@ type Phase1Store = Pick<
     Phase3Repository &
     Phase5Repository &
     Phase6Repository &
-    Phase8Repository,
+    Phase8Repository &
+    Phase9Repository,
   | "findUserByLogin"
   | "createSession"
   | "findActiveSession"
@@ -95,6 +127,12 @@ type Phase1Store = Pick<
   | "deleteRecoveredWorkspace"
   | "recordWorkspaceOpened"
   | "listAuditEvents"
+  | "listUsers"
+  | "createUser"
+  | "updateManagedUser"
+  | "resetLocalPassword"
+  | "revokeUserSessions"
+  | "listManagedUserWorkspaces"
 >;
 
 type WorkerAdminStore = Pick<
@@ -117,6 +155,7 @@ export interface ControlPlaneDependencies {
   workspaceResources: WorkspaceResources;
   workspaceBaseUrl: string;
   sessionExchanges: WorkspaceSessionExchange;
+  sessionConnections?: SessionConnectionRegistry;
   reportRecoveryIssue?: (
     issue: WorkerRecoveryIssue & { workerId: string },
   ) => void;
@@ -176,7 +215,25 @@ function publicUser(user: Omit<UserRecord, "passwordHash">) {
     email: user.email,
     username: user.username,
     role: user.role,
+    status: user.status,
+    lastLoginAt: user.lastLoginAt?.toISOString() ?? null,
     createdAt: user.createdAt.toISOString(),
+    updatedAt: user.updatedAt.toISOString(),
+  };
+}
+
+function publicAdminUser(user: AdminUserRecord) {
+  return {
+    id: user.id,
+    email: user.email,
+    username: user.username,
+    role: user.role,
+    status: user.status,
+    source: user.source,
+    workspaceCount: user.workspaceCount,
+    lastLoginAt: user.lastLoginAt?.toISOString() ?? null,
+    createdAt: user.createdAt.toISOString(),
+    updatedAt: user.updatedAt.toISOString(),
   };
 }
 
@@ -517,6 +574,21 @@ export function buildControlPlane(
     return { rawToken, session };
   }
 
+  async function authenticateAdmin(
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<AuthContext | null> {
+    const auth = await authenticate(request, reply);
+    if (auth === null) return null;
+    if (auth.session.user.role !== "admin") {
+      await reply
+        .code(403)
+        .send(errorBody("FORBIDDEN", "Administrator access is required"));
+      return null;
+    }
+    return auth;
+  }
+
   function validateCsrf(
     request: FastifyRequest,
     reply: FastifyReply,
@@ -566,7 +638,7 @@ export function buildControlPlane(
       parsed.data.password,
       user?.passwordHash ?? INVALID_LOGIN_HASH,
     );
-    if (user === null || !passwordMatches) {
+    if (user === null || !passwordMatches || user.status !== "active") {
       return reply
         .code(401)
         .send(errorBody("INVALID_CREDENTIALS", "Invalid login or password"));
@@ -574,12 +646,17 @@ export function buildControlPlane(
 
     const rawToken = generateOpaqueToken();
     const expiresAt = new Date(now().getTime() + dependencies.sessionTtlMs);
-    await dependencies.store.createSession({
+    const created = await dependencies.store.createSession({
       id: randomUUID(),
       userId: user.id,
       tokenHash: hashOpaqueToken(rawToken),
       expiresAt,
     });
+    if (!created) {
+      return reply
+        .code(401)
+        .send(errorBody("INVALID_CREDENTIALS", "Invalid login or password"));
+    }
 
     reply.header(
       "set-cookie",
@@ -610,6 +687,7 @@ export function buildControlPlane(
     }
 
     await dependencies.store.revokeSession(hashOpaqueToken(auth.rawToken), now());
+    dependencies.sessionConnections?.closeSession(auth.session.sessionId);
     reply.header(
       "set-cookie",
       sessionCookie(cookieName, "", 0, dependencies.secureCookies),
@@ -660,13 +738,8 @@ export function buildControlPlane(
   });
 
   app.get("/api/admin/workers", async (request, reply) => {
-    const auth = await authenticate(request, reply);
+    const auth = await authenticateAdmin(request, reply);
     if (auth === null) return reply;
-    if (auth.session.user.role !== "admin") {
-      return reply
-        .code(403)
-        .send(errorBody("FORBIDDEN", "Administrator access is required"));
-    }
     const currentTime = now();
     const workers = await dependencies.workerStore.listWorkersWithAssignments();
     reply.header("cache-control", "no-store");
@@ -679,6 +752,168 @@ export function buildControlPlane(
         ),
       ),
     };
+  });
+
+  app.get("/api/admin/users", async (request, reply) => {
+    const auth = await authenticateAdmin(request, reply);
+    if (auth === null) return reply;
+    const users = await dependencies.store.listUsers();
+    reply.header("cache-control", "no-store");
+    return { users: users.map(publicAdminUser) };
+  });
+
+  app.post("/api/admin/users", async (request, reply) => {
+    const auth = await authenticateAdmin(request, reply);
+    if (auth === null) return reply;
+    if (
+      !validateOrigin(request, reply) ||
+      !validateCsrf(request, reply, auth.rawToken)
+    ) {
+      return reply;
+    }
+    const parsed = CreateLocalUserBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send(errorBody("INVALID_REQUEST", "Invalid Local User details"));
+    }
+    try {
+      const user = await dependencies.store.createUser({
+        id: randomUUID(),
+        email: parsed.data.email,
+        username: parsed.data.username ?? null,
+        passwordHash: await hashPassword(parsed.data.password),
+        role: "user",
+      });
+      return reply.code(201).send({ user: publicUser(user) });
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        return reply
+          .code(409)
+          .send(errorBody("USER_ALREADY_EXISTS", "Email or username already exists"));
+      }
+      throw error;
+    }
+  });
+
+  app.patch("/api/admin/users/:id", async (request, reply) => {
+    const auth = await authenticateAdmin(request, reply);
+    if (auth === null) return reply;
+    if (
+      !validateOrigin(request, reply) ||
+      !validateCsrf(request, reply, auth.rawToken)
+    ) {
+      return reply;
+    }
+    const params = AdminUserParamsSchema.safeParse(request.params);
+    const body = UpdateManagedUserBodySchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return reply
+        .code(400)
+        .send(errorBody("INVALID_REQUEST", "Invalid User update"));
+    }
+    const result = await dependencies.store.updateManagedUser({
+      userId: params.data.id,
+      ...(body.data.role === undefined ? {} : { role: body.data.role }),
+      ...(body.data.status === undefined ? {} : { status: body.data.status }),
+    });
+    if (result.outcome === "NOT_FOUND") {
+      return reply
+        .code(404)
+        .send(errorBody("USER_NOT_FOUND", "User was not found"));
+    }
+    if (result.outcome === "LAST_ACTIVE_LOCAL_ADMIN") {
+      return reply
+        .code(409)
+        .send(
+          errorBody(
+            "LAST_ACTIVE_LOCAL_ADMIN",
+            "At least one active Local Admin must remain",
+          ),
+        );
+    }
+    if (result.user.status === "disabled") {
+      dependencies.sessionConnections?.closeUser(result.user.id);
+    }
+    reply.header("cache-control", "no-store");
+    return { user: publicAdminUser(result.user) };
+  });
+
+  app.post("/api/admin/users/:id/reset-password", async (request, reply) => {
+    const auth = await authenticateAdmin(request, reply);
+    if (auth === null) return reply;
+    if (
+      !validateOrigin(request, reply) ||
+      !validateCsrf(request, reply, auth.rawToken)
+    ) {
+      return reply;
+    }
+    const params = AdminUserParamsSchema.safeParse(request.params);
+    const body = ResetLocalPasswordBodySchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return reply
+        .code(400)
+        .send(errorBody("INVALID_REQUEST", "Invalid password reset"));
+    }
+    const updated = await dependencies.store.resetLocalPassword({
+      userId: params.data.id,
+      passwordHash: await hashPassword(body.data.password),
+    });
+    if (!updated) {
+      return reply
+        .code(404)
+        .send(errorBody("LOCAL_USER_NOT_FOUND", "Local User was not found"));
+    }
+    return reply.code(204).send();
+  });
+
+  app.post("/api/admin/users/:id/revoke-sessions", async (request, reply) => {
+    const auth = await authenticateAdmin(request, reply);
+    if (auth === null) return reply;
+    if (
+      !validateOrigin(request, reply) ||
+      !validateCsrf(request, reply, auth.rawToken)
+    ) {
+      return reply;
+    }
+    const params = AdminUserParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send(errorBody("INVALID_REQUEST", "Invalid User identifier"));
+    }
+    const revoked = await dependencies.store.revokeUserSessions(
+      params.data.id,
+      now(),
+    );
+    if (!revoked) {
+      return reply
+        .code(404)
+        .send(errorBody("USER_NOT_FOUND", "User was not found"));
+    }
+    dependencies.sessionConnections?.closeUser(params.data.id);
+    return reply.code(204).send();
+  });
+
+  app.get("/api/admin/users/:id/workspaces", async (request, reply) => {
+    const auth = await authenticateAdmin(request, reply);
+    if (auth === null) return reply;
+    const params = AdminUserParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(404)
+        .send(errorBody("USER_NOT_FOUND", "User was not found"));
+    }
+    const workspaces = await dependencies.store.listManagedUserWorkspaces(
+      params.data.id,
+    );
+    if (workspaces === null) {
+      return reply
+        .code(404)
+        .send(errorBody("USER_NOT_FOUND", "User was not found"));
+    }
+    reply.header("cache-control", "no-store");
+    return { workspaces: workspaces.map(publicWorkspace) };
   });
 
   app.post("/api/workspaces", async (request, reply) => {

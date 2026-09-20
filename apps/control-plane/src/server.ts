@@ -1,13 +1,14 @@
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase8Repository,
+  createPhase9Repository,
   migrateDatabase,
 } from "@agent-runtime/database";
 import { buildControlPlane } from "./app.js";
 import { parseServerConfig } from "./config.js";
 import { buildWorkspaceGateway } from "./gateway.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
+import { SessionConnectionRegistry } from "./session-connections.js";
 import { selectWorker } from "./scheduler.js";
 
 const config = parseServerConfig(process.env);
@@ -15,11 +16,12 @@ const database = createDatabaseClient(config.DATABASE_URL);
 
 await migrateDatabase(database);
 
-const repository = createPhase8Repository(database, selectWorker);
+const repository = createPhase9Repository(database, selectWorker);
 await repository.markAllWorkersOfflineForRecovery(new Date());
 const sessionExchanges = new WorkspaceSessionExchange(
   config.WORKSPACE_SESSION_EXCHANGE_TTL_MS,
 );
+const sessionConnections = new SessionConnectionRegistry();
 const app = buildControlPlane({
   checkDatabase: async () => checkDatabase(database),
   store: repository,
@@ -39,6 +41,7 @@ const app = buildControlPlane({
   },
   workspaceBaseUrl: config.WORKSPACE_BASE_URL,
   sessionExchanges,
+  sessionConnections,
   reportRecoveryIssue: (issue) => {
     console.warn("Worker recovery issue", JSON.stringify(issue));
   },
@@ -53,6 +56,7 @@ const gateway = buildWorkspaceGateway({
   sessionTtlMs: config.SESSION_TTL_HOURS * 60 * 60 * 1_000,
   workerOfflineAfterMs: config.WORKER_OFFLINE_AFTER_MS,
   workerGatewayTokens: config.WORKER_GATEWAY_TOKENS_JSON,
+  sessionConnections,
 });
 
 const workerStatusTimer = setInterval(() => {
