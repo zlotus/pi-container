@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { once } from "node:events";
+import { createServer, request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
+
+import { describe, expect, it, vi } from "vitest";
 
 import {
   parseHttpOrigin,
   parseWorkspaceBaseUrl,
+  proxyHttpRequest,
   sanitizeRequestHeaders,
   stripPlatformCookies,
   workspaceHost,
@@ -65,5 +70,54 @@ describe("proxy header boundaries", () => {
       ),
     ).toBe("theme=dark; pi-preference=compact");
     expect(stripPlatformCookies("__Host-platform-session=secret")).toBeUndefined();
+  });
+});
+
+describe("HTTP proxy connection lifecycle", () => {
+  it("unregisters a completed response", async () => {
+    const upstream = createServer((_request, response) => response.end("ok"));
+    upstream.listen(0, "127.0.0.1");
+    await once(upstream, "listening");
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+    const unregister = vi.fn();
+    const proxy = createServer((request, response) => {
+      proxyHttpRequest(request, response, {
+        target: new URL(`http://127.0.0.1:${upstreamPort}`),
+        requestHeaders: request.headers,
+        onConnected: () => unregister,
+      });
+    });
+    proxy.listen(0, "127.0.0.1");
+    await once(proxy, "listening");
+    const proxyPort = (proxy.address() as AddressInfo).port;
+
+    try {
+      const body = await new Promise<string>((resolve, reject) => {
+        const outgoing = httpRequest(
+          {
+            hostname: "127.0.0.1",
+            port: proxyPort,
+            path: "/stream",
+            headers: { connection: "close" },
+          },
+          (response) => {
+            let result = "";
+            response.setEncoding("utf8");
+            response.on("data", (chunk: string) => (result += chunk));
+            response.once("end", () => resolve(result));
+          },
+        );
+        outgoing.once("error", reject);
+        outgoing.end();
+      });
+
+      expect(body).toBe("ok");
+      expect(unregister).toHaveBeenCalledOnce();
+    } finally {
+      await Promise.all([
+        new Promise<void>((resolve) => proxy.close(() => resolve())),
+        new Promise<void>((resolve) => upstream.close(() => resolve())),
+      ]);
+    }
   });
 });

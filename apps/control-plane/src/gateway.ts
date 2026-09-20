@@ -222,6 +222,36 @@ function workerRequestHeaders(
   });
 }
 
+function trackSessionConnection(
+  dependencies: WorkspaceGatewayDependencies,
+  authorized: AuthorizedWorkspace,
+  disconnect: () => void,
+): (() => void) | undefined {
+  const unregister = dependencies.sessionConnections?.register(
+    {
+      userId: authorized.userId,
+      sessionId: authorized.sessionId,
+    },
+    disconnect,
+  );
+  void dependencies.store
+    .findActiveSession(
+      authorized.sessionTokenHash,
+      dependencies.now?.() ?? new Date(),
+    )
+    .then((session) => {
+      if (
+        session === null ||
+        session.sessionId !== authorized.sessionId ||
+        session.user.id !== authorized.userId
+      ) {
+        disconnect();
+      }
+    })
+    .catch(disconnect);
+  return unregister;
+}
+
 async function handleExchange(
   request: IncomingMessage,
   response: ServerResponse,
@@ -335,6 +365,8 @@ export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies
         target: authorized.workerGatewayBaseUrl,
         requestHeaders: workerRequestHeaders(request, authorized, publicOrigin),
         publicOrigin,
+        onConnected: (disconnect) =>
+          trackSessionConnection(dependencies, authorized, disconnect),
       });
     })().catch(() => {
       sendJsonError(response, 503, "GATEWAY_UNAVAILABLE", "Workspace Gateway is unavailable");
@@ -364,31 +396,8 @@ export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies
       proxyWebSocketUpgrade(request, socket, head, {
         target: authorized.workerGatewayBaseUrl,
         requestHeaders: workerRequestHeaders(request, authorized, expectedOrigin),
-        onConnected: (disconnect) => {
-          const unregister = dependencies.sessionConnections?.register(
-            {
-              userId: authorized.userId,
-              sessionId: authorized.sessionId,
-            },
-            disconnect,
-          );
-          void dependencies.store
-            .findActiveSession(
-              authorized.sessionTokenHash,
-              dependencies.now?.() ?? new Date(),
-            )
-            .then((session) => {
-              if (
-                session === null ||
-                session.sessionId !== authorized.sessionId ||
-                session.user.id !== authorized.userId
-              ) {
-                disconnect();
-              }
-            })
-            .catch(disconnect);
-          return unregister;
-        },
+        onConnected: (disconnect) =>
+          trackSessionConnection(dependencies, authorized, disconnect),
       });
     })().catch(() => {
       rejectUpgrade(socket, 503, "Workspace Gateway is unavailable");

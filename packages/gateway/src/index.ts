@@ -40,6 +40,10 @@ export interface ProxyOptions {
   publicOrigin?: string;
 }
 
+export interface HttpProxyOptions extends ProxyOptions {
+  onConnected?: (disconnect: () => void) => (() => void) | undefined;
+}
+
 export interface WebSocketProxyOptions extends ProxyOptions {
   onConnected?: (disconnect: () => void) => (() => void) | undefined;
 }
@@ -159,7 +163,7 @@ export function sendJsonError(
 export function proxyHttpRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  options: ProxyOptions,
+  options: HttpProxyOptions,
 ): void {
   const path = targetPath(request);
   if (path === null) {
@@ -182,30 +186,57 @@ export function proxyHttpRequest(
     return;
   }
 
+  let upstreamResponse: IncomingMessage | undefined;
+  let unregister: (() => void) | undefined;
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    unregister?.();
+    unregister = undefined;
+  };
+  const disconnect = () => {
+    cleanup();
+    upstreamResponse?.destroy();
+    upstreamRequest.destroy();
+    response.destroy();
+  };
+  const registeredCleanup = options.onConnected?.(disconnect);
+  if (cleanedUp) {
+    registeredCleanup?.();
+  } else {
+    unregister = registeredCleanup;
+  }
+
   const timeoutMs = options.connectTimeoutMs ?? 10_000;
   upstreamRequest.setTimeout(timeoutMs, () => {
     upstreamRequest.destroy(new Error("upstream connection timed out"));
   });
-  upstreamRequest.once("response", (upstreamResponse) => {
+  upstreamRequest.once("response", (receivedResponse) => {
+    upstreamResponse = receivedResponse;
     upstreamRequest.setTimeout(0);
     const headers = sanitizeResponseHeaders(
-      upstreamResponse.headers,
+      receivedResponse.headers,
       options.target,
       options.publicOrigin,
     );
-    response.writeHead(upstreamResponse.statusCode ?? 502, headers);
-    upstreamResponse.once("aborted", () => response.destroy());
-    upstreamResponse.once("error", () => response.destroy());
-    upstreamResponse.pipe(response);
+    response.writeHead(receivedResponse.statusCode ?? 502, headers);
+    receivedResponse.once("aborted", disconnect);
+    receivedResponse.once("error", disconnect);
+    receivedResponse.once("close", cleanup);
+    receivedResponse.pipe(response);
   });
   upstreamRequest.once("error", () => {
-    sendJsonError(response, 502, "UPSTREAM_UNAVAILABLE", "Upstream is unavailable");
+    if (!response.destroyed) {
+      sendJsonError(response, 502, "UPSTREAM_UNAVAILABLE", "Upstream is unavailable");
+    }
   });
   response.once("close", () => {
     if (!response.writableEnded) upstreamRequest.destroy();
+    cleanup();
   });
-  request.once("aborted", () => upstreamRequest.destroy());
-  request.once("error", () => upstreamRequest.destroy());
+  request.once("aborted", disconnect);
+  request.once("error", disconnect);
   request.pipe(upstreamRequest);
 }
 

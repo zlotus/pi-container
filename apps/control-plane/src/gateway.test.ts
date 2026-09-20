@@ -1,6 +1,6 @@
 import { once } from "node:events";
 import { createServer, request as httpRequest } from "node:http";
-import type { IncomingHttpHeaders } from "node:http";
+import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { hashOpaqueToken } from "@agent-runtime/auth";
@@ -20,6 +20,7 @@ import { SessionConnectionRegistry } from "./session-connections.js";
 
 const NOW = new Date("2026-09-12T08:00:00.000Z");
 const WORKSPACE_ID = "90b38efc-aa9a-4bc6-8eee-528b4e0c7c60";
+const WORKSPACE_B_ID = "740df352-879b-4299-b5ab-a4d613a5ae56";
 const USER_A_ID = "11111111-1111-4111-8111-111111111111";
 const USER_B_ID = "22222222-2222-4222-8222-222222222222";
 const WORKER_ID = "worker-01";
@@ -523,6 +524,126 @@ describe("authenticated Workspace Gateway", () => {
     expect(revoked.statusCode).toBe(404);
     expect(reconciling.statusCode).toBe(404);
     expect(stopped.statusCode).toBe(404);
+  });
+
+  it("closes a revoked user's established HTTP stream without affecting another user", async () => {
+    const upstreamResponses = new Map<string, ServerResponse>();
+    const upstream = createServer((request, response) => {
+      const path = request.url ?? "";
+      upstreamResponses.set(path, response);
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(`data: ${path}:first\n\n`);
+      response.once("close", () => upstreamResponses.delete(path));
+    });
+    const upstreamPort = await listen(upstream);
+    const active = new Map([
+      [hashOpaqueToken(SESSION_A), session(USER_A_ID)],
+      [hashOpaqueToken(SESSION_B), session(USER_B_ID)],
+    ]);
+    const store: WorkspaceGatewayStore = {
+      async findActiveSession(tokenHash) {
+        return active.get(tokenHash) ?? null;
+      },
+      async findOwnedWorkspace(id, userId) {
+        if (id === WORKSPACE_ID && userId === USER_A_ID) return workspace();
+        if (id === WORKSPACE_B_ID && userId === USER_B_ID) {
+          return {
+            ...workspace(),
+            id: WORKSPACE_B_ID,
+            userId: USER_B_ID,
+            name: "workspace-b",
+          };
+        }
+        return null;
+      },
+      async findWorkerGatewayRoute() {
+        return {
+          workerId: WORKER_ID,
+          gatewayBaseUrl: `http://127.0.0.1:${upstreamPort}`,
+        };
+      },
+    };
+    const sessionConnections = new SessionConnectionRegistry();
+    const gateway = buildWorkspaceGateway({
+      store,
+      exchanges: new WorkspaceSessionExchange(60_000),
+      portalOrigin: "http://portal.test",
+      workspaceBaseUrl: "http://agent.test",
+      secureCookies: false,
+      sessionTtlMs: 60_000,
+      workerOfflineAfterMs: 35_000,
+      workerGatewayTokens: { [WORKER_ID]: GATEWAY_TOKEN },
+      sessionConnections,
+      now: () => NOW,
+    });
+    const gatewayPort = await listen(gateway);
+    type OpenStream = {
+      response: IncomingMessage;
+      chunks: string[];
+    };
+    const connectStream = (workspaceId: string, token: string, path: string) =>
+      new Promise<OpenStream>((resolve, reject) => {
+        const chunks: string[] = [];
+        let resolved = false;
+        const outgoing = httpRequest(
+          {
+            hostname: "127.0.0.1",
+            port: gatewayPort,
+            path,
+            headers: {
+              host: `${workspaceId}.agent.test`,
+              cookie: `platform-session=${token}`,
+            },
+          },
+          (response) => {
+            response.setEncoding("utf8");
+            response.on("error", () => undefined);
+            response.on("data", (chunk: string) => {
+              chunks.push(chunk);
+              if (!resolved) {
+                resolved = true;
+                resolve({ response, chunks });
+              }
+            });
+          },
+        );
+        outgoing.once("error", reject);
+        outgoing.end();
+      });
+    const [streamA, streamB] = await Promise.all([
+      connectStream(WORKSPACE_ID, SESSION_A, "/stream-a"),
+      connectStream(WORKSPACE_B_ID, SESSION_B, "/stream-b"),
+    ]);
+    const streamAClosed = new Promise<void>((resolve) =>
+      streamA.response.once("close", resolve),
+    );
+
+    active.delete(hashOpaqueToken(SESSION_A));
+    sessionConnections.closeUser(USER_A_ID);
+    await streamAClosed;
+
+    expect(streamA.response.destroyed).toBe(true);
+    expect(streamB.response.destroyed).toBe(false);
+    const streamBNextChunk = once(streamB.response, "data");
+    upstreamResponses.get("/stream-b")?.write("data: /stream-b:second\n\n");
+    await streamBNextChunk;
+    expect(streamB.chunks.join("")).toContain("data: /stream-b:second\n\n");
+
+    const revoked = await request({
+      port: gatewayPort,
+      path: "/after-revoke",
+      headers: {
+        host: PUBLIC_HOST,
+        cookie: `platform-session=${SESSION_A}`,
+      },
+    });
+    expect(revoked.statusCode).toBe(404);
+
+    const streamBClosed = new Promise<void>((resolve) =>
+      streamB.response.once("close", resolve),
+    );
+    sessionConnections.closeUser(USER_B_ID);
+    await streamBClosed;
   });
 
   it("authorizes WebSocket upgrades by exact Origin and fixes the target at handshake", async () => {

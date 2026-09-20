@@ -102,13 +102,61 @@ function stateTransition(details: Record<string, unknown>): string | null {
     : null;
 }
 
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly code?: string,
   ) {
     super(message);
   }
+}
+
+type AdminUserUpdate = { role?: User["role"]; status?: User["status"] };
+
+interface AdminUserUpdateTarget {
+  email: string;
+  username: string | null;
+  role: User["role"];
+}
+
+export function adminUserUpdateConfirmation(
+  user: AdminUserUpdateTarget,
+  update: AdminUserUpdate,
+): string {
+  const identifier = user.username ?? user.email;
+  if (update.status !== undefined) {
+    return `${update.status === "active" ? "Enable" : "Disable"} user "${identifier}"?`;
+  }
+  return `Change "${identifier}" role from ${user.role} to ${update.role}?`;
+}
+
+export function confirmAdminUserUpdate(
+  user: AdminUserUpdateTarget,
+  update: AdminUserUpdate,
+  confirm: (message: string) => boolean,
+): boolean {
+  return confirm(adminUserUpdateConfirmation(user, update));
+}
+
+export async function runConfirmedAdminUserUpdate(
+  user: AdminUserUpdateTarget,
+  update: AdminUserUpdate,
+  confirm: (message: string) => boolean,
+  request: () => Promise<void>,
+): Promise<boolean> {
+  if (!confirmAdminUserUpdate(user, update, confirm)) return false;
+  await request();
+  return true;
+}
+
+export function adminUsersErrorMessage(caught: unknown, fallback: string): string {
+  if (caught instanceof ApiError) {
+    return caught.code === undefined
+      ? caught.message
+      : `${caught.code}: ${caught.message}`;
+  }
+  return caught instanceof Error ? caught.message : fallback;
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -124,9 +172,13 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as {
-      error?: { message?: string };
+      error?: { code?: string; message?: string };
     } | null;
-    throw new ApiError(body?.error?.message ?? "Request failed", response.status);
+    throw new ApiError(
+      body?.error?.message ?? "Request failed",
+      response.status,
+      body?.error?.code,
+    );
   }
   if (response.status === 204) {
     return undefined as T;
@@ -144,6 +196,7 @@ export function App() {
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [adminUsersError, setAdminUsersError] = useState<string | null>(null);
   const [pendingWorkspaceId, setPendingWorkspaceId] = useState<string | null>(null);
   const [pendingUserId, setPendingUserId] = useState<string | null>(null);
 
@@ -176,10 +229,11 @@ export function App() {
   }, [loadWorkers]);
 
   const refreshAdminUsers = useCallback(async () => {
+    setAdminUsersError(null);
     try {
       await loadAdminUsers();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Unable to load Users");
+      setAdminUsersError(adminUsersErrorMessage(caught, "Unable to load Users"));
     }
   }, [loadAdminUsers]);
 
@@ -250,7 +304,7 @@ export function App() {
     if (session === null) return;
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
-    setError(null);
+    setAdminUsersError(null);
     try {
       await api("/api/admin/users", {
         method: "POST",
@@ -264,46 +318,64 @@ export function App() {
       formElement.reset();
       await loadAdminUsers();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Unable to create Local User");
+      setAdminUsersError(
+        adminUsersErrorMessage(caught, "Unable to create Local User"),
+      );
     }
   }
 
   async function updateManagedUser(
     user: AdminUser,
-    update: { role?: User["role"]; status?: User["status"] },
+    update: AdminUserUpdate,
   ) {
     if (session === null) return;
-    setError(null);
-    setPendingUserId(user.id);
-    try {
-      const result = await api<{ user: AdminUser }>(`/api/admin/users/${user.id}`, {
-        method: "PATCH",
-        headers: { "x-csrf-token": session.csrfToken },
-        body: JSON.stringify(update),
-      });
-      if (user.id === session.user.id) {
-        if (result.user.status === "disabled") {
-          setSession(null);
-          return;
+    await runConfirmedAdminUserUpdate(
+      user,
+      update,
+      (message) => window.confirm(message),
+      async () => {
+        setAdminUsersError(null);
+        setPendingUserId(user.id);
+        try {
+          const result = await api<{ user: AdminUser }>(
+            `/api/admin/users/${user.id}`,
+            {
+              method: "PATCH",
+              headers: { "x-csrf-token": session.csrfToken },
+              body: JSON.stringify(update),
+            },
+          );
+          if (user.id === session.user.id) {
+            if (result.user.status === "disabled") {
+              setSession(null);
+              return;
+            }
+            setSession({
+              ...session,
+              user: {
+                ...session.user,
+                role: result.user.role,
+                status: result.user.status,
+              },
+            });
+          }
+          await loadAdminUsers();
+        } catch (caught) {
+          setAdminUsersError(
+            adminUsersErrorMessage(caught, "Unable to update User"),
+          );
+        } finally {
+          setPendingUserId(null);
         }
-        setSession({
-          ...session,
-          user: { ...session.user, role: result.user.role, status: result.user.status },
-        });
-      }
-      await loadAdminUsers();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Unable to update User");
-    } finally {
-      setPendingUserId(null);
-    }
+      },
+    );
   }
 
   async function resetManagedPassword(user: AdminUser) {
     if (session === null) return;
     const password = window.prompt(`为 ${user.username ?? user.email} 设置新密码（至少 12 个字符）`);
     if (password === null) return;
-    setError(null);
+    setAdminUsersError(null);
     setPendingUserId(user.id);
     try {
       await api(`/api/admin/users/${user.id}/reset-password`, {
@@ -312,7 +384,9 @@ export function App() {
         body: JSON.stringify({ password }),
       });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Unable to reset password");
+      setAdminUsersError(
+        adminUsersErrorMessage(caught, "Unable to reset password"),
+      );
     } finally {
       setPendingUserId(null);
     }
@@ -321,7 +395,7 @@ export function App() {
   async function revokeManagedSessions(user: AdminUser) {
     if (session === null) return;
     if (!window.confirm(`撤销 ${user.username ?? user.email} 的全部登录会话？`)) return;
-    setError(null);
+    setAdminUsersError(null);
     setPendingUserId(user.id);
     try {
       await api(`/api/admin/users/${user.id}/revoke-sessions`, {
@@ -334,7 +408,9 @@ export function App() {
         return;
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Unable to revoke sessions");
+      setAdminUsersError(
+        adminUsersErrorMessage(caught, "Unable to revoke sessions"),
+      );
     } finally {
       setPendingUserId(null);
     }
@@ -346,7 +422,7 @@ export function App() {
       setManagedWorkspaces([]);
       return;
     }
-    setError(null);
+    setAdminUsersError(null);
     setPendingUserId(user.id);
     try {
       const result = await api<{ workspaces: Workspace[] }>(
@@ -355,7 +431,9 @@ export function App() {
       setManagedWorkspaces(result.workspaces);
       setExpandedUserId(user.id);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Unable to load Workspace metadata");
+      setAdminUsersError(
+        adminUsersErrorMessage(caught, "Unable to load Workspace metadata"),
+      );
     } finally {
       setPendingUserId(null);
     }
@@ -452,6 +530,7 @@ export function App() {
     setWorkspaces([]);
     setWorkers([]);
     setAdminUsers([]);
+    setAdminUsersError(null);
     setManagedWorkspaces([]);
     setExpandedUserId(null);
     setAuditEvents([]);
@@ -542,6 +621,9 @@ export function App() {
                 刷新
               </button>
             </div>
+            {adminUsersError === null ? null : (
+              <p className="error banner" role="alert">{adminUsersError}</p>
+            )}
             <form className="user-create-form" onSubmit={createLocalUser}>
               <input name="email" type="email" placeholder="email@example.com" maxLength={320} required />
               <input name="username" placeholder="username（可选）" minLength={3} maxLength={64} pattern="[a-z0-9][a-z0-9._-]{2,63}" />
