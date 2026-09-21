@@ -2708,6 +2708,8 @@ AUTH_OIDC_AUTO_PROVISION=false
 
 ## Phase 11：Provisioning / Identity Binding / OAuth2 Compatibility
 
+实现状态（2026-09-21）：工程实现与自动验证已完成，等待 Phase 11 人工验收；未进入 Phase 12。
+
 目标：
 
 > 在单 OIDC 登录已经稳定后，再补齐账号建立策略和少量企业兼容能力；不把平台扩成通用 IAM。
@@ -2765,12 +2767,16 @@ Platform User
 authorization_url
 token_url
 userinfo_url
+userinfo_token_method = bearer | query
 
 subject_field
 username_field
 email_field
 display_name_field
 ```
+
+`userinfo_token_method` 默认使用标准 Bearer header；`query` 仅用于明确要求
+`?access_token=...` 的非标准 profile endpoint，且上游接入层不得记录 query string。
 
 要求：
 

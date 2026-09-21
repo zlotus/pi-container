@@ -19,6 +19,7 @@ import type {
   Phase8Repository,
   Phase9Repository,
   Phase10Repository,
+  Phase11Repository,
   PlatformAuditEvent,
   UserIdentityRecord,
   UserRecord,
@@ -47,7 +48,9 @@ import {
 } from "./worker-control.js";
 import type { WorkspaceSessionExchange } from "./session-exchange.js";
 import type { SessionConnectionRegistry } from "./session-connections.js";
-import type { OidcIdentityClaims, OidcRuntime } from "./oidc.js";
+import type { ExternalIdentityProfile } from "./external-auth.js";
+import type { OAuth2Runtime } from "./oauth2.js";
+import type { OidcRuntime } from "./oidc.js";
 
 const LoginBodySchema = z
   .object({
@@ -57,6 +60,9 @@ const LoginBodySchema = z
   .strict();
 
 const AdminUserParamsSchema = z.object({ id: z.string().uuid() }).strict();
+const AdminIdentityParamsSchema = z
+  .object({ id: z.string().uuid(), identityId: z.string().uuid() })
+  .strict();
 
 const CreateLocalUserBodySchema = z
   .object({
@@ -83,7 +89,7 @@ const ResetLocalPasswordBodySchema = z
   .object({ password: z.string().min(12).max(1_024) })
   .strict();
 
-const BindOidcIdentityBodySchema = z
+const BindExternalIdentityBodySchema = z
   .object({
     providerId: z.string().min(1).max(128),
     providerSubject: z.string().min(1).max(1_024),
@@ -117,7 +123,8 @@ type Phase1Store = Pick<
     Phase6Repository &
     Phase8Repository &
     Phase9Repository &
-    Phase10Repository,
+    Phase10Repository &
+    Phase11Repository,
   | "findUserByLogin"
   | "createSession"
   | "findActiveSession"
@@ -144,8 +151,10 @@ type Phase1Store = Pick<
   | "resetLocalPassword"
   | "revokeUserSessions"
   | "listManagedUserWorkspaces"
-  | "bindUserIdentity"
-  | "completeOidcLogin"
+  | "listUserIdentities"
+  | "bindExternalIdentity"
+  | "unbindExternalIdentity"
+  | "completeExternalLogin"
 >;
 
 type WorkerAdminStore = Pick<
@@ -170,6 +179,7 @@ export interface ControlPlaneDependencies {
   sessionExchanges: WorkspaceSessionExchange;
   sessionConnections?: SessionConnectionRegistry;
   oidc?: OidcRuntime;
+  oauth2?: OAuth2Runtime;
   reportRecoveryIssue?: (
     issue: WorkerRecoveryIssue & { workerId: string },
   ) => void;
@@ -257,7 +267,11 @@ function publicUserIdentity(identity: UserIdentityRecord) {
     userId: identity.userId,
     providerId: identity.providerId,
     providerSubject: identity.providerSubject,
+    usernameSnapshot: identity.usernameSnapshot,
+    emailSnapshot: identity.emailSnapshot,
+    displayNameSnapshot: identity.displayNameSnapshot,
     createdAt: identity.createdAt.toISOString(),
+    lastLoginAt: identity.lastLoginAt?.toISOString() ?? null,
   };
 }
 
@@ -323,6 +337,28 @@ function isUniqueViolation(error: unknown): boolean {
   );
 }
 
+function normalizedJitEmail(
+  email: string | null,
+  allowedDomains: readonly string[],
+): string | null | undefined {
+  if (email === null) return allowedDomains.length === 0 ? null : undefined;
+  const normalized = email.trim().toLowerCase();
+  const parsed = z.string().email().max(320).safeParse(normalized);
+  if (!parsed.success) return allowedDomains.length === 0 ? null : undefined;
+  const separator = normalized.lastIndexOf("@");
+  const domain = normalized.slice(separator + 1);
+  if (allowedDomains.length > 0 && !allowedDomains.includes(domain)) return undefined;
+  return normalized;
+}
+
+function normalizedJitUsername(username: string | null): string | null {
+  if (username === null) return null;
+  const normalized = username.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9._-]{2,63}$/.test(normalized)
+    ? normalized
+    : null;
+}
+
 export function buildControlPlane(
   dependencies: ControlPlaneDependencies,
 ): FastifyInstance {
@@ -339,6 +375,92 @@ export function buildControlPlane(
   const oidcTransactionCookieName = dependencies.secureCookies
     ? "__Host-oidc-transaction"
     : "oidc-transaction";
+  const oauth2TransactionCookieName = dependencies.secureCookies
+    ? "__Host-oauth2-transaction"
+    : "oauth2-transaction";
+  const externalProviderIds = new Set(
+    [dependencies.oidc?.providerId, dependencies.oauth2?.providerId].filter(
+      (providerId): providerId is string => providerId !== undefined,
+    ),
+  );
+
+  async function completeExternalAuthentication(input: {
+    protocol: "OIDC" | "OAUTH2";
+    providerId: string;
+    profile: ExternalIdentityProfile;
+    autoProvision: boolean;
+    allowedDomains: readonly string[];
+    clearedTransactionCookie: string;
+    reply: FastifyReply;
+  }) {
+    const normalizedEmail = normalizedJitEmail(
+      input.profile.emailSnapshot,
+      input.allowedDomains,
+    );
+    const rawToken = generateOpaqueToken();
+    const authenticatedAt = now();
+    const result = await dependencies.store.completeExternalLogin({
+      providerId: input.providerId,
+      providerSubject: input.profile.subject,
+      usernameSnapshot: input.profile.usernameSnapshot,
+      emailSnapshot: input.profile.emailSnapshot,
+      displayNameSnapshot: input.profile.displayNameSnapshot,
+      autoProvision: input.autoProvision,
+      provisionedUser:
+        normalizedEmail === undefined
+          ? null
+          : {
+              id: randomUUID(),
+              email: normalizedEmail,
+              username: normalizedJitUsername(input.profile.usernameSnapshot),
+            },
+      identityId: randomUUID(),
+      sessionId: randomUUID(),
+      tokenHash: hashOpaqueToken(rawToken),
+      expiresAt: new Date(authenticatedAt.getTime() + dependencies.sessionTtlMs),
+      authenticatedAt,
+    });
+    if (result.outcome === "UNKNOWN_IDENTITY") {
+      return input.reply
+        .code(403)
+        .send(
+          errorBody(
+            `${input.protocol}_IDENTITY_NOT_BOUND`,
+            `${input.protocol} identity is not authorized for this platform`,
+          ),
+        );
+    }
+    if (result.outcome === "PROVISIONING_NOT_ALLOWED") {
+      return input.reply
+        .code(403)
+        .send(
+          errorBody(
+            `${input.protocol}_PROVISIONING_NOT_ALLOWED`,
+            `${input.protocol} identity is not allowed for JIT provisioning`,
+          ),
+        );
+    }
+    if (result.outcome === "USER_DISABLED") {
+      return input.reply
+        .code(403)
+        .send(
+          errorBody(
+            `${input.protocol}_USER_DISABLED`,
+            "Platform User is disabled",
+          ),
+        );
+    }
+    input.reply.header("set-cookie", [
+      input.clearedTransactionCookie,
+      sessionCookie(
+        cookieName,
+        rawToken,
+        Math.floor(dependencies.sessionTtlMs / 1_000),
+        dependencies.secureCookies,
+      ),
+    ]);
+    return input.reply.redirect(dependencies.portalOrigin);
+  }
 
   type DispatchResult =
     | {
@@ -656,6 +778,10 @@ export function buildControlPlane(
         enabled: dependencies.oidc !== undefined,
         providerId: dependencies.oidc?.providerId ?? null,
       },
+      oauth2: {
+        enabled: dependencies.oauth2 !== undefined,
+        providerId: dependencies.oauth2?.providerId ?? null,
+      },
     };
   });
 
@@ -725,7 +851,7 @@ export function buildControlPlane(
         );
     }
 
-    let identity: OidcIdentityClaims;
+    let identity: ExternalIdentityProfile;
     try {
       const requestUrl = new URL(
         request.raw.url ?? "/",
@@ -749,44 +875,115 @@ export function buildControlPlane(
         );
     }
 
-    const rawToken = generateOpaqueToken();
-    const authenticatedAt = now();
-    const result = await dependencies.store.completeOidcLogin({
+    return completeExternalAuthentication({
+      protocol: "OIDC",
       providerId: dependencies.oidc.providerId,
-      providerSubject: identity.subject,
-      emailSnapshot: identity.emailSnapshot,
-      displayNameSnapshot: identity.displayNameSnapshot,
-      sessionId: randomUUID(),
-      tokenHash: hashOpaqueToken(rawToken),
-      expiresAt: new Date(authenticatedAt.getTime() + dependencies.sessionTtlMs),
-      authenticatedAt,
+      profile: identity,
+      autoProvision: dependencies.oidc.autoProvision,
+      allowedDomains: dependencies.oidc.allowedDomains,
+      clearedTransactionCookie,
+      reply,
     });
-    if (result.outcome === "UNKNOWN_IDENTITY") {
+  });
+
+  app.get("/auth/oauth2/login", async (_request, reply) => {
+    if (dependencies.oauth2 === undefined) {
       return reply
-        .code(403)
+        .code(404)
+        .send(errorBody("OAUTH2_DISABLED", "OAuth2 login is not enabled"));
+    }
+    try {
+      const authorization =
+        await dependencies.oauth2.client.createAuthorizationRequest(
+          dependencies.oauth2.redirectUri,
+        );
+      const handle = dependencies.oauth2.transactions.create(
+        authorization.transaction,
+        now(),
+      );
+      reply.header(
+        "set-cookie",
+        sessionCookie(
+          oauth2TransactionCookieName,
+          handle,
+          10 * 60,
+          dependencies.secureCookies,
+        ),
+      );
+      reply.header("cache-control", "no-store");
+      return reply.redirect(authorization.url.href);
+    } catch {
+      return reply
+        .code(503)
+        .send(errorBody("OAUTH2_UNAVAILABLE", "OAuth2 login is unavailable"));
+    }
+  });
+
+  app.get("/auth/oauth2/callback", async (request, reply) => {
+    if (dependencies.oauth2 === undefined) {
+      return reply
+        .code(404)
+        .send(errorBody("OAUTH2_DISABLED", "OAuth2 login is not enabled"));
+    }
+    const clearedTransactionCookie = sessionCookie(
+      oauth2TransactionCookieName,
+      "",
+      0,
+      dependencies.secureCookies,
+    );
+    reply.header("set-cookie", clearedTransactionCookie);
+    reply.header("cache-control", "no-store");
+    const handle = parseCookie(
+      request.headers.cookie,
+      oauth2TransactionCookieName,
+    );
+    const transaction =
+      handle === null
+        ? null
+        : dependencies.oauth2.transactions.consume(handle, now());
+    if (transaction === null) {
+      return reply
+        .code(400)
         .send(
           errorBody(
-            "OIDC_IDENTITY_NOT_BOUND",
-            "OIDC identity is not authorized for this platform",
+            "OAUTH2_TRANSACTION_INVALID",
+            "OAuth2 login transaction is missing, expired, or already used",
           ),
         );
     }
-    if (result.outcome === "USER_DISABLED") {
-      return reply
-        .code(403)
-        .send(errorBody("OIDC_USER_DISABLED", "Platform User is disabled"));
-    }
 
-    reply.header("set-cookie", [
+    let identity: ExternalIdentityProfile;
+    try {
+      const requestUrl = new URL(
+        request.raw.url ?? "/",
+        "http://callback.invalid",
+      );
+      const callbackUrl = new URL(dependencies.oauth2.redirectUri);
+      callbackUrl.search = requestUrl.search;
+      identity = await dependencies.oauth2.client.exchangeAuthorizationCode({
+        callbackUrl,
+        redirectUri: dependencies.oauth2.redirectUri,
+        transaction,
+      });
+    } catch {
+      return reply
+        .code(401)
+        .send(
+          errorBody(
+            "OAUTH2_AUTHENTICATION_FAILED",
+            "OAuth2 authentication failed",
+          ),
+        );
+    }
+    return completeExternalAuthentication({
+      protocol: "OAUTH2",
+      providerId: dependencies.oauth2.providerId,
+      profile: identity,
+      autoProvision: dependencies.oauth2.autoProvision,
+      allowedDomains: dependencies.oauth2.allowedDomains,
       clearedTransactionCookie,
-      sessionCookie(
-        cookieName,
-        rawToken,
-        Math.floor(dependencies.sessionTtlMs / 1_000),
-        dependencies.secureCookies,
-      ),
-    ]);
-    return reply.redirect(dependencies.portalOrigin);
+      reply,
+    });
   });
 
   app.post("/api/auth/login", async (request, reply) => {
@@ -963,7 +1160,30 @@ export function buildControlPlane(
     }
   });
 
-  app.post("/api/admin/users/:id/oidc-identities", async (request, reply) => {
+  app.get("/api/admin/users/:id/identities", async (request, reply) => {
+    const auth = await authenticateAdmin(request, reply);
+    if (auth === null) return reply;
+    const params = AdminUserParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send(errorBody("INVALID_REQUEST", "Invalid User identity lookup"));
+    }
+    const identities = await dependencies.store.listUserIdentities(params.data.id);
+    if (identities === null) {
+      return reply
+        .code(404)
+        .send(errorBody("USER_NOT_FOUND", "User was not found"));
+    }
+    reply.header("cache-control", "no-store");
+    return { identities: identities.map(publicUserIdentity) };
+  });
+
+  const bindIdentityHandler = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ) => {
+    const legacyOidcRoute = request.url.includes("/oidc-identities");
     const auth = await authenticateAdmin(request, reply);
     if (auth === null) return reply;
     if (
@@ -972,33 +1192,46 @@ export function buildControlPlane(
     ) {
       return reply;
     }
-    if (dependencies.oidc === undefined) {
+    if (
+      (legacyOidcRoute && dependencies.oidc === undefined) ||
+      (!legacyOidcRoute && externalProviderIds.size === 0)
+    ) {
       return reply
         .code(409)
-        .send(errorBody("OIDC_DISABLED", "OIDC login is not enabled"));
+        .send(
+          legacyOidcRoute
+            ? errorBody("OIDC_DISABLED", "OIDC login is not enabled")
+            : errorBody("EXTERNAL_AUTH_DISABLED", "External login is not enabled"),
+        );
     }
     const params = AdminUserParamsSchema.safeParse(request.params);
-    const body = BindOidcIdentityBodySchema.safeParse(request.body);
+    const body = BindExternalIdentityBodySchema.safeParse(request.body);
     if (!params.success || !body.success) {
       return reply
         .code(400)
-        .send(errorBody("INVALID_REQUEST", "Invalid OIDC identity binding"));
+        .send(errorBody("INVALID_REQUEST", "Invalid external identity binding"));
     }
-    if (body.data.providerId !== dependencies.oidc.providerId) {
+    if (
+      (legacyOidcRoute && body.data.providerId !== dependencies.oidc?.providerId) ||
+      (!legacyOidcRoute && !externalProviderIds.has(body.data.providerId))
+    ) {
       return reply
         .code(400)
         .send(
           errorBody(
-            "OIDC_PROVIDER_MISMATCH",
+            legacyOidcRoute
+              ? "OIDC_PROVIDER_MISMATCH"
+              : "EXTERNAL_PROVIDER_MISMATCH",
             "Identity provider does not match the configured provider",
           ),
         );
     }
-    const result = await dependencies.store.bindUserIdentity({
+    const result = await dependencies.store.bindExternalIdentity({
       id: randomUUID(),
       userId: params.data.id,
       providerId: body.data.providerId,
       providerSubject: body.data.providerSubject,
+      actorUserId: auth.session.user.id,
     });
     if (result.outcome === "USER_NOT_FOUND") {
       return reply
@@ -1010,8 +1243,10 @@ export function buildControlPlane(
         .code(409)
         .send(
           errorBody(
-            "OIDC_IDENTITY_ALREADY_BOUND",
-            "OIDC identity is already bound",
+            legacyOidcRoute
+              ? "OIDC_IDENTITY_ALREADY_BOUND"
+              : "EXTERNAL_IDENTITY_ALREADY_BOUND",
+            `${legacyOidcRoute ? "OIDC" : "External"} identity is already bound`,
           ),
         );
     }
@@ -1019,7 +1254,55 @@ export function buildControlPlane(
     return reply
       .code(201)
       .send({ identity: publicUserIdentity(result.identity) });
-  });
+  };
+  app.post("/api/admin/users/:id/identities", bindIdentityHandler);
+  app.post("/api/admin/users/:id/oidc-identities", bindIdentityHandler);
+
+  app.delete(
+    "/api/admin/users/:id/identities/:identityId",
+    async (request, reply) => {
+      const auth = await authenticateAdmin(request, reply);
+      if (auth === null) return reply;
+      if (
+        !validateOrigin(request, reply) ||
+        !validateCsrf(request, reply, auth.rawToken)
+      ) {
+        return reply;
+      }
+      const params = AdminIdentityParamsSchema.safeParse(request.params);
+      if (!params.success) {
+        return reply
+          .code(400)
+          .send(errorBody("INVALID_REQUEST", "Invalid external identity"));
+      }
+      const result = await dependencies.store.unbindExternalIdentity({
+        userId: params.data.id,
+        identityId: params.data.identityId,
+        actorUserId: auth.session.user.id,
+      });
+      if (result.outcome === "USER_NOT_FOUND") {
+        return reply
+          .code(404)
+          .send(errorBody("USER_NOT_FOUND", "User was not found"));
+      }
+      if (result.outcome === "IDENTITY_NOT_FOUND") {
+        return reply
+          .code(404)
+          .send(errorBody("IDENTITY_NOT_FOUND", "Identity was not found"));
+      }
+      if (result.outcome === "LAST_LOGIN_METHOD") {
+        return reply
+          .code(409)
+          .send(
+            errorBody(
+              "LAST_LOGIN_METHOD",
+              "At least one usable login method must remain",
+            ),
+          );
+      }
+      return reply.code(204).send();
+    },
+  );
 
   app.patch("/api/admin/users/:id", async (request, reply) => {
     const auth = await authenticateAdmin(request, reply);

@@ -12,11 +12,11 @@ import type { WorkerSelector } from "./phase5.js";
 
 export interface AdminUserRecord {
   id: string;
-  email: string;
+  email: string | null;
   username: string | null;
   role: UserRole;
   status: UserStatus;
-  source: "local";
+  source: "local" | "external";
   workspaceCount: number;
   lastLoginAt: Date | null;
   createdAt: Date;
@@ -30,8 +30,9 @@ export type UpdateManagedUserResult =
 
 interface AdminUserRow {
   id: string;
-  email: string;
+  email: string | null;
   username: string | null;
+  password_hash: string | null;
   role: UserRole;
   status: UserStatus;
   workspace_count: number;
@@ -59,7 +60,7 @@ function mapAdminUser(row: AdminUserRow): AdminUserRecord {
     username: row.username,
     role: row.role,
     status: row.status,
-    source: "local",
+    source: row.password_hash === null ? "external" : "local",
     workspaceCount: row.workspace_count,
     lastLoginAt: row.last_login_at,
     createdAt: row.created_at,
@@ -85,6 +86,7 @@ const ADMIN_USER_COLUMNS = `
   users.id,
   users.email,
   users.username,
+  users.password_hash,
   users.role,
   users.status,
   users.last_login_at,
@@ -157,7 +159,7 @@ export function createPhase9Repository(
           set role = ${role}, status = ${status}, updated_at = now()
           where id = ${input.userId}
           returning
-            id, email, username, role, status, last_login_at,
+            id, email, username, password_hash, role, status, last_login_at,
             created_at, updated_at,
             (select count(*)::int from workspaces where user_id = users.id)
               as workspace_count

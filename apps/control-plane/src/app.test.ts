@@ -24,6 +24,7 @@ import { selectWorker } from "./scheduler.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
 import { SessionConnectionRegistry } from "./session-connections.js";
 import { OidcTransactionStore, type OidcRuntime } from "./oidc.js";
+import { OAuth2TransactionStore, type OAuth2Runtime } from "./oauth2.js";
 
 const ORIGIN = "http://portal.test";
 const NOW = new Date("2026-09-10T08:00:00.000Z");
@@ -287,7 +288,11 @@ async function createTestDependencies(
         user.lastLoginAt = NOW;
         return true;
       },
-      async bindUserIdentity(input) {
+      async listUserIdentities(userId) {
+        if (!users.some((candidate) => candidate.id === userId)) return null;
+        return identities.filter((identity) => identity.userId === userId);
+      },
+      async bindExternalIdentity(input) {
         if (!users.some((candidate) => candidate.id === input.userId)) {
           return { outcome: "USER_NOT_FOUND" as const };
         }
@@ -305,24 +310,92 @@ async function createTestDependencies(
           userId: input.userId,
           providerId: input.providerId,
           providerSubject: input.providerSubject,
+          usernameSnapshot: null,
           emailSnapshot: null,
           displayNameSnapshot: null,
           createdAt: NOW,
           lastLoginAt: null,
         };
         identities.push(identity);
+        auditEvents.unshift({
+          id: String(auditEvents.length + 1),
+          eventType: "identity.bound",
+          actorUserId: input.actorUserId,
+          ownerUserId: input.userId,
+          workspaceId: null,
+          workerId: null,
+          details: { identityId: identity.id, providerId: identity.providerId },
+          createdAt: NOW,
+        });
         return { outcome: "BOUND" as const, identity };
       },
-      async completeOidcLogin(input) {
+      async unbindExternalIdentity(input) {
+        const user = users.find((candidate) => candidate.id === input.userId);
+        if (user === undefined) return { outcome: "USER_NOT_FOUND" as const };
+        const userIdentities = identities.filter(
+          (candidate) => candidate.userId === input.userId,
+        );
+        const identity = userIdentities.find(
+          (candidate) => candidate.id === input.identityId,
+        );
+        if (identity === undefined) return { outcome: "IDENTITY_NOT_FOUND" as const };
+        const hasLocalLogin =
+          user.passwordHash !== null &&
+          (user.email !== null || user.username !== null);
+        if (!hasLocalLogin && userIdentities.length === 1) {
+          return { outcome: "LAST_LOGIN_METHOD" as const };
+        }
+        identities.splice(identities.indexOf(identity), 1);
+        auditEvents.unshift({
+          id: String(auditEvents.length + 1),
+          eventType: "identity.unbound",
+          actorUserId: input.actorUserId,
+          ownerUserId: input.userId,
+          workspaceId: null,
+          workerId: null,
+          details: { identityId: identity.id, providerId: identity.providerId },
+          createdAt: NOW,
+        });
+        return { outcome: "UNBOUND" as const };
+      },
+      async completeExternalLogin(input) {
         const identity = identities.find(
           (candidate) =>
             candidate.providerId === input.providerId &&
             candidate.providerSubject === input.providerSubject,
         );
-        if (identity === undefined) {
-          return { outcome: "UNKNOWN_IDENTITY" as const };
+        let resolvedIdentity = identity;
+        if (resolvedIdentity === undefined) {
+          if (!input.autoProvision) return { outcome: "UNKNOWN_IDENTITY" as const };
+          if (input.provisionedUser === null) {
+            return { outcome: "PROVISIONING_NOT_ALLOWED" as const };
+          }
+          const user: UserRecord = {
+            id: input.provisionedUser.id,
+            email: input.provisionedUser.email,
+            username: input.provisionedUser.username,
+            passwordHash: null,
+            role: "user",
+            status: "active",
+            lastLoginAt: null,
+            createdAt: input.authenticatedAt,
+            updatedAt: input.authenticatedAt,
+          };
+          users.push(user);
+          resolvedIdentity = {
+            id: input.identityId,
+            userId: user.id,
+            providerId: input.providerId,
+            providerSubject: input.providerSubject,
+            usernameSnapshot: input.usernameSnapshot,
+            emailSnapshot: input.emailSnapshot,
+            displayNameSnapshot: input.displayNameSnapshot,
+            createdAt: input.authenticatedAt,
+            lastLoginAt: null,
+          };
+          identities.push(resolvedIdentity);
         }
-        const user = users.find((candidate) => candidate.id === identity.userId);
+        const user = users.find((candidate) => candidate.id === resolvedIdentity.userId);
         if (user === undefined || user.status !== "active") {
           return { outcome: "USER_DISABLED" as const };
         }
@@ -332,13 +405,15 @@ async function createTestDependencies(
           expiresAt: input.expiresAt,
           revoked: false,
         });
-        identity.emailSnapshot = input.emailSnapshot;
-        identity.displayNameSnapshot = input.displayNameSnapshot;
-        identity.lastLoginAt = input.authenticatedAt;
+        resolvedIdentity.usernameSnapshot = input.usernameSnapshot;
+        resolvedIdentity.emailSnapshot = input.emailSnapshot;
+        resolvedIdentity.displayNameSnapshot = input.displayNameSnapshot;
+        resolvedIdentity.lastLoginAt = input.authenticatedAt;
         user.lastLoginAt = input.authenticatedAt;
         user.updatedAt = input.authenticatedAt;
         return {
           outcome: "AUTHENTICATED" as const,
+          provisioned: identity === undefined,
           user: {
             id: user.id,
             email: user.email,
@@ -689,6 +764,7 @@ async function login(
 function configureTestOidc(dependencies: TestControlPlaneDependencies) {
   const behavior = {
     subject: "subject-a",
+    usernameSnapshot: "user-a" as string | null,
     emailSnapshot: "a@example.test" as string | null,
     displayNameSnapshot: "User A" as string | null,
   };
@@ -696,6 +772,8 @@ function configureTestOidc(dependencies: TestControlPlaneDependencies) {
     providerId: "enterprise-oidc",
     redirectUri: `${ORIGIN}/auth/oidc/callback`,
     transactions: new OidcTransactionStore(),
+    autoProvision: false,
+    allowedDomains: [],
     client: {
       async createAuthorizationRequest(redirectUri) {
         return {
@@ -727,6 +805,49 @@ function configureTestOidc(dependencies: TestControlPlaneDependencies) {
   return behavior;
 }
 
+function configureTestOAuth2(dependencies: TestControlPlaneDependencies) {
+  const behavior = {
+    subject: "oauth-subject-a",
+    usernameSnapshot: "oauth-user-a" as string | null,
+    emailSnapshot: "oauth@example.test" as string | null,
+    displayNameSnapshot: "OAuth User A" as string | null,
+  };
+  const oauth2: OAuth2Runtime = {
+    providerId: "enterprise-oauth2",
+    redirectUri: `${ORIGIN}/auth/oauth2/callback`,
+    transactions: new OAuth2TransactionStore(),
+    autoProvision: false,
+    allowedDomains: [],
+    client: {
+      async createAuthorizationRequest(redirectUri) {
+        return {
+          url: new URL(
+            `https://oauth.example.test/authorize?redirect_uri=${encodeURIComponent(redirectUri)}`,
+          ),
+          transaction: {
+            state: "oauth-expected-state",
+            codeVerifier: "oauth-expected-code-verifier",
+          },
+        };
+      },
+      async exchangeAuthorizationCode(input) {
+        if (input.callbackUrl.origin + input.callbackUrl.pathname !== input.redirectUri) {
+          throw new Error("redirect URI mismatch");
+        }
+        if (
+          input.callbackUrl.searchParams.get("state") !==
+          input.transaction.state
+        ) {
+          throw new Error("state mismatch");
+        }
+        return { ...behavior };
+      },
+    },
+  };
+  dependencies.oauth2 = oauth2;
+  return behavior;
+}
+
 function firstCookie(response: {
   headers: Record<string, string | string[] | number | undefined>;
 }, name: string): string {
@@ -748,6 +869,13 @@ async function beginOidcLogin(app: ReturnType<typeof buildControlPlane>) {
   expect(response.statusCode).toBe(302);
   expect(response.headers.location).toContain("https://idp.example.test/authorize");
   return firstCookie(response, "oidc-transaction");
+}
+
+async function beginOAuth2Login(app: ReturnType<typeof buildControlPlane>) {
+  const response = await app.inject({ method: "GET", url: "/auth/oauth2/login" });
+  expect(response.statusCode).toBe(302);
+  expect(response.headers.location).toContain("https://oauth.example.test/authorize");
+  return firstCookie(response, "oauth2-transaction");
 }
 
 describe("control plane probes", () => {
@@ -914,6 +1042,7 @@ describe("Phase 10 Generic OIDC", () => {
 
     expect(methods.json()).toEqual({
       oidc: { enabled: false, providerId: null },
+      oauth2: { enabled: false, providerId: null },
     });
     expect(disabledSso.statusCode).toBe(404);
     expect(admin.cookie).toContain("platform-session=");
@@ -985,6 +1114,7 @@ describe("Phase 10 Generic OIDC", () => {
 
     expect(methods.json()).toEqual({
       oidc: { enabled: true, providerId: "enterprise-oidc" },
+      oauth2: { enabled: false, providerId: null },
     });
     expect(userAttempt.statusCode).toBe(403);
     expect(providerMismatch.statusCode).toBe(400);
@@ -1134,6 +1264,203 @@ describe("Phase 10 Generic OIDC", () => {
     expect(replay.statusCode).toBe(400);
     expect(replay.json()).toMatchObject({
       error: { code: "OIDC_TRANSACTION_INVALID" },
+    });
+    await app.close();
+  });
+});
+
+describe("Phase 11 provisioning and identity management", () => {
+  it("keeps JIT off by default, provisions role=user when enabled, and enforces exact allowed domains", async () => {
+    const dependencies = await createTestDependencies();
+    const behavior = configureTestOidc(dependencies);
+    if (dependencies.oidc === undefined) throw new Error("OIDC test runtime missing");
+    dependencies.oidc.autoProvision = true;
+    dependencies.oidc.allowedDomains = ["example.test"];
+    behavior.subject = "new-subject-with-existing-email";
+    behavior.emailSnapshot = "a@example.test";
+    const app = buildControlPlane(dependencies);
+
+    const transaction = await beginOidcLogin(app);
+    const callback = await app.inject({
+      method: "GET",
+      url: "/auth/oidc/callback?code=code-a&state=expected-state",
+      headers: { cookie: transaction },
+    });
+    expect(callback.statusCode).toBe(302);
+    const jitSession = firstCookie(callback, "platform-session");
+    const me = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { cookie: jitSession },
+    });
+    const jitUser = me.json<{ user: { id: string; role: string; email: string } }>().user;
+    expect(jitUser).toMatchObject({ role: "user", email: "a@example.test" });
+    expect(jitUser.id).not.toBe(USER_A_ID);
+    const adminDenied = await app.inject({
+      method: "GET",
+      url: "/api/admin/users",
+      headers: { cookie: jitSession },
+    });
+    expect(adminDenied.statusCode).toBe(403);
+
+    behavior.subject = "domain-denied-subject";
+    behavior.emailSnapshot = "person@outside.test";
+    const deniedTransaction = await beginOidcLogin(app);
+    const denied = await app.inject({
+      method: "GET",
+      url: "/auth/oidc/callback?code=code-b&state=expected-state",
+      headers: { cookie: deniedTransaction },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toMatchObject({
+      error: { code: "OIDC_PROVISIONING_NOT_ALLOWED" },
+    });
+
+    behavior.subject = "missing-email-subject";
+    behavior.emailSnapshot = null;
+    const missingEmailTransaction = await beginOidcLogin(app);
+    const missingEmail = await app.inject({
+      method: "GET",
+      url: "/auth/oidc/callback?code=code-c&state=expected-state",
+      headers: { cookie: missingEmailTransaction },
+    });
+    expect(missingEmail.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("lists, binds, and unbinds stable identities with authorization, audit, and last-login protection", async () => {
+    const dependencies = await createTestDependencies();
+    configureTestOidc(dependencies);
+    configureTestOAuth2(dependencies);
+    const app = buildControlPlane(dependencies);
+    const admin = await login(app, "admin", "password-for-admin");
+    const user = await login(app, "user-a", "password-for-user-a");
+    const bind = async (providerId: string, providerSubject: string) =>
+      app.inject({
+        method: "POST",
+        url: `/api/admin/users/${USER_A_ID}/identities`,
+        headers: {
+          cookie: admin.cookie,
+          origin: ORIGIN,
+          "x-csrf-token": admin.csrfToken,
+        },
+        payload: { providerId, providerSubject },
+      });
+
+    const oidcBound = await bind("enterprise-oidc", "subject-a");
+    const oauthBound = await bind("enterprise-oauth2", "oauth-subject-a");
+    expect(oidcBound.statusCode).toBe(201);
+    expect(oauthBound.statusCode).toBe(201);
+    const userListDenied = await app.inject({
+      method: "GET",
+      url: `/api/admin/users/${USER_A_ID}/identities`,
+      headers: { cookie: user.cookie },
+    });
+    expect(userListDenied.statusCode).toBe(403);
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/api/admin/users/${USER_A_ID}/identities`,
+      headers: { cookie: admin.cookie },
+    });
+    expect(listed.statusCode).toBe(200);
+    const identities = listed.json<{ identities: Array<{ id: string; providerId: string }> }>()
+      .identities;
+    expect(identities.map((identity) => identity.providerId)).toEqual([
+      "enterprise-oidc",
+      "enterprise-oauth2",
+    ]);
+
+    const removed = await app.inject({
+      method: "DELETE",
+      url: `/api/admin/users/${USER_A_ID}/identities/${identities[0]?.id}`,
+      headers: {
+        cookie: admin.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": admin.csrfToken,
+      },
+    });
+    expect(removed.statusCode).toBe(204);
+    const audit = await app.inject({
+      method: "GET",
+      url: "/api/audit-events?limit=20",
+      headers: { cookie: admin.cookie },
+    });
+    const identityEvents = audit
+      .json<{ events: Array<{ eventType: string; details: Record<string, unknown> }> }>()
+      .events.filter((event) => event.eventType.startsWith("identity."));
+    expect(identityEvents.map((event) => event.eventType)).toEqual([
+      "identity.unbound",
+      "identity.bound",
+      "identity.bound",
+    ]);
+    expect(JSON.stringify(identityEvents)).not.toContain("subject-a");
+
+    if (dependencies.oidc === undefined) throw new Error("OIDC test runtime missing");
+    dependencies.oidc.autoProvision = true;
+    const behavior = configureTestOidc(dependencies);
+    dependencies.oidc.autoProvision = true;
+    behavior.subject = "external-only";
+    behavior.emailSnapshot = "external-only@example.test";
+    const externalTransaction = await beginOidcLogin(app);
+    const externalLogin = await app.inject({
+      method: "GET",
+      url: "/auth/oidc/callback?code=code-d&state=expected-state",
+      headers: { cookie: externalTransaction },
+    });
+    const externalSession = firstCookie(externalLogin, "platform-session");
+    const externalMe = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { cookie: externalSession },
+    });
+    const externalUserId = externalMe.json<{ user: { id: string } }>().user.id;
+    const externalIdentities = await app.inject({
+      method: "GET",
+      url: `/api/admin/users/${externalUserId}/identities`,
+      headers: { cookie: admin.cookie },
+    });
+    const onlyIdentity = externalIdentities.json<{ identities: Array<{ id: string }> }>()
+      .identities[0];
+    if (onlyIdentity === undefined) throw new Error("JIT identity missing");
+    const lockedOut = await app.inject({
+      method: "DELETE",
+      url: `/api/admin/users/${externalUserId}/identities/${onlyIdentity.id}`,
+      headers: {
+        cookie: admin.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": admin.csrfToken,
+      },
+    });
+    expect(lockedOut.statusCode).toBe(409);
+    expect(lockedOut.json()).toMatchObject({
+      error: { code: "LAST_LOGIN_METHOD" },
+    });
+    await app.close();
+  });
+
+  it("routes OAuth2 UserInfo profiles through the same JIT and Platform Session chain", async () => {
+    const dependencies = await createTestDependencies();
+    configureTestOAuth2(dependencies);
+    if (dependencies.oauth2 === undefined) throw new Error("OAuth2 test runtime missing");
+    dependencies.oauth2.autoProvision = true;
+    dependencies.oauth2.allowedDomains = ["example.test"];
+    const app = buildControlPlane(dependencies);
+    const transaction = await beginOAuth2Login(app);
+    const callback = await app.inject({
+      method: "GET",
+      url: "/auth/oauth2/callback?code=oauth-code&state=oauth-expected-state",
+      headers: { cookie: transaction },
+    });
+    expect(callback.statusCode).toBe(302);
+    const session = firstCookie(callback, "platform-session");
+    const me = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { cookie: session },
+    });
+    expect(me.json()).toMatchObject({
+      user: { email: "oauth@example.test", username: "oauth-user-a", role: "user" },
     });
     await app.close();
   });

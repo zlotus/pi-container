@@ -11,6 +11,10 @@ import {
 } from "openid-client";
 
 import { generateOpaqueToken, hashOpaqueToken } from "@agent-runtime/auth";
+import type {
+  ExternalIdentityProfile,
+  ExternalProvisioningPolicy,
+} from "./external-auth.js";
 
 export interface OidcAuthorizationTransaction {
   state: string;
@@ -18,11 +22,7 @@ export interface OidcAuthorizationTransaction {
   codeVerifier: string;
 }
 
-export interface OidcIdentityClaims {
-  subject: string;
-  emailSnapshot: string | null;
-  displayNameSnapshot: string | null;
-}
+export type OidcIdentityClaims = ExternalIdentityProfile;
 
 export interface OidcClient {
   createAuthorizationRequest(redirectUri: string): Promise<{
@@ -36,7 +36,7 @@ export interface OidcClient {
   }): Promise<OidcIdentityClaims>;
 }
 
-export interface OidcRuntime {
+export interface OidcRuntime extends ExternalProvisioningPolicy {
   providerId: string;
   redirectUri: string;
   client: OidcClient;
@@ -176,6 +176,7 @@ export class GenericOidcClient implements OidcClient {
     }
     return {
       subject: claims.sub,
+      usernameSnapshot: snapshotClaim(claims.preferred_username, 256),
       emailSnapshot: snapshotClaim(claims.email, 320),
       displayNameSnapshot:
         snapshotClaim(claims.name, 256) ??

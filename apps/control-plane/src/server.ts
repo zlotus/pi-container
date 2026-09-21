@@ -1,7 +1,7 @@
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase10Repository,
+  createPhase11Repository,
   migrateDatabase,
 } from "@agent-runtime/database";
 import { buildControlPlane } from "./app.js";
@@ -11,13 +11,17 @@ import { WorkspaceSessionExchange } from "./session-exchange.js";
 import { SessionConnectionRegistry } from "./session-connections.js";
 import { selectWorker } from "./scheduler.js";
 import { GenericOidcClient, OidcTransactionStore } from "./oidc.js";
+import {
+  GenericOAuth2UserInfoClient,
+  OAuth2TransactionStore,
+} from "./oauth2.js";
 
 const config = parseServerConfig(process.env);
 const database = createDatabaseClient(config.DATABASE_URL);
 
 await migrateDatabase(database);
 
-const repository = createPhase10Repository(database, selectWorker);
+const repository = createPhase11Repository(database, selectWorker);
 await repository.markAllWorkersOfflineForRecovery(new Date());
 const sessionExchanges = new WorkspaceSessionExchange(
   config.WORKSPACE_SESSION_EXCHANGE_TTL_MS,
@@ -39,6 +43,33 @@ const oidc = config.AUTH_OIDC_ENABLED
         allowInsecureIssuer: oidcIssuer?.protocol === "http:",
       }),
       transactions: new OidcTransactionStore(),
+      autoProvision: config.AUTH_OIDC_AUTO_PROVISION,
+      allowedDomains: config.AUTH_OIDC_ALLOWED_DOMAINS,
+    }
+  : undefined;
+const oauth2 = config.AUTH_OAUTH2_ENABLED
+  ? {
+      providerId: config.AUTH_OAUTH2_PROVIDER_ID,
+      redirectUri: new URL(
+        "/auth/oauth2/callback",
+        config.PORTAL_ORIGIN,
+      ).href,
+      client: new GenericOAuth2UserInfoClient({
+        authorizationUrl: config.AUTH_OAUTH2_AUTHORIZATION_URL,
+        tokenUrl: config.AUTH_OAUTH2_TOKEN_URL,
+        userinfoUrl: config.AUTH_OAUTH2_USERINFO_URL,
+        userinfoTokenMethod: config.AUTH_OAUTH2_USERINFO_TOKEN_METHOD,
+        clientId: config.AUTH_OAUTH2_CLIENT_ID,
+        clientSecret: config.AUTH_OAUTH2_CLIENT_SECRET,
+        scope: config.AUTH_OAUTH2_SCOPE,
+        subjectField: config.AUTH_OAUTH2_SUBJECT_FIELD,
+        usernameField: config.AUTH_OAUTH2_USERNAME_FIELD || null,
+        emailField: config.AUTH_OAUTH2_EMAIL_FIELD || null,
+        displayNameField: config.AUTH_OAUTH2_DISPLAY_NAME_FIELD || null,
+      }),
+      transactions: new OAuth2TransactionStore(),
+      autoProvision: config.AUTH_OAUTH2_AUTO_PROVISION,
+      allowedDomains: config.AUTH_OAUTH2_ALLOWED_DOMAINS,
     }
   : undefined;
 const app = buildControlPlane({
@@ -62,6 +93,7 @@ const app = buildControlPlane({
   sessionExchanges,
   sessionConnections,
   ...(oidc === undefined ? {} : { oidc }),
+  ...(oauth2 === undefined ? {} : { oauth2 }),
   reportRecoveryIssue: (issue) => {
     console.warn("Worker recovery issue", JSON.stringify(issue));
   },

@@ -34,6 +34,10 @@ const MIGRATIONS = [
     name: "0007_phase10_oidc",
     url: new URL("../migrations/0007_phase10_oidc.sql", import.meta.url),
   },
+  {
+    name: "0008_phase11_identity",
+    url: new URL("../migrations/0008_phase11_identity.sql", import.meta.url),
+  },
 ] as const;
 
 export async function migrateDatabase(client: DatabaseClient): Promise<void> {

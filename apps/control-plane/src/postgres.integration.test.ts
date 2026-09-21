@@ -4,7 +4,7 @@ import { hashOpaqueToken, hashPassword } from "@agent-runtime/auth";
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase10Repository,
+  createPhase11Repository,
   migrateDatabase,
   type DatabaseClient,
 } from "@agent-runtime/database";
@@ -28,6 +28,10 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   const phase9UserId = randomUUID();
   const phase10UserId = randomUUID();
   const phase10OtherUserId = randomUUID();
+  const phase11AdminId = randomUUID();
+  const phase11LocalUserId = randomUUID();
+  const phase11JitUserId = randomUUID();
+  const phase11SameEmailUserId = randomUUID();
   const suffix = randomUUID();
   const workerId = `worker-${suffix}`;
   const phase3WorkerId = `runtime-${suffix}`;
@@ -46,23 +50,23 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   });
 
   afterAll(async () => {
-    await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId}, ${phase10UserId}, ${phase10OtherUserId})`;
+    await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId}, ${phase10UserId}, ${phase10OtherUserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId})`;
     await database`delete from workers where id = ${workerId} or id = ${phase3WorkerId} or id = ${phase6WorkerId} or id = any(${phase5WorkerIds})`;
-    await database`delete from users where id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId}, ${phase10UserId}, ${phase10OtherUserId})`;
     await database`
       delete from platform_audit_events
-      where owner_user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId})
-        or actor_user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId})
+      where owner_user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId})
+        or actor_user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase11AdminId})
         or worker_id = ${workerId}
         or worker_id = ${phase3WorkerId}
         or worker_id = ${phase6WorkerId}
         or worker_id = any(${phase5WorkerIds})
     `;
+    await database`delete from users where id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId}, ${phase10UserId}, ${phase10OtherUserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId})`;
     await database.end({ timeout: 5 });
   });
 
   it("persists Phase 9 status, revocation, password reset, and User Workspace metadata", async () => {
-    const repository = createPhase10Repository(database, selectWorker);
+    const repository = createPhase11Repository(database, selectWorker);
     await repository.createUser({
       id: phase9AdminId,
       email: `phase9-admin-${suffix}@example.test`,
@@ -124,7 +128,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   });
 
   it("binds Phase 10 identities by provider and subject without email merging", async () => {
-    const repository = createPhase10Repository(database, selectWorker);
+    const repository = createPhase11Repository(database, selectWorker);
     await repository.createUser({
       id: phase10UserId,
       email: `phase10-a-${suffix}@example.test`,
@@ -212,8 +216,127 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
     ).resolves.toEqual({ outcome: "USER_DISABLED" });
   });
 
+  it("atomically provisions Phase 11 external users and audits protected identity management", async () => {
+    const repository = createPhase11Repository(database, selectWorker);
+    await repository.createUser({
+      id: phase11AdminId,
+      email: `phase11-admin-${suffix}@example.test`,
+      username: null,
+      passwordHash: await hashPassword("phase11-admin-password"),
+      role: "admin",
+    });
+    await repository.createUser({
+      id: phase11LocalUserId,
+      email: `phase11-local-${suffix}@example.test`,
+      username: null,
+      passwordHash: await hashPassword("phase11-local-password"),
+      role: "user",
+    });
+
+    const localIdentityId = randomUUID();
+    await expect(
+      repository.bindExternalIdentity({
+        id: localIdentityId,
+        userId: phase11LocalUserId,
+        providerId: "phase11-oidc",
+        providerSubject: "local-bound-subject",
+        actorUserId: phase11AdminId,
+      }),
+    ).resolves.toMatchObject({ outcome: "BOUND" });
+    await expect(repository.listUserIdentities(phase11LocalUserId)).resolves.toMatchObject([
+      { id: localIdentityId, providerSubject: "local-bound-subject" },
+    ]);
+    await expect(
+      repository.unbindExternalIdentity({
+        identityId: localIdentityId,
+        userId: phase11LocalUserId,
+        actorUserId: phase11AdminId,
+      }),
+    ).resolves.toEqual({ outcome: "UNBOUND" });
+
+    const jitInput = {
+      providerId: "phase11-oauth2",
+      providerSubject: "jit-subject",
+      usernameSnapshot: "jit-user",
+      emailSnapshot: `same-${suffix}@example.test`,
+      displayNameSnapshot: "JIT User",
+      identityId: randomUUID(),
+      sessionId: randomUUID(),
+      tokenHash: hashOpaqueToken(`phase11-jit-${suffix}`),
+      expiresAt: new Date(NOW.getTime() + 60_000),
+      authenticatedAt: NOW,
+    };
+    await expect(
+      repository.completeExternalLogin({
+        ...jitInput,
+        autoProvision: false,
+        provisionedUser: null,
+      }),
+    ).resolves.toEqual({ outcome: "UNKNOWN_IDENTITY" });
+    await expect(
+      repository.completeExternalLogin({
+        ...jitInput,
+        autoProvision: true,
+        provisionedUser: {
+          id: phase11JitUserId,
+          email: jitInput.emailSnapshot,
+          username: "jit-user",
+        },
+      }),
+    ).resolves.toMatchObject({
+      outcome: "AUTHENTICATED",
+      provisioned: true,
+      user: { id: phase11JitUserId, role: "user", status: "active" },
+    });
+    const jitIdentities = await repository.listUserIdentities(phase11JitUserId);
+    expect(jitIdentities).toHaveLength(1);
+    const jitIdentity = jitIdentities?.[0];
+    if (jitIdentity === undefined) throw new Error("JIT identity missing");
+    await expect(
+      repository.unbindExternalIdentity({
+        identityId: jitIdentity.id,
+        userId: phase11JitUserId,
+        actorUserId: phase11AdminId,
+      }),
+    ).resolves.toEqual({ outcome: "LAST_LOGIN_METHOD" });
+
+    await expect(
+      repository.completeExternalLogin({
+        ...jitInput,
+        providerSubject: "same-email-different-subject",
+        identityId: randomUUID(),
+        sessionId: randomUUID(),
+        tokenHash: hashOpaqueToken(`phase11-same-email-${suffix}`),
+        autoProvision: true,
+        provisionedUser: {
+          id: phase11SameEmailUserId,
+          email: jitInput.emailSnapshot,
+          username: null,
+        },
+      }),
+    ).resolves.toMatchObject({
+      outcome: "AUTHENTICATED",
+      user: { id: phase11SameEmailUserId, role: "user" },
+    });
+
+    const audit = await repository.listAuditEvents({
+      userId: phase11AdminId,
+      includeAllUsers: true,
+      limit: 20,
+      beforeId: null,
+    });
+    const identityAudit = audit.filter((event) =>
+      event.eventType.startsWith("identity."),
+    );
+    expect(identityAudit.map((event) => event.eventType)).toEqual([
+      "identity.unbound",
+      "identity.bound",
+    ]);
+    expect(JSON.stringify(identityAudit)).not.toContain("local-bound-subject");
+  });
+
   it("logs in two persisted users and isolates their workspaces", async () => {
-    const repository = createPhase10Repository(database, selectWorker);
+    const repository = createPhase11Repository(database, selectWorker);
     await repository.createUser({
       id: userAId,
       email: `a-${suffix}@example.test`,
@@ -330,7 +453,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   });
 
   it("persists a bound Worker credential and rotates it atomically", async () => {
-    const repository = createPhase10Repository(database, selectWorker);
+    const repository = createPhase11Repository(database, selectWorker);
     const originalToken = "originalworker0123456789abcdef0123456789abcdef";
     const rotatedToken = "rotatedworker0123456789abcdef0123456789abcdef";
     const originalHash = hashOpaqueToken(originalToken);
@@ -386,7 +509,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   });
 
   it("persists minimal placement and lifecycle transitions atomically", async () => {
-    const repository = createPhase10Repository(database, selectWorker);
+    const repository = createPhase11Repository(database, selectWorker);
     await repository.createUser({
       id: phase3UserId,
       email: `runtime-${suffix}@example.test`,
@@ -567,7 +690,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   });
 
   it("persists desired state and conditionally recovers or finalizes deletion", async () => {
-    const repository = createPhase10Repository(database, selectWorker);
+    const repository = createPhase11Repository(database, selectWorker);
     const runtimeImage = `agent-runtime:recovery-${suffix}`;
     const credentialHash = hashOpaqueToken(
       `recovery-${suffix}-credential-token`,
@@ -678,7 +801,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   });
 
   it("schedules compatible Workers by authoritative load and reserves the final slot once", async () => {
-    const repository = createPhase10Repository(database, selectWorker);
+    const repository = createPhase11Repository(database, selectWorker);
     const runtimeImage = `agent-runtime:scheduler-${suffix}`;
     const finalSlotImage = `agent-runtime:last-slot-${suffix}`;
     await repository.createUser({

@@ -4,12 +4,13 @@
 [pi-web](https://github.com/agegr/pi-web) 与 Pi Coding Agent，自身只负责认证、
 Workspace、Worker、Docker 生命周期、调度和安全代理。
 
-当前仓库已在通过人工验收的 **Phase 9：User Management Foundation** 之上完成
-**Phase 10：Generic OIDC** 的工程实现，等待目标 IdP 人工验收。平台保留 Local Account / Local Admin，
-并增加单个 Generic OIDC Provider 的 Authorization Code Flow、PKCE、`state`、`nonce`、标准 ID token
-校验和显式 `(provider_id, sub) -> Platform User` 预绑定；认证成功后仍建立原有 server-side Platform
-Session 并沿用 Workspace ownership。默认 `AUTH_OIDC_AUTO_PROVISION=false`，不按 email 自动合并，
-不包含 JIT、多 Provider 管理、OAuth2 UserInfo compatibility 或完整 identity management。Runtime 现包含
+Phase 9 与 Phase 10 已完成人工验收。当前仓库已完成 **Phase 11：Provisioning / Identity Binding /
+OAuth2 Compatibility** 的工程实现与自动验证，等待目标企业 IdP 人工验收。平台保留 Local Account /
+Local Admin 与 Phase 10 Generic OIDC 的完整验证，新增默认关闭的 JIT、exact `allowed_domains` gate、
+Admin External Identity list/bind/unbind，以及与 OIDC 严格分离的 Generic OAuth2 + UserInfo adapter。
+OIDC 与 OAuth2 都归一化为稳定 `(provider_id, subject) -> Platform User -> server-side Platform Session`，
+不按 email 自动合并，也不允许 IdP claim 授予 admin。Phase 12 Authentication Audit / Hardening 尚未进入。
+Runtime 现包含
 Python/uv、Node/pnpm、Rust、build tools、ffmpeg、PDF/Office 工具、Playwright/Chromium 和克制的
 Linux/network debugging CLI；Worker 在 hello 前通过本机精确镜像的实际探针上报 capability，不按
 architecture 猜测。Portal 现在展示 Worker/Workspace placement、能力、容量和结构化
@@ -80,9 +81,9 @@ unset LOCAL_USER_PASSWORD
 break-glass 账户应将 `LOCAL_USER_ROLE` 设置为 `admin`；Admin API 会拒绝禁用或降级最后一个
 `active` Local Admin。Admin Users 的创建接口固定创建普通 `user`，需要升权时再走独立 role 操作。
 
-## Configure Phase 10 Generic OIDC
+## Configure Phase 11 external authentication
 
-Phase 10 只支持一个服务端配置的 OIDC Provider。先在 IdP 注册 confidential client，并把唯一 callback
+Phase 10 的单 Generic OIDC Provider 保持不变。先在 IdP 注册 confidential client，并把 callback
 精确设置为：
 
 ```text
@@ -102,18 +103,52 @@ AUTH_OIDC_ISSUER=https://idp.example.internal/realms/enterprise
 AUTH_OIDC_CLIENT_ID=agent-runtime-platform
 AUTH_OIDC_CLIENT_SECRET=<server-side-client-secret>
 AUTH_OIDC_AUTO_PROVISION=false
+AUTH_OIDC_ALLOWED_DOMAINS=
 ```
 
-重启 Control Plane 后，Local Admin 登录 Portal，在 Admin Users 的目标用户行点击
-“绑定 OIDC subject”，输入 IdP 对该用户签发的精确 `sub`。该最小入口只允许绑定当前配置的
-`provider_id + subject`，没有 list/unbind/JIT；重复 identity 会被拒绝。绑定完成后，Login 页面显示
-“Sign in with SSO”。OIDC callback 查到 active Platform User 后创建现有 Platform Session；unknown
-identity 和 disabled User 都会被拒绝。同 email 不参与身份匹配。
+`AUTH_OIDC_AUTO_PROVISION=false` 时维持 manual provisioning：Local Admin 在 Admin Users 对目标用户绑定
+精确 provider + `sub`。设为 `true` 后，未知 identity 首次登录会创建 external-only Platform User，role
+固定为 `user`。`AUTH_OIDC_ALLOWED_DOMAINS` 留空表示不启用域名 gate；非空时是逗号分隔的 exact domain，
+JIT identity 必须提供有效 email 且 domain 完全匹配，否则 fail-closed。该 allowlist 只决定未知 identity
+能否 JIT，不以 email 查找、绑定或合并既有用户。
 
-`AUTH_OIDC_CLIENT_SECRET`、authorization code、access/refresh/ID token 仅在 Control Plane 的协议处理
+OAuth2 + UserInfo 仅用于没有 OIDC 的企业系统，也可与 OIDC 同时启用，但两个 `provider_id` 必须不同：
+
+```env
+AUTH_OAUTH2_ENABLED=true
+AUTH_OAUTH2_PROVIDER_ID=enterprise-portal
+AUTH_OAUTH2_AUTHORIZATION_URL=https://portal.example.internal/oauth/authorize
+AUTH_OAUTH2_TOKEN_URL=https://portal.example.internal/oauth/token
+AUTH_OAUTH2_USERINFO_URL=https://portal.example.internal/oauth/userinfo
+AUTH_OAUTH2_USERINFO_TOKEN_METHOD=bearer
+AUTH_OAUTH2_CLIENT_ID=agent-runtime-platform
+AUTH_OAUTH2_CLIENT_SECRET=<server-side-client-secret>
+AUTH_OAUTH2_SCOPE=profile
+AUTH_OAUTH2_SUBJECT_FIELD=attributes.workcode
+AUTH_OAUTH2_USERNAME_FIELD=attributes.workcode
+AUTH_OAUTH2_EMAIL_FIELD=attributes.email
+AUTH_OAUTH2_DISPLAY_NAME_FIELD=attributes.displayName
+AUTH_OAUTH2_AUTO_PROVISION=false
+AUTH_OAUTH2_ALLOWED_DOMAINS=
+```
+
+其 callback 固定为 `<PORTAL_ORIGIN>/auth/oauth2/callback`。字段路径支持 dot-separated JSON path，
+并兼容 `attributes["workcode"]` 形式；
+`subject_field` 必须得到非空 string，其他已配置字段若存在也必须是 string。缺少稳定 subject、类型错误、
+token/UserInfo endpoint 异常、state 不匹配都会 fail-closed。Authorization Code Flow 使用 PKCE；access
+token 只在 callback 内存中用于紧接着的 UserInfo 请求，随后只保留映射后的 identity profile。
+`AUTH_OAUTH2_USERINFO_TOKEN_METHOD` 默认为标准 `bearer`；只有直接对接要求
+`?access_token=...` 的非标准 profile endpoint 时才显式设为 `query`。query 模式不会把 token 写入平台日志、
+数据库或 Audit，但上游反向代理也必须禁记 query string。
+
+Admin Users 可查看每个用户的 External Identities，并为当前已启用 provider 明确 bind/unbind。解绑不能
+移除用户最后一个可用登录方式；Local Account 凭据继续作为可用方式，因此 break-glass Local Admin 不会
+因 identity unbind 被锁死。bind/unbind 与 `identity.bound` / `identity.unbound` Audit 在同一数据库事务提交。
+
+OIDC/OAuth2 client secret、authorization code、access/refresh/ID token 仅在 Control Plane 的协议处理
 期间使用，不返回 Portal、不写 localStorage/普通日志/Audit，也不进入 Worker、managed metadata 或
-Runtime。OIDC 不可用或配置错误时，既有 Local Admin 登录仍独立可用。Phase 10 不提供 JIT、OAuth2
-UserInfo compatibility 或 identity unbind；这些不应通过临时配置绕过。
+Runtime。OIDC/OAuth2 不可用或配置错误时，既有 Local Admin 登录仍独立可用。Phase 11 不新增 Provider
+CRUD、Organization/group RBAC、SCIM/LDAP sync，也不提前实现 Phase 12 的完整 authentication Audit。
 
 ## Single-host local development
 
@@ -369,6 +404,8 @@ POST   /api/auth/login
 POST   /api/auth/logout
 GET    /auth/oidc/login
 GET    /auth/oidc/callback
+GET    /auth/oauth2/login
+GET    /auth/oauth2/callback
 GET    /api/me
 GET    /api/workspaces
 GET    /api/audit-events
@@ -386,6 +423,9 @@ POST   /api/admin/users/:id/reset-password
 POST   /api/admin/users/:id/revoke-sessions
 GET    /api/admin/users/:id/workspaces
 POST   /api/admin/users/:id/oidc-identities
+GET    /api/admin/users/:id/identities
+POST   /api/admin/users/:id/identities
+DELETE /api/admin/users/:id/identities/:identityId
 WS     /api/workers/connect
 ```
 
@@ -394,9 +434,9 @@ WS     /api/workers/connect
 已建立的 Workspace WebSocket 也会被断开。User 管理 API 不提供 destructive delete 或 Workspace
 ownership 改写。
 
-OIDC identity 预绑定是 Phase 10 为人工验收保留的唯一最小 identity 写入口：只允许 active admin、
-exact-match Portal Origin、session-bound CSRF，并要求请求中的 `providerId` 与当前单 Provider 配置完全
-一致。它不提供 identity 查询、解绑、JIT 或 multi-provider CRUD。
+Phase 11 identity 管理只允许 active admin；写操作要求 exact-match Portal Origin 与 session-bound CSRF，
+且 `providerId` 必须属于当前启用的 OIDC/OAuth2 provider。旧的 OIDC 预绑定 path 保留兼容，新的通用
+identity API 支持 list/bind/unbind；平台仍不提供 Provider CRUD 或基于 email 的自动绑定。
 
 首次启动会从当前 Control Plane 已认证连接、在线、enabled、heartbeat 新鲜、容量未满且
 Runtime image/架构/capability 兼容的 Worker 中选择。load score 为 PostgreSQL 中该 Worker 的

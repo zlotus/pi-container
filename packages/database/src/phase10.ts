@@ -11,6 +11,7 @@ export interface UserIdentityRecord {
   userId: string;
   providerId: string;
   providerSubject: string;
+  usernameSnapshot: string | null;
   emailSnapshot: string | null;
   displayNameSnapshot: string | null;
   createdAt: Date;
@@ -27,7 +28,7 @@ export type CompleteOidcLoginResult =
       outcome: "AUTHENTICATED";
       user: {
         id: string;
-        email: string;
+        email: string | null;
         username: string | null;
         role: UserRole;
         status: UserStatus;
@@ -44,6 +45,7 @@ interface UserIdentityRow {
   user_id: string;
   provider_id: string;
   provider_subject: string;
+  username_snapshot: string | null;
   email_snapshot: string | null;
   display_name_snapshot: string | null;
   created_at: Date;
@@ -52,7 +54,7 @@ interface UserIdentityRow {
 
 interface OidcUserRow {
   id: string;
-  email: string;
+  email: string | null;
   username: string | null;
   role: UserRole;
   status: UserStatus;
@@ -67,6 +69,7 @@ function mapIdentity(row: UserIdentityRow): UserIdentityRecord {
     userId: row.user_id,
     providerId: row.provider_id,
     providerSubject: row.provider_subject,
+    usernameSnapshot: row.username_snapshot,
     emailSnapshot: row.email_snapshot,
     displayNameSnapshot: row.display_name_snapshot,
     createdAt: row.created_at,
@@ -110,6 +113,7 @@ export function createPhase10Repository(
             user_id,
             provider_id,
             provider_subject,
+            username_snapshot,
             email_snapshot,
             display_name_snapshot,
             created_at,
@@ -132,6 +136,7 @@ export function createPhase10Repository(
     async completeOidcLogin(input: {
       providerId: string;
       providerSubject: string;
+      usernameSnapshot?: string | null;
       emailSnapshot: string | null;
       displayNameSnapshot: string | null;
       sessionId: string;
@@ -177,6 +182,7 @@ export function createPhase10Repository(
         await transaction`
           update user_identities
           set
+            username_snapshot = ${input.usernameSnapshot ?? null},
             email_snapshot = ${input.emailSnapshot},
             display_name_snapshot = ${input.displayNameSnapshot},
             last_login_at = ${input.authenticatedAt}

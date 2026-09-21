@@ -83,3 +83,10 @@ export {
   type Phase10Repository,
   type UserIdentityRecord,
 } from "./phase10.js";
+export {
+  createPhase11Repository,
+  type BindExternalIdentityResult,
+  type CompleteExternalLoginResult,
+  type Phase11Repository,
+  type UnbindExternalIdentityResult,
+} from "./phase11.js";

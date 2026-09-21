@@ -2,14 +2,14 @@ import { Fragment, type FormEvent, useCallback, useEffect, useState } from "reac
 
 interface User {
   id: string;
-  email: string;
+  email: string | null;
   username: string | null;
   role: "user" | "admin";
   status: "active" | "disabled";
 }
 
 interface AdminUser extends User {
-  source: "local";
+  source: "local" | "external";
   workspaceCount: number;
   lastLoginAt: string | null;
   createdAt: string;
@@ -58,6 +58,19 @@ interface SessionResponse {
 
 interface AuthMethodsResponse {
   oidc: { enabled: boolean; providerId: string | null };
+  oauth2: { enabled: boolean; providerId: string | null };
+}
+
+interface ExternalIdentity {
+  id: string;
+  userId: string;
+  providerId: string;
+  providerSubject: string;
+  usernameSnapshot: string | null;
+  emailSnapshot: string | null;
+  displayNameSnapshot: string | null;
+  createdAt: string;
+  lastLoginAt: string | null;
 }
 
 interface WorkspaceOpenResponse {
@@ -91,6 +104,8 @@ const AUDIT_LABELS: Record<string, string> = {
   "worker.offline": "Worker 已离线",
   "worker.disabled": "Worker 已禁用",
   "worker.runtime_reported": "Runtime 能力已上报",
+  "identity.bound": "External Identity 已绑定",
+  "identity.unbound": "External Identity 已解绑",
 };
 
 function formatBytes(value: number | null): string {
@@ -119,7 +134,7 @@ export class ApiError extends Error {
 type AdminUserUpdate = { role?: User["role"]; status?: User["status"] };
 
 interface AdminUserUpdateTarget {
-  email: string;
+  email: string | null;
   username: string | null;
   role: User["role"];
 }
@@ -128,7 +143,7 @@ export function adminUserUpdateConfirmation(
   user: AdminUserUpdateTarget,
   update: AdminUserUpdate,
 ): string {
-  const identifier = user.username ?? user.email;
+  const identifier = user.username ?? user.email ?? "external user";
   if (update.status !== undefined) {
     return `${update.status === "active" ? "Enable" : "Disable"} user "${identifier}"?`;
   }
@@ -194,11 +209,15 @@ export function App() {
   const [session, setSession] = useState<SessionResponse | null>(null);
   const [oidcEnabled, setOidcEnabled] = useState(false);
   const [oidcProviderId, setOidcProviderId] = useState<string | null>(null);
+  const [oauth2Enabled, setOauth2Enabled] = useState(false);
+  const [oauth2ProviderId, setOauth2ProviderId] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [managedWorkspaces, setManagedWorkspaces] = useState<Workspace[]>([]);
   const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
+  const [managedIdentities, setManagedIdentities] = useState<ExternalIdentity[]>([]);
+  const [expandedIdentityUserId, setExpandedIdentityUserId] = useState<string | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -249,6 +268,8 @@ export function App() {
         const methods = await api<AuthMethodsResponse>("/api/auth/methods");
         setOidcEnabled(methods.oidc.enabled);
         setOidcProviderId(methods.oidc.providerId);
+        setOauth2Enabled(methods.oauth2.enabled);
+        setOauth2ProviderId(methods.oauth2.providerId);
       } catch {
         // Local login remains available if auth-method discovery fails.
       }
@@ -386,7 +407,7 @@ export function App() {
 
   async function resetManagedPassword(user: AdminUser) {
     if (session === null) return;
-    const password = window.prompt(`为 ${user.username ?? user.email} 设置新密码（至少 12 个字符）`);
+    const password = window.prompt(`为 ${user.username ?? user.email ?? user.id} 设置新密码（至少 12 个字符）`);
     if (password === null) return;
     setAdminUsersError(null);
     setPendingUserId(user.id);
@@ -405,26 +426,73 @@ export function App() {
     }
   }
 
-  async function bindManagedOidcIdentity(user: AdminUser) {
-    if (session === null || oidcProviderId === null) return;
+  async function bindManagedIdentity(user: AdminUser, providerId: string) {
+    if (session === null) return;
     const providerSubject = window.prompt(
-      `将 ${oidcProviderId} 的精确 subject 绑定到 ${user.username ?? user.email}`,
+      `将 ${providerId} 的精确 subject 绑定到 ${user.username ?? user.email ?? user.id}`,
     );
     if (providerSubject === null || providerSubject.length === 0) return;
     setAdminUsersError(null);
     setPendingUserId(user.id);
     try {
-      await api(`/api/admin/users/${user.id}/oidc-identities`, {
+      await api(`/api/admin/users/${user.id}/identities`, {
         method: "POST",
         headers: { "x-csrf-token": session.csrfToken },
         body: JSON.stringify({
-          providerId: oidcProviderId,
+          providerId,
           providerSubject,
         }),
       });
     } catch (caught) {
       setAdminUsersError(
-        adminUsersErrorMessage(caught, "Unable to bind OIDC identity"),
+        adminUsersErrorMessage(caught, "Unable to bind external identity"),
+      );
+    } finally {
+      setPendingUserId(null);
+    }
+  }
+
+  async function toggleManagedIdentities(user: AdminUser) {
+    if (expandedIdentityUserId === user.id) {
+      setExpandedIdentityUserId(null);
+      setManagedIdentities([]);
+      return;
+    }
+    setAdminUsersError(null);
+    setPendingUserId(user.id);
+    try {
+      const result = await api<{ identities: ExternalIdentity[] }>(
+        `/api/admin/users/${user.id}/identities`,
+      );
+      setManagedIdentities(result.identities);
+      setExpandedIdentityUserId(user.id);
+    } catch (caught) {
+      setAdminUsersError(
+        adminUsersErrorMessage(caught, "Unable to load external identities"),
+      );
+    } finally {
+      setPendingUserId(null);
+    }
+  }
+
+  async function unbindManagedIdentity(user: AdminUser, identity: ExternalIdentity) {
+    if (session === null) return;
+    if (!window.confirm(`解除 ${identity.providerId} / ${identity.providerSubject} 的绑定？`)) return;
+    setAdminUsersError(null);
+    setPendingUserId(user.id);
+    try {
+      await api(`/api/admin/users/${user.id}/identities/${identity.id}`, {
+        method: "DELETE",
+        headers: { "x-csrf-token": session.csrfToken },
+      });
+      const result = await api<{ identities: ExternalIdentity[] }>(
+        `/api/admin/users/${user.id}/identities`,
+      );
+      setManagedIdentities(result.identities);
+      await loadAuditEvents();
+    } catch (caught) {
+      setAdminUsersError(
+        adminUsersErrorMessage(caught, "Unable to unbind external identity"),
       );
     } finally {
       setPendingUserId(null);
@@ -433,7 +501,7 @@ export function App() {
 
   async function revokeManagedSessions(user: AdminUser) {
     if (session === null) return;
-    if (!window.confirm(`撤销 ${user.username ?? user.email} 的全部登录会话？`)) return;
+    if (!window.confirm(`撤销 ${user.username ?? user.email ?? user.id} 的全部登录会话？`)) return;
     setAdminUsersError(null);
     setPendingUserId(user.id);
     try {
@@ -572,6 +640,8 @@ export function App() {
     setAdminUsersError(null);
     setManagedWorkspaces([]);
     setExpandedUserId(null);
+    setManagedIdentities([]);
+    setExpandedIdentityUserId(null);
     setAuditEvents([]);
   }
 
@@ -611,6 +681,11 @@ export function App() {
               </a>
             </>
           ) : null}
+          {oauth2Enabled ? (
+            <a className="sso-link" href="/auth/oauth2/login">
+              Sign in with Enterprise OAuth2
+            </a>
+          ) : null}
         </form>
       </main>
     );
@@ -621,7 +696,7 @@ export function App() {
       <header>
         <div className="brand"><span className="mark">π</span><span>Agent Runtime</span></div>
         <div className="account">
-          <span>{session.user.username ?? session.user.email}</span>
+          <span>{session.user.username ?? session.user.email ?? session.user.id}</span>
           <button className="quiet" onClick={() => void logout()}>退出</button>
         </div>
       </header>
@@ -689,8 +764,8 @@ export function App() {
                     {adminUsers.map((user) => (
                       <Fragment key={user.id}>
                         <tr>
-                          <td><strong>{user.username ?? user.email}</strong><small>{user.email}{user.lastLoginAt === null ? "" : ` · 最近登录 ${new Date(user.lastLoginAt).toLocaleString()}`}</small></td>
-                          <td>Local</td>
+                          <td><strong>{user.username ?? user.email ?? user.id}</strong><small>{user.email ?? "无 email"}{user.lastLoginAt === null ? "" : ` · 最近登录 ${new Date(user.lastLoginAt).toLocaleString()}`}</small></td>
+                          <td>{user.source === "local" ? "Local" : "External"}</td>
                           <td><span className="state">{user.role}</span></td>
                           <td><span className={`state user-${user.status}`}>{user.status}</span></td>
                           <td>{user.workspaceCount}</td>
@@ -706,10 +781,16 @@ export function App() {
                                 disabled={pendingUserId === user.id}
                                 onClick={() => void updateManagedUser(user, { role: user.role === "admin" ? "user" : "admin" })}
                               >设为 {user.role === "admin" ? "user" : "admin"}</button>
-                              <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void resetManagedPassword(user)}>重置密码</button>
+                              {user.source === "local" ? (
+                                <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void resetManagedPassword(user)}>重置密码</button>
+                              ) : null}
                               {oidcProviderId === null ? null : (
-                                <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void bindManagedOidcIdentity(user)}>绑定 OIDC subject</button>
+                                <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void bindManagedIdentity(user, oidcProviderId)}>绑定 OIDC subject</button>
                               )}
+                              {oauth2ProviderId === null ? null : (
+                                <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void bindManagedIdentity(user, oauth2ProviderId)}>绑定 OAuth2 subject</button>
+                              )}
+                              <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void toggleManagedIdentities(user)}>External identities</button>
                               <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void revokeManagedSessions(user)}>撤销会话</button>
                               <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void toggleManagedWorkspaces(user)}>Workspace metadata</button>
                             </div>
@@ -726,6 +807,25 @@ export function App() {
                                     <li key={workspace.id}>
                                       <strong>{workspace.name}</strong>
                                       <span>{workspace.state} · {workspace.workerId ?? "未分配"} · {workspace.id}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </td>
+                          </tr>
+                        ) : null}
+                        {expandedIdentityUserId === user.id ? (
+                          <tr className="metadata-row" key={`${user.id}-identities`}>
+                            <td colSpan={6}>
+                              {managedIdentities.length === 0 ? (
+                                <span className="muted">该用户没有 External Identity。</span>
+                              ) : (
+                                <ul>
+                                  {managedIdentities.map((identity) => (
+                                    <li key={identity.id}>
+                                      <strong>{identity.providerId}</strong>
+                                      <span>{identity.providerSubject}{identity.emailSnapshot === null ? "" : ` · ${identity.emailSnapshot}`}{identity.lastLoginAt === null ? "" : ` · 最近登录 ${new Date(identity.lastLoginAt).toLocaleString()}`}</span>
+                                      <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void unbindManagedIdentity(user, identity)}>解绑</button>
                                     </li>
                                   ))}
                                 </ul>

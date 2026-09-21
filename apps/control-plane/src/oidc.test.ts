@@ -159,6 +159,7 @@ describe("Generic OIDC client", () => {
 
     expect(identity).toEqual({
       subject: "subject-a",
+      usernameSnapshot: null,
       emailSnapshot: "same@example.test",
       displayNameSnapshot: "OIDC User A",
     });

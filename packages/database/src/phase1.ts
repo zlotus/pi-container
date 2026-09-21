@@ -5,9 +5,9 @@ export type UserStatus = "active" | "disabled";
 
 export interface UserRecord {
   id: string;
-  email: string;
+  email: string | null;
   username: string | null;
-  passwordHash: string;
+  passwordHash: string | null;
   role: UserRole;
   status: UserStatus;
   lastLoginAt: Date | null;
@@ -44,9 +44,9 @@ export interface WorkspaceRecord {
 
 interface UserRow {
   id: string;
-  email: string;
+  email: string | null;
   username: string | null;
-  password_hash: string;
+  password_hash: string | null;
   role: UserRole;
   status: UserStatus;
   last_login_at: Date | null;
@@ -103,7 +103,8 @@ export function createPhase1Repository(database: DatabaseClient) {
           id, email, username, password_hash, role, status,
           last_login_at, created_at, updated_at
         from users
-        where email = ${normalized} or username = ${normalized}
+        where password_hash is not null
+          and (email = ${normalized} or username = ${normalized})
         limit 1
       `;
       const row = rows[0];
@@ -170,7 +171,7 @@ export function createPhase1Repository(database: DatabaseClient) {
           session_id: string;
           expires_at: Date;
           id: string;
-          email: string;
+          email: string | null;
           username: string | null;
           role: UserRole;
           status: UserStatus;
