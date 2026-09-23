@@ -4,6 +4,7 @@ import {
   type Phase8Repository,
 } from "./phase8.js";
 import type {
+  AuthenticationAuditMetadata,
   UserRole,
   UserStatus,
   WorkspaceRecord,
@@ -119,6 +120,7 @@ export function createPhase9Repository(
       userId: string;
       role?: UserRole;
       status?: UserStatus;
+      audit?: AuthenticationAuditMetadata & { actorUserId: string };
     }): Promise<UpdateManagedUserResult> {
       return database.begin(async (transaction) => {
         await transaction`select pg_advisory_xact_lock(708_913_429)`;
@@ -173,6 +175,53 @@ export function createPhase9Repository(
             where user_id = ${input.userId} and revoked_at is null
           `;
         }
+        if (input.audit !== undefined) {
+          const { actorUserId, ...request } = input.audit;
+          if (target.status !== status) {
+            await transaction`
+              insert into platform_audit_events (
+                event_type, actor_user_id, owner_user_id, details
+              ) values (
+                ${status === "active" ? "user.enabled" : "user.disabled"},
+                ${actorUserId},
+                ${input.userId},
+                ${transaction.json({
+                  ...request,
+                  fromStatus: target.status,
+                  toStatus: status,
+                })}
+              )
+            `;
+            if (status === "disabled") {
+              await transaction`
+                insert into platform_audit_events (
+                  event_type, actor_user_id, owner_user_id, details
+                ) values (
+                  'auth.session_revoked',
+                  ${actorUserId},
+                  ${input.userId},
+                  ${transaction.json({ ...request, reason: "user_disabled" })}
+                )
+              `;
+            }
+          }
+          if (target.role !== role) {
+            await transaction`
+              insert into platform_audit_events (
+                event_type, actor_user_id, owner_user_id, details
+              ) values (
+                'user.role_changed',
+                ${actorUserId},
+                ${input.userId},
+                ${transaction.json({
+                  ...request,
+                  fromRole: target.role,
+                  toRole: role,
+                })}
+              )
+            `;
+          }
+        }
         return { outcome: "UPDATED", user: mapAdminUser(row) };
       });
     },
@@ -180,17 +229,37 @@ export function createPhase9Repository(
     async resetLocalPassword(input: {
       userId: string;
       passwordHash: string;
+      audit?: AuthenticationAuditMetadata & { actorUserId: string };
     }): Promise<boolean> {
-      const rows = await database<{ id: string }[]>`
-        update users
-        set password_hash = ${input.passwordHash}, updated_at = now()
-        where id = ${input.userId} and password_hash is not null
-        returning id
-      `;
-      return rows.length === 1;
+      return database.begin(async (transaction) => {
+        const rows = await transaction<{ id: string }[]>`
+          update users
+          set password_hash = ${input.passwordHash}, updated_at = now()
+          where id = ${input.userId} and password_hash is not null
+          returning id
+        `;
+        if (rows.length === 1 && input.audit !== undefined) {
+          const { actorUserId, ...request } = input.audit;
+          await transaction`
+            insert into platform_audit_events (
+              event_type, actor_user_id, owner_user_id, details
+            ) values (
+              'user.password_reset',
+              ${actorUserId},
+              ${input.userId},
+              ${transaction.json({ ...request, method: "local" })}
+            )
+          `;
+        }
+        return rows.length === 1;
+      });
     },
 
-    async revokeUserSessions(userId: string, revokedAt: Date): Promise<boolean> {
+    async revokeUserSessions(
+      userId: string,
+      revokedAt: Date,
+      audit?: AuthenticationAuditMetadata & { actorUserId: string },
+    ): Promise<boolean> {
       return database.begin(async (transaction) => {
         const users = await transaction<{ id: string }[]>`
           select id from users where id = ${userId}
@@ -201,6 +270,19 @@ export function createPhase9Repository(
           set revoked_at = ${revokedAt}
           where user_id = ${userId} and revoked_at is null
         `;
+        if (audit !== undefined) {
+          const { actorUserId, ...request } = audit;
+          await transaction`
+            insert into platform_audit_events (
+              event_type, actor_user_id, owner_user_id, details
+            ) values (
+              'auth.session_revoked',
+              ${actorUserId},
+              ${userId},
+              ${transaction.json({ ...request, reason: "admin_request" })}
+            )
+          `;
+        }
         return true;
       });
     },

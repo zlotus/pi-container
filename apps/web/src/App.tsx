@@ -106,6 +106,15 @@ const AUDIT_LABELS: Record<string, string> = {
   "worker.runtime_reported": "Runtime 能力已上报",
   "identity.bound": "External Identity 已绑定",
   "identity.unbound": "External Identity 已解绑",
+  "auth.login_succeeded": "登录成功",
+  "auth.login_failed": "登录失败",
+  "auth.logout": "已退出登录",
+  "auth.session_revoked": "Session 已撤销",
+  "user.created": "User 已创建",
+  "user.enabled": "User 已启用",
+  "user.disabled": "User 已禁用",
+  "user.role_changed": "User role 已变更",
+  "user.password_reset": "Local password 已重置",
 };
 
 function formatBytes(value: number | null): string {
@@ -119,6 +128,27 @@ function stateTransition(details: Record<string, unknown>): string | null {
   return typeof from === "string" && typeof to === "string"
     ? `${from} → ${to}`
     : null;
+}
+
+function auditDetail(details: Record<string, unknown>): string | null {
+  const transition = stateTransition(details);
+  if (transition !== null) return transition;
+  const fromStatus = details.fromStatus;
+  const toStatus = details.toStatus;
+  if (typeof fromStatus === "string" && typeof toStatus === "string") {
+    return `${fromStatus} → ${toStatus}`;
+  }
+  const fromRole = details.fromRole;
+  const toRole = details.toRole;
+  if (typeof fromRole === "string" && typeof toRole === "string") {
+    return `${fromRole} → ${toRole}`;
+  }
+  const protocol = details.protocol;
+  const category = details.category;
+  if (typeof protocol === "string" && typeof category === "string") {
+    return `${protocol} · ${category}`;
+  }
+  return typeof protocol === "string" ? protocol : null;
 }
 
 export class ApiError extends Error {
@@ -942,8 +972,8 @@ export function App() {
           <div className="section-heading">
             <div>
               <p className="eyebrow">PLATFORM AUDIT</p>
-              <h2 id="audit-title">最近基础设施事件</h2>
-              <p className="muted">只记录平台生命周期与路由事件，不保存 Pi message 或 tool stream。</p>
+              <h2 id="audit-title">最近平台事件</h2>
+              <p className="muted">记录基础设施与认证管理事件，不保存凭据、Pi message 或 tool stream。</p>
             </div>
             <button className="secondary" onClick={() => void loadAuditEvents()}>刷新</button>
           </div>
@@ -957,7 +987,7 @@ export function App() {
                 const subject = workspace?.name ??
                   (typeof recordedName === "string" ? recordedName : null) ??
                   (event.workspaceId === null ? "平台" : `${event.workspaceId.slice(0, 8)}…`);
-                const transition = stateTransition(event.details);
+                const transition = auditDetail(event.details);
                 return (
                   <li key={event.id}>
                     <span className="audit-dot" aria-hidden="true" />

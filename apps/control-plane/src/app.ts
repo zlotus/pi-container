@@ -20,7 +20,10 @@ import type {
   Phase9Repository,
   Phase10Repository,
   Phase11Repository,
+  Phase12Repository,
   PlatformAuditEvent,
+  AuthenticationAuditMetadata,
+  AuthenticationFailureCategory,
   UserIdentityRecord,
   UserRecord,
   WorkerPlacementRecord,
@@ -124,7 +127,8 @@ type Phase1Store = Pick<
     Phase8Repository &
     Phase9Repository &
     Phase10Repository &
-    Phase11Repository,
+    Phase11Repository &
+    Phase12Repository,
   | "findUserByLogin"
   | "createSession"
   | "findActiveSession"
@@ -155,6 +159,7 @@ type Phase1Store = Pick<
   | "bindExternalIdentity"
   | "unbindExternalIdentity"
   | "completeExternalLogin"
+  | "recordAuthenticationFailure"
 >;
 
 type WorkerAdminStore = Pick<
@@ -384,7 +389,36 @@ export function buildControlPlane(
     ),
   );
 
+  function authenticationAudit(
+    request: FastifyRequest,
+    protocol: AuthenticationAuditMetadata["protocol"],
+    providerId: string,
+  ): AuthenticationAuditMetadata {
+    const userAgent = request.headers["user-agent"];
+    return {
+      protocol,
+      providerId,
+      requestId: String(request.id).slice(0, 128),
+      ipAddress: request.ip.slice(0, 128),
+      userAgent:
+        typeof userAgent === "string" ? userAgent.slice(0, 512) : null,
+    };
+  }
+
+  async function recordAuthenticationFailure(
+    request: FastifyRequest,
+    protocol: AuthenticationAuditMetadata["protocol"],
+    providerId: string,
+    category: AuthenticationFailureCategory,
+  ): Promise<void> {
+    await dependencies.store.recordAuthenticationFailure({
+      category,
+      audit: authenticationAudit(request, protocol, providerId),
+    });
+  }
+
   async function completeExternalAuthentication(input: {
+    request: FastifyRequest;
     protocol: "OIDC" | "OAUTH2";
     providerId: string;
     profile: ExternalIdentityProfile;
@@ -419,6 +453,11 @@ export function buildControlPlane(
       tokenHash: hashOpaqueToken(rawToken),
       expiresAt: new Date(authenticatedAt.getTime() + dependencies.sessionTtlMs),
       authenticatedAt,
+      audit: authenticationAudit(
+        input.request,
+        input.protocol,
+        input.providerId,
+      ),
     });
     if (result.outcome === "UNKNOWN_IDENTITY") {
       return input.reply
@@ -785,7 +824,7 @@ export function buildControlPlane(
     };
   });
 
-  app.get("/auth/oidc/login", async (_request, reply) => {
+  app.get("/auth/oidc/login", async (request, reply) => {
     if (dependencies.oidc === undefined) {
       return reply
         .code(404)
@@ -812,6 +851,12 @@ export function buildControlPlane(
       reply.header("cache-control", "no-store");
       return reply.redirect(authorization.url.href);
     } catch {
+      await recordAuthenticationFailure(
+        request,
+        "OIDC",
+        dependencies.oidc.providerId,
+        "provider_unavailable",
+      );
       return reply
         .code(503)
         .send(errorBody("OIDC_UNAVAILABLE", "OIDC login is unavailable"));
@@ -841,6 +886,12 @@ export function buildControlPlane(
         ? null
         : dependencies.oidc.transactions.consume(handle, now());
     if (transaction === null) {
+      await recordAuthenticationFailure(
+        request,
+        "OIDC",
+        dependencies.oidc.providerId,
+        "transaction_invalid",
+      );
       return reply
         .code(400)
         .send(
@@ -865,6 +916,12 @@ export function buildControlPlane(
         transaction,
       });
     } catch {
+      await recordAuthenticationFailure(
+        request,
+        "OIDC",
+        dependencies.oidc.providerId,
+        "protocol_validation_failed",
+      );
       return reply
         .code(401)
         .send(
@@ -876,6 +933,7 @@ export function buildControlPlane(
     }
 
     return completeExternalAuthentication({
+      request,
       protocol: "OIDC",
       providerId: dependencies.oidc.providerId,
       profile: identity,
@@ -886,7 +944,7 @@ export function buildControlPlane(
     });
   });
 
-  app.get("/auth/oauth2/login", async (_request, reply) => {
+  app.get("/auth/oauth2/login", async (request, reply) => {
     if (dependencies.oauth2 === undefined) {
       return reply
         .code(404)
@@ -913,6 +971,12 @@ export function buildControlPlane(
       reply.header("cache-control", "no-store");
       return reply.redirect(authorization.url.href);
     } catch {
+      await recordAuthenticationFailure(
+        request,
+        "OAUTH2",
+        dependencies.oauth2.providerId,
+        "provider_unavailable",
+      );
       return reply
         .code(503)
         .send(errorBody("OAUTH2_UNAVAILABLE", "OAuth2 login is unavailable"));
@@ -942,6 +1006,12 @@ export function buildControlPlane(
         ? null
         : dependencies.oauth2.transactions.consume(handle, now());
     if (transaction === null) {
+      await recordAuthenticationFailure(
+        request,
+        "OAUTH2",
+        dependencies.oauth2.providerId,
+        "transaction_invalid",
+      );
       return reply
         .code(400)
         .send(
@@ -966,6 +1036,12 @@ export function buildControlPlane(
         transaction,
       });
     } catch {
+      await recordAuthenticationFailure(
+        request,
+        "OAUTH2",
+        dependencies.oauth2.providerId,
+        "protocol_validation_failed",
+      );
       return reply
         .code(401)
         .send(
@@ -976,6 +1052,7 @@ export function buildControlPlane(
         );
     }
     return completeExternalAuthentication({
+      request,
       protocol: "OAUTH2",
       providerId: dependencies.oauth2.providerId,
       profile: identity,
@@ -992,6 +1069,12 @@ export function buildControlPlane(
     }
     const parsed = LoginBodySchema.safeParse(request.body);
     if (!parsed.success) {
+      await recordAuthenticationFailure(
+        request,
+        "LOCAL",
+        "local",
+        "invalid_request",
+      );
       return reply
         .code(400)
         .send(errorBody("INVALID_REQUEST", "Invalid login request"));
@@ -1003,6 +1086,12 @@ export function buildControlPlane(
       user?.passwordHash ?? INVALID_LOGIN_HASH,
     );
     if (user === null || !passwordMatches || user.status !== "active") {
+      await recordAuthenticationFailure(
+        request,
+        "LOCAL",
+        "local",
+        "invalid_credentials",
+      );
       return reply
         .code(401)
         .send(errorBody("INVALID_CREDENTIALS", "Invalid login or password"));
@@ -1015,8 +1104,15 @@ export function buildControlPlane(
       userId: user.id,
       tokenHash: hashOpaqueToken(rawToken),
       expiresAt,
+      audit: authenticationAudit(request, "LOCAL", "local"),
     });
     if (!created) {
+      await recordAuthenticationFailure(
+        request,
+        "LOCAL",
+        "local",
+        "invalid_credentials",
+      );
       return reply
         .code(401)
         .send(errorBody("INVALID_CREDENTIALS", "Invalid login or password"));
@@ -1050,7 +1146,14 @@ export function buildControlPlane(
       return reply;
     }
 
-    await dependencies.store.revokeSession(hashOpaqueToken(auth.rawToken), now());
+    await dependencies.store.revokeSession(
+      hashOpaqueToken(auth.rawToken),
+      now(),
+      {
+        actorUserId: auth.session.user.id,
+        ...authenticationAudit(request, "LOCAL", "local"),
+      },
+    );
     dependencies.sessionConnections?.closeSession(auth.session.sessionId);
     reply.header(
       "set-cookie",
@@ -1148,6 +1251,7 @@ export function buildControlPlane(
         username: parsed.data.username ?? null,
         passwordHash: await hashPassword(parsed.data.password),
         role: "user",
+        actorUserId: auth.session.user.id,
       });
       return reply.code(201).send({ user: publicUser(user) });
     } catch (error) {
@@ -1324,6 +1428,10 @@ export function buildControlPlane(
       userId: params.data.id,
       ...(body.data.role === undefined ? {} : { role: body.data.role }),
       ...(body.data.status === undefined ? {} : { status: body.data.status }),
+      audit: {
+        actorUserId: auth.session.user.id,
+        ...authenticationAudit(request, "LOCAL", "local"),
+      },
     });
     if (result.outcome === "NOT_FOUND") {
       return reply
@@ -1366,6 +1474,10 @@ export function buildControlPlane(
     const updated = await dependencies.store.resetLocalPassword({
       userId: params.data.id,
       passwordHash: await hashPassword(body.data.password),
+      audit: {
+        actorUserId: auth.session.user.id,
+        ...authenticationAudit(request, "LOCAL", "local"),
+      },
     });
     if (!updated) {
       return reply
@@ -1393,6 +1505,10 @@ export function buildControlPlane(
     const revoked = await dependencies.store.revokeUserSessions(
       params.data.id,
       now(),
+      {
+        actorUserId: auth.session.user.id,
+        ...authenticationAudit(request, "LOCAL", "local"),
+      },
     );
     if (!revoked) {
       return reply

@@ -24,7 +24,12 @@ issued_tokens = {}
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        print("[%s] %s" % (self.address_string(), fmt % args))
+        # Never let query tokens or callback codes enter ordinary mock-server logs.
+        print("[%s] %s %s" % (
+            self.address_string(),
+            self.command,
+            urlparse(self.path).path,
+        ))
 
     def send_json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -50,9 +55,7 @@ class Handler(BaseHTTPRequestHandler):
             print("\n=== AUTHORIZE ===")
             print("client_id:", client_id)
             print("redirect_uri:", redirect_uri)
-            print("state:", state)
             print("response_type:", response_type)
-            print("code_challenge:", code_challenge)
             print("code_challenge_method:", code_challenge_method)
 
             if client_id != CLIENT_ID:
@@ -88,7 +91,7 @@ class Handler(BaseHTTPRequestHandler):
                 token = auth[7:].strip()
 
             print("\n=== PROFILE ===")
-            print("token:", token)
+            print("token_present:", bool(token))
 
             user = issued_tokens.get(token)
             if user is None:
@@ -134,11 +137,10 @@ class Handler(BaseHTTPRequestHandler):
 
         print("\n=== TOKEN ===")
         print("grant_type:", grant_type)
-        print("code:", code)
         print("redirect_uri:", redirect_uri)
         print("client_id:", client_id)
-        print("client_secret:", client_secret)
-        print("code_verifier:", code_verifier)
+        print("client_secret_present:", bool(client_secret))
+        print("code_verifier_present:", bool(code_verifier))
 
         if grant_type != "authorization_code":
             return self.send_json(400, {"error": "unsupported_grant_type"})
@@ -153,8 +155,7 @@ class Handler(BaseHTTPRequestHandler):
         if record["redirect_uri"] != redirect_uri:
             return self.send_json(400, {"error": "redirect_uri_mismatch"})
 
-        # 这里暂时不严格校验 PKCE，
-        # 但会把 code_verifier 打出来，方便确认 pi-container 确实发送了
+        # 这里暂时不严格校验 PKCE；只确认 verifier 存在，不输出其原文。
         if not code_verifier:
             return self.send_json(400, {"error": "missing_code_verifier"})
 
@@ -171,7 +172,5 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     print(f"Mock Weaver OAuth2 server listening on http://{HOST}:{PORT}")
     print("Client ID:", CLIENT_ID)
-    print("Client Secret:", CLIENT_SECRET)
     print("Current user:", CURRENT_USER)
     HTTPServer((HOST, PORT), Handler).serve_forever()
-

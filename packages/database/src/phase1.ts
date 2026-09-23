@@ -3,6 +3,16 @@ import type { DatabaseClient } from "./index.js";
 export type UserRole = "user" | "admin";
 export type UserStatus = "active" | "disabled";
 
+export type AuthenticationProtocol = "LOCAL" | "OIDC" | "OAUTH2";
+
+export interface AuthenticationAuditMetadata {
+  protocol: AuthenticationProtocol;
+  providerId: string;
+  requestId: string;
+  ipAddress: string;
+  userAgent: string | null;
+}
+
 export interface UserRecord {
   id: string;
   email: string | null;
@@ -117,25 +127,40 @@ export function createPhase1Repository(database: DatabaseClient) {
       username: string | null;
       passwordHash: string;
       role: UserRole;
+      actorUserId?: string;
     }): Promise<UserRecord> {
-      const rows = await database<UserRow[]>`
-        insert into users (id, email, username, password_hash, role)
-        values (
-          ${input.id},
-          ${input.email},
-          ${input.username},
-          ${input.passwordHash},
-          ${input.role}
-        )
-        returning
-          id, email, username, password_hash, role, status,
-          last_login_at, created_at, updated_at
-      `;
-      const row = rows[0];
-      if (row === undefined) {
-        throw new Error("user insert did not return a row");
-      }
-      return mapUser(row);
+      return database.begin(async (transaction) => {
+        const rows = await transaction<UserRow[]>`
+          insert into users (id, email, username, password_hash, role)
+          values (
+            ${input.id},
+            ${input.email},
+            ${input.username},
+            ${input.passwordHash},
+            ${input.role}
+          )
+          returning
+            id, email, username, password_hash, role, status,
+            last_login_at, created_at, updated_at
+        `;
+        const row = rows[0];
+        if (row === undefined) {
+          throw new Error("user insert did not return a row");
+        }
+        if (input.actorUserId !== undefined) {
+          await transaction`
+            insert into platform_audit_events (
+              event_type, actor_user_id, owner_user_id, details
+            ) values (
+              'user.created',
+              ${input.actorUserId},
+              ${input.id},
+              ${transaction.json({ source: "local", role: input.role })}
+            )
+          `;
+        }
+        return mapUser(row);
+      });
     },
 
     async createSession(input: {
@@ -143,6 +168,7 @@ export function createPhase1Repository(database: DatabaseClient) {
       userId: string;
       tokenHash: string;
       expiresAt: Date;
+      audit?: AuthenticationAuditMetadata;
     }): Promise<boolean> {
       return database.begin(async (transaction) => {
         const rows = await transaction<{ id: string }[]>`
@@ -158,6 +184,18 @@ export function createPhase1Repository(database: DatabaseClient) {
           set last_login_at = now(), updated_at = now()
           where id = ${input.userId} and status = 'active'
         `;
+        if (input.audit !== undefined) {
+          await transaction`
+            insert into platform_audit_events (
+              event_type, actor_user_id, owner_user_id, details
+            ) values (
+              'auth.login_succeeded',
+              ${input.userId},
+              ${input.userId},
+              ${transaction.json({ ...input.audit })}
+            )
+          `;
+        }
         return true;
       });
     },
@@ -219,12 +257,32 @@ export function createPhase1Repository(database: DatabaseClient) {
       };
     },
 
-    async revokeSession(tokenHash: string, now: Date): Promise<void> {
-      await database`
-        update user_sessions
-        set revoked_at = ${now}
-        where token_hash = ${tokenHash} and revoked_at is null
-      `;
+    async revokeSession(
+      tokenHash: string,
+      now: Date,
+      audit?: AuthenticationAuditMetadata & { actorUserId: string },
+    ): Promise<void> {
+      await database.begin(async (transaction) => {
+        const rows = await transaction<{ id: string }[]>`
+          update user_sessions
+          set revoked_at = ${now}
+          where token_hash = ${tokenHash} and revoked_at is null
+          returning id
+        `;
+        if (rows.length === 1 && audit !== undefined) {
+          const { actorUserId, ...details } = audit;
+          await transaction`
+            insert into platform_audit_events (
+              event_type, actor_user_id, owner_user_id, details
+            ) values (
+              'auth.logout',
+              ${actorUserId},
+              ${actorUserId},
+              ${transaction.json(details)}
+            )
+          `;
+        }
+      });
     },
 
     async listWorkspaces(userId: string): Promise<WorkspaceRecord[]> {

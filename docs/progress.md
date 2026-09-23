@@ -1,20 +1,20 @@
 # Project Progress
 
-Last reviewed: 2026-09-21
+Last reviewed: 2026-09-23
 
 ## Current Milestone
 
-Phase 9 与 Phase 10 已完成人工验收；当前 Phase 11 Provisioning / Identity Binding / OAuth2
-Compatibility 的工程实现与自动验证已完成，等待目标企业 OIDC/OAuth2 UserInfo 人工验收。Phase 10
-OIDC 校验保持原样；OIDC 与独立 OAuth2 adapter 都归一化到稳定 `(provider_id, subject)` identity，再复用
-同一套 manual/JIT、Platform Session 与 Workspace ownership 主链。JIT 默认关闭、用户固定 `role=user`，
-可选 exact allowed-domain gate；Admin 可 list/bind/unbind identity 且动作写入既有 Audit。未进入 Phase 12。
+Phase 9 与 Phase 10 已完成人工验收；Phase 12 Authentication Audit / Hardening 的工程实现与自动验证
+已完成，Phase 11/12 仍等待目标企业 OIDC/OAuth2 UserInfo、生产 TLS/反向代理日志策略和浏览器人工验收。
+现有 Local/OIDC/OAuth2、manual/JIT、identity lifecycle 与 Platform Session 主链保持不变；Phase 12 将其
+成功、失败和管理动作纳入脱敏 Audit，并补齐 session fixation、Cookie、CSRF/callback、revocation、
+Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立可用。
 
 ## Current Baseline
 
 - `packages/auth` 使用 Node.js scrypt、随机 salt、opaque session token hash 和
   session-bound HMAC CSRF token，不保存明文密码或 Portal session token。
-- `packages/database` 提供幂等 migration 和 Phase 1～11 repository；users、server-side
+- `packages/database` 提供幂等 migration 和 Phase 1～12 repository；users、server-side
   sessions、workspaces、workers 与预注册 `gateway_base_url` 均持久化到 PostgreSQL。
 - `0006_phase9_users` 为既有 User 增量增加 `status`、`last_login_at` 与 `updated_at`；现有用户回填为
   `active`，不改主键、Workspace ownership 或 Local password schema。
@@ -47,8 +47,15 @@ OIDC 校验保持原样；OIDC 与独立 OAuth2 adapter 都归一化到稳定 `(
   具体动作的确认弹窗；该区域独立就近显示含 API error code 的失败信息。请求 schema 严格拒绝 role
   注入、destructive delete 和 ownership 改写；admin 的普通 Workspace API 仍只返回自己的 Workspace。
 - 禁用或降级最后一个 active Local Admin 的操作在 PostgreSQL advisory-lock 保护的事务内被拒绝，保留
-  break-glass 登录入口。Phase 11 不引入复杂 RBAC、Organization/group policy 或 Phase 12 的完整
-  authentication audit 事件。
+  break-glass 登录入口。不引入复杂 RBAC、Organization/group policy 或通用 IAM。
+- Phase 12 为 Local/OIDC/OAuth2 login success/failure、logout、session revoke、User create/enable/
+  disable/role/password reset 记录结构化事件；identity bind/unbind 延续 Phase 11 同事务 Audit。失败事件
+  只保存 protocol、provider、稳定 category、request ID、IP 与截断 User-Agent，不保存 login identifier、
+  password、callback URL/code、token、secret、底层异常或完整 UserInfo。普通用户 Audit 查询只返回自己的
+  `workspace.*`，认证和用户/identity 管理事件仅 admin 可见。
+- Portal 登录总是签发新的随机 server-side session，不复用请求中的 Cookie；生产 Cookie 使用 `__Host-`、
+  `Secure`、`HttpOnly`、`SameSite=Lax` 且无 `Domain`。OIDC/OAuth2 callback 始终回到配置的
+  `PORTAL_ORIGIN`，不信任请求 Host、`returnTo` 或其他 open-redirect 输入。
 - Phase 6 migration 为 Workspace 持久化 `RUNNING | STOPPED | DELETED | UNKNOWN` desired state；start、
   stop、delete 在发 Worker 命令前先持久化 intent。Control Plane 启动会把旧 ONLINE/assigned state
   统一 fail-closed 为 offline，避免重启前 heartbeat/state 继续放行 Gateway。
@@ -139,17 +146,18 @@ OIDC 校验保持原样；OIDC 与独立 OAuth2 adapter 都归一化到稳定 `(
 
 ## In Progress
 
-Phase 11 代码与自动质量门已完成；当前等待使用目标企业 OIDC 与 OAuth2 + UserInfo endpoint 执行真实
-redirect/callback、nested profile mapping、JIT/domain policy 和 Admin identity lifecycle 人工验收。
+Phase 12 代码与自动质量门已完成；当前等待按 `docs/authentication-runbook.md` 使用目标企业 OIDC 与
+OAuth2 + UserInfo endpoint 执行真实 redirect/callback、Audit 脱敏、revocation 和 Local Admin
+break-glass 人工验收。
 
 ## Next
 
-1. 保持 JIT off 验证 manual bind/login；再打开 JIT，以全新 subject 创建 external-only `role=user` User，
-   验证 allowed domain 允许、拒绝和缺失 email 三种结果，且同 email 不合并。
-2. 在 Admin Users 查看 identity snapshot，验证 OIDC/OAuth2 bind/unbind、最后登录方式保护和
-   `identity.bound/unbound` Audit；确认 Local Admin 始终可用。
-3. 用目标 OAuth2 UserInfo endpoint 联调 nested field mapping，并回归既有 OIDC、Local login、Workspace
-   HTTP/SSE/WebSocket/Terminal 与 ownership。记录 Phase 11 人工验收结论；未授权前不进入 Phase 12。
+1. 完成 Phase 11 尚待的目标 IdP manual/JIT、allowed domain、nested UserInfo mapping 与 identity
+   bind/unbind 人工验收，确认同 email 不合并且 External User 固定从 `role=user` 开始。
+2. 按 Phase 12 runbook 执行 Local/OIDC login、故障分类、disable/enable、role、password reset、session
+   revoke 和 Audit 脱敏检查；模拟 IdP 不可用并确认 Local Admin 可进入排障。
+3. 在目标网络/浏览器回归 Portal、Workspace HTTP/SSE/WebSocket/Terminal/Files、Stop/Start 与 recovery，
+   单独记录生产 TLS、callback proxy 和访问日志去敏结论。
 
 ## Risks And Blockers
 
@@ -182,6 +190,18 @@ redirect/callback、nested profile mapping、JIT/domain policy 和 Admin identit
   但目标模型 Prompt streaming、Terminal 交互、比赛浏览器视觉和真实多主机网络仍需人工验收。
 
 ## Verification
+
+- 2026-09-23：Phase 12 根质量门通过 `pnpm lint`、`pnpm typecheck`、`pnpm test`、
+  `pnpm build:web` 与 `git diff --check`；常规测试 137 passed，15 个 PostgreSQL/真实 Docker 条件测试
+  按设计跳过。新增回归覆盖 session fixation、生产 `__Host-` Cookie、固定 callback redirect、Local/OIDC/OAuth2
+  安全失败分类、完整 User/Auth Audit、普通用户不可见和 password/code/token/secret/verifier/nonce 脱敏。
+- 2026-09-23：连接现有开发 PostgreSQL 后 Control Plane 104/104 通过；真实持久化验证 login success/
+  failure、logout、disable revocation、显式 session revoke、User create/enable/disable/role/password reset，
+  并验证普通用户查询不返回 auth/user/identity 管理事件。测试数据已清理。
+- 2026-09-23：`pnpm test:e2e` 通过 Control Plane/Gateway 44/44 与 Worker Gateway 2/2；
+  `pnpm test:e2e:runtime` 在既有 ARM64 `agent-runtime:phase7-toolchain` 上真实 Docker Runtime 6/6 通过。
+  Phase 12 未修改 Worker Protocol、Runtime Image、Scheduler、Gateway ownership 或 pi-web data path；
+  目标 IdP、生产 TLS/反向代理日志策略和 break-glass 演练仍需人工验收。
 
 - 2026-09-21：Phase 11 根静态与常规测试门通过 `pnpm lint`、`pnpm typecheck`、串行 workspace test
   和 `pnpm build:web`；常规测试 134 passed，14 个 PostgreSQL/真实 Docker 条件测试按设计跳过。

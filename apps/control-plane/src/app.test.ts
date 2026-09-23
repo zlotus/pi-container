@@ -103,6 +103,25 @@ async function createTestDependencies(
     ]),
   );
   const auditEvents: PlatformAuditEvent[] = [];
+  const addAuditEvent = (
+    eventType: string,
+    input: {
+      actorUserId?: string | null;
+      ownerUserId?: string | null;
+      details?: Record<string, unknown>;
+    } = {},
+  ): void => {
+    auditEvents.unshift({
+      id: String(auditEvents.length + 1),
+      eventType,
+      actorUserId: input.actorUserId ?? null,
+      ownerUserId: input.ownerUserId ?? null,
+      workspaceId: null,
+      workerId: null,
+      details: input.details ?? {},
+      createdAt: NOW,
+    });
+  };
   const workers: WorkerRecord[] = [WORKER_1_TOKEN, WORKER_2_TOKEN].map(
     (_token, index) => ({
       id: `worker-0${index + 1}`,
@@ -238,7 +257,9 @@ async function createTestDependencies(
         return auditEvents
           .filter(
             (event) =>
-              input.includeAllUsers || event.ownerUserId === input.userId,
+              input.includeAllUsers ||
+              (event.ownerUserId === input.userId &&
+                event.eventType.startsWith("workspace.")),
           )
           .filter(
             (event) =>
@@ -246,6 +267,11 @@ async function createTestDependencies(
               BigInt(event.id) < BigInt(input.beforeId),
           )
           .slice(0, input.limit);
+      },
+      async recordAuthenticationFailure(input) {
+        addAuditEvent("auth.login_failed", {
+          details: { ...input.audit, category: input.category },
+        });
       },
       async findUserByLogin(login) {
         const normalized = login.trim().toLowerCase();
@@ -274,6 +300,13 @@ async function createTestDependencies(
           updatedAt: NOW,
         };
         users.push(user);
+        if (input.actorUserId !== undefined) {
+          addAuditEvent("user.created", {
+            actorUserId: input.actorUserId,
+            ownerUserId: user.id,
+            details: { source: "local", role: input.role },
+          });
+        }
         return user;
       },
       async createSession(input) {
@@ -286,6 +319,13 @@ async function createTestDependencies(
           revoked: false,
         });
         user.lastLoginAt = NOW;
+        if (input.audit !== undefined) {
+          addAuditEvent("auth.login_succeeded", {
+            actorUserId: user.id,
+            ownerUserId: user.id,
+            details: { ...input.audit },
+          });
+        }
         return true;
       },
       async listUserIdentities(userId) {
@@ -366,8 +406,23 @@ async function createTestDependencies(
         );
         let resolvedIdentity = identity;
         if (resolvedIdentity === undefined) {
-          if (!input.autoProvision) return { outcome: "UNKNOWN_IDENTITY" as const };
+          if (!input.autoProvision) {
+            if (input.audit !== undefined) {
+              addAuditEvent("auth.login_failed", {
+                details: { ...input.audit, category: "identity_not_bound" },
+              });
+            }
+            return { outcome: "UNKNOWN_IDENTITY" as const };
+          }
           if (input.provisionedUser === null) {
+            if (input.audit !== undefined) {
+              addAuditEvent("auth.login_failed", {
+                details: {
+                  ...input.audit,
+                  category: "provisioning_not_allowed",
+                },
+              });
+            }
             return { outcome: "PROVISIONING_NOT_ALLOWED" as const };
           }
           const user: UserRecord = {
@@ -394,9 +449,26 @@ async function createTestDependencies(
             lastLoginAt: null,
           };
           identities.push(resolvedIdentity);
+          if (input.audit !== undefined) {
+            addAuditEvent("user.created", {
+              actorUserId: user.id,
+              ownerUserId: user.id,
+              details: {
+                source: "external",
+                providerId: input.providerId,
+                role: "user",
+                requestId: input.audit.requestId,
+              },
+            });
+          }
         }
         const user = users.find((candidate) => candidate.id === resolvedIdentity.userId);
         if (user === undefined || user.status !== "active") {
+          if (input.audit !== undefined) {
+            addAuditEvent("auth.login_failed", {
+              details: { ...input.audit, category: "user_disabled" },
+            });
+          }
           return { outcome: "USER_DISABLED" as const };
         }
         sessions.set(input.tokenHash, {
@@ -411,6 +483,13 @@ async function createTestDependencies(
         resolvedIdentity.lastLoginAt = input.authenticatedAt;
         user.lastLoginAt = input.authenticatedAt;
         user.updatedAt = input.authenticatedAt;
+        if (input.audit !== undefined) {
+          addAuditEvent("auth.login_succeeded", {
+            actorUserId: user.id,
+            ownerUserId: user.id,
+            details: { ...input.audit, provisioned: identity === undefined },
+          });
+        }
         return {
           outcome: "AUTHENTICATED" as const,
           provisioned: identity === undefined,
@@ -453,9 +532,19 @@ async function createTestDependencies(
         };
         return result;
       },
-      async revokeSession(tokenHash) {
+      async revokeSession(tokenHash, _now, audit) {
         const session = sessions.get(tokenHash);
-        if (session !== undefined) session.revoked = true;
+        if (session !== undefined) {
+          session.revoked = true;
+          if (audit !== undefined) {
+            const { actorUserId, ...details } = audit;
+            addAuditEvent("auth.logout", {
+              actorUserId,
+              ownerUserId: actorUserId,
+              details,
+            });
+          }
+        }
       },
       async listUsers() {
         return users.map((user) => ({
@@ -491,6 +580,30 @@ async function createTestDependencies(
         ) {
           return { outcome: "LAST_ACTIVE_LOCAL_ADMIN" as const };
         }
+        if (input.audit !== undefined) {
+          const { actorUserId, ...request } = input.audit;
+          if (user.status !== status) {
+            addAuditEvent(status === "active" ? "user.enabled" : "user.disabled", {
+              actorUserId,
+              ownerUserId: user.id,
+              details: { ...request, fromStatus: user.status, toStatus: status },
+            });
+            if (status === "disabled") {
+              addAuditEvent("auth.session_revoked", {
+                actorUserId,
+                ownerUserId: user.id,
+                details: { ...request, reason: "user_disabled" },
+              });
+            }
+          }
+          if (user.role !== role) {
+            addAuditEvent("user.role_changed", {
+              actorUserId,
+              ownerUserId: user.id,
+              details: { ...request, fromRole: user.role, toRole: role },
+            });
+          }
+        }
         user.role = role;
         user.status = status;
         user.updatedAt = NOW;
@@ -522,12 +635,28 @@ async function createTestDependencies(
         if (user === undefined) return false;
         user.passwordHash = input.passwordHash;
         user.updatedAt = NOW;
+        if (input.audit !== undefined) {
+          const { actorUserId, ...request } = input.audit;
+          addAuditEvent("user.password_reset", {
+            actorUserId,
+            ownerUserId: user.id,
+            details: { ...request, method: "local" },
+          });
+        }
         return true;
       },
-      async revokeUserSessions(userId) {
+      async revokeUserSessions(userId, _revokedAt, audit) {
         if (!users.some((user) => user.id === userId)) return false;
         for (const session of sessions.values()) {
           if (session.userId === userId) session.revoked = true;
+        }
+        if (audit !== undefined) {
+          const { actorUserId, ...request } = audit;
+          addAuditEvent("auth.session_revoked", {
+            actorUserId,
+            ownerUserId: userId,
+            details: { ...request, reason: "admin_request" },
+          });
         }
         return true;
       },
@@ -973,6 +1102,35 @@ describe("local authentication", () => {
       "__Host-platform-session=",
     );
     expect(response.headers["set-cookie"]).toContain("Secure");
+    expect(response.headers["set-cookie"]).not.toContain("Domain=");
+    await app.close();
+  });
+
+  it("replaces an attacker-supplied cookie with a fresh authenticated session", async () => {
+    const app = buildControlPlane(await createTestDependencies());
+    const fixedCookie = "platform-session=attacker-fixed-session";
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { origin: ORIGIN, cookie: fixedCookie },
+      payload: { login: "user-a", password: "password-for-user-a" },
+    });
+    const issuedCookie = firstCookie(response, "platform-session");
+    const fixedSession = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { cookie: fixedCookie },
+    });
+    const issuedSession = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { cookie: issuedCookie },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(issuedCookie).not.toBe(fixedCookie);
+    expect(fixedSession.statusCode).toBe(401);
+    expect(issuedSession.statusCode).toBe(200);
     await app.close();
   });
 
@@ -1462,6 +1620,238 @@ describe("Phase 11 provisioning and identity management", () => {
     expect(me.json()).toMatchObject({
       user: { email: "oauth@example.test", username: "oauth-user-a", role: "user" },
     });
+    await app.close();
+  });
+});
+
+describe("Phase 12 authentication audit and hardening", () => {
+  it("keeps production OIDC cookies host-only and redirects only to the configured Portal", async () => {
+    const dependencies = await createTestDependencies();
+    configureTestOidc(dependencies);
+    if (dependencies.oidc === undefined) throw new Error("OIDC test runtime missing");
+    dependencies.oidc.autoProvision = true;
+    dependencies.secureCookies = true;
+    const app = buildControlPlane(dependencies);
+    const loginResponse = await app.inject({
+      method: "GET",
+      url: "/auth/oidc/login",
+    });
+    const transactionCookie = firstCookie(
+      loginResponse,
+      "__Host-oidc-transaction",
+    );
+    const setCookie = loginResponse.headers["set-cookie"];
+    const serialized = Array.isArray(setCookie) ? setCookie.join(";") : setCookie;
+    const callback = await app.inject({
+      method: "GET",
+      url: "/auth/oidc/callback?code=code-a&state=expected-state&returnTo=https%3A%2F%2Fattacker.test",
+      headers: {
+        cookie: transactionCookie,
+        host: "attacker.test",
+      },
+    });
+    const callbackCookies = callback.headers["set-cookie"];
+    const callbackSerialized = Array.isArray(callbackCookies)
+      ? callbackCookies.join(";")
+      : callbackCookies;
+
+    expect(serialized).toContain("Secure");
+    expect(serialized).toContain("HttpOnly");
+    expect(serialized).toContain("SameSite=Lax");
+    expect(serialized).not.toContain("Domain=");
+    expect(callback.statusCode).toBe(302);
+    expect(callback.headers.location).toBe(ORIGIN);
+    expect(callbackSerialized).toContain("__Host-platform-session=");
+    expect(callbackSerialized).toContain("Secure");
+    expect(callbackSerialized).not.toContain("Domain=");
+    await app.close();
+  });
+
+  it("records complete admin-only auth events with stable categories and no secrets", async () => {
+    const dependencies = await createTestDependencies();
+    configureTestOidc(dependencies);
+    configureTestOAuth2(dependencies);
+    if (dependencies.oidc === undefined) throw new Error("OIDC test runtime missing");
+    if (dependencies.oauth2 === undefined) throw new Error("OAuth2 test runtime missing");
+    const app = buildControlPlane(dependencies);
+    const admin = await login(app, "admin", "password-for-admin");
+    const user = await login(app, "user-a", "password-for-user-a");
+    const adminHeaders = {
+      cookie: admin.cookie,
+      origin: ORIGIN,
+      "x-csrf-token": admin.csrfToken,
+    };
+
+    const failedLocal = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { origin: ORIGIN, "user-agent": "phase12-test-agent" },
+      payload: {
+        login: "user-a",
+        password: "password-secret-marker",
+      },
+    });
+    const transaction = await beginOidcLogin(app);
+    dependencies.oidc.client = {
+      ...dependencies.oidc.client,
+      async exchangeAuthorizationCode() {
+        throw new Error(
+          "authorization-code-secret access-token-secret client-secret-marker",
+        );
+      },
+    };
+    const failedOidc = await app.inject({
+      method: "GET",
+      url: "/auth/oidc/callback?code=authorization-code-secret&state=expected-state",
+      headers: { cookie: transaction },
+    });
+    const oauth2Transaction = await beginOAuth2Login(app);
+    dependencies.oauth2.client = {
+      ...dependencies.oauth2.client,
+      async exchangeAuthorizationCode() {
+        throw new Error(
+          "oauth-authorization-code-secret oauth-access-token-secret oauth-client-secret-marker",
+        );
+      },
+    };
+    const failedOAuth2 = await app.inject({
+      method: "GET",
+      url: "/auth/oauth2/callback?code=oauth-authorization-code-secret&state=oauth-expected-state",
+      headers: { cookie: oauth2Transaction },
+    });
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: adminHeaders,
+      payload: {
+        email: "phase12@example.test",
+        username: "phase12-user",
+        password: "new-password-secret-marker",
+      },
+    });
+    const targetId = created.json<{ user: { id: string } }>().user.id;
+    for (const payload of [
+      { role: "admin" },
+      { role: "user" },
+      { status: "disabled" },
+      { status: "active" },
+    ]) {
+      const response = await app.inject({
+        method: "PATCH",
+        url: `/api/admin/users/${targetId}`,
+        headers: adminHeaders,
+        payload,
+      });
+      expect(response.statusCode).toBe(200);
+    }
+    const reset = await app.inject({
+      method: "POST",
+      url: `/api/admin/users/${targetId}/reset-password`,
+      headers: adminHeaders,
+      payload: { password: "replacement-secret-marker" },
+    });
+    const revoked = await app.inject({
+      method: "POST",
+      url: `/api/admin/users/${targetId}/revoke-sessions`,
+      headers: adminHeaders,
+      payload: {},
+    });
+    const logout = await app.inject({
+      method: "POST",
+      url: "/api/auth/logout",
+      headers: {
+        cookie: user.cookie,
+        origin: ORIGIN,
+        "x-csrf-token": user.csrfToken,
+      },
+      payload: {},
+    });
+    const auditResponse = await app.inject({
+      method: "GET",
+      url: "/api/audit-events?limit=100",
+      headers: { cookie: admin.cookie },
+    });
+    const events = auditResponse.json<{ events: PlatformAuditEvent[] }>().events;
+    const eventTypes = events.map((event) => event.eventType);
+    const serialized = JSON.stringify(events);
+    const userAudit = await app.inject({
+      method: "GET",
+      url: "/api/audit-events?limit=100",
+      headers: { cookie: (await login(app, "user-b", "password-for-user-b")).cookie },
+    });
+
+    expect(failedLocal.statusCode).toBe(401);
+    expect(failedOidc.statusCode).toBe(401);
+    expect(failedOAuth2.statusCode).toBe(401);
+    expect(created.statusCode).toBe(201);
+    expect(reset.statusCode).toBe(204);
+    expect(revoked.statusCode).toBe(204);
+    expect(logout.statusCode).toBe(204);
+    expect(eventTypes).toEqual(
+      expect.arrayContaining([
+        "auth.login_succeeded",
+        "auth.login_failed",
+        "auth.logout",
+        "auth.session_revoked",
+        "user.created",
+        "user.enabled",
+        "user.disabled",
+        "user.role_changed",
+        "user.password_reset",
+      ]),
+    );
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventType: "auth.login_failed",
+          details: expect.objectContaining({
+            protocol: "LOCAL",
+            providerId: "local",
+            category: "invalid_credentials",
+          }),
+        }),
+        expect.objectContaining({
+          eventType: "auth.login_failed",
+          details: expect.objectContaining({
+            protocol: "OIDC",
+            providerId: "enterprise-oidc",
+            category: "protocol_validation_failed",
+          }),
+        }),
+        expect.objectContaining({
+          eventType: "auth.login_failed",
+          details: expect.objectContaining({
+            protocol: "OAUTH2",
+            providerId: "enterprise-oauth2",
+            category: "protocol_validation_failed",
+          }),
+        }),
+      ]),
+    );
+    for (const secret of [
+      "password-secret-marker",
+      "new-password-secret-marker",
+      "replacement-secret-marker",
+      "authorization-code-secret",
+      "access-token-secret",
+      "client-secret-marker",
+      "oauth-authorization-code-secret",
+      "oauth-access-token-secret",
+      "oauth-client-secret-marker",
+      "expected-code-verifier",
+      "expected-nonce",
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+    expect(
+      userAudit
+        .json<{ events: PlatformAuditEvent[] }>()
+        .events.some((event) =>
+          event.eventType.startsWith("auth.") ||
+          event.eventType.startsWith("user.") ||
+          event.eventType.startsWith("identity."),
+        ),
+    ).toBe(false);
     await app.close();
   });
 });

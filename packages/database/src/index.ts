@@ -28,6 +28,8 @@ export { migrateDatabase } from "./migrate.js";
 export {
   createPhase1Repository,
   type AuthenticatedSessionRecord,
+  type AuthenticationAuditMetadata,
+  type AuthenticationProtocol,
   type Phase1Repository,
   type UserRecord,
   type UserRole,
@@ -90,3 +92,8 @@ export {
   type Phase11Repository,
   type UnbindExternalIdentityResult,
 } from "./phase11.js";
+export {
+  createPhase12Repository,
+  type AuthenticationFailureCategory,
+  type Phase12Repository,
+} from "./phase12.js";

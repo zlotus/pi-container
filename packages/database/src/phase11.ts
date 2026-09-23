@@ -3,7 +3,11 @@ import {
   createPhase10Repository,
   type UserIdentityRecord,
 } from "./phase10.js";
-import type { UserRole, UserStatus } from "./phase1.js";
+import type {
+  AuthenticationAuditMetadata,
+  UserRole,
+  UserStatus,
+} from "./phase1.js";
 import type { WorkerSelector } from "./phase5.js";
 
 export type BindExternalIdentityResult =
@@ -232,9 +236,20 @@ export function createPhase11Repository(
       tokenHash: string;
       expiresAt: Date;
       authenticatedAt: Date;
+      audit?: AuthenticationAuditMetadata;
     }): Promise<CompleteExternalLoginResult> {
       return database.begin(async (transaction) => {
         await transaction`select pg_advisory_xact_lock(708_913_431)`;
+        const recordFailure = async (category: string): Promise<void> => {
+          if (input.audit === undefined) return;
+          await transaction`
+            insert into platform_audit_events (event_type, details)
+            values (
+              'auth.login_failed',
+              ${transaction.json({ ...input.audit, category })}
+            )
+          `;
+        };
         let provisioned = false;
         let rows = await transaction<ExternalUserRow[]>`
           select
@@ -249,8 +264,12 @@ export function createPhase11Repository(
         `;
 
         if (rows[0] === undefined) {
-          if (!input.autoProvision) return { outcome: "UNKNOWN_IDENTITY" };
+          if (!input.autoProvision) {
+            await recordFailure("identity_not_bound");
+            return { outcome: "UNKNOWN_IDENTITY" };
+          }
           if (input.provisionedUser === null) {
+            await recordFailure("provisioning_not_allowed");
             return { outcome: "PROVISIONING_NOT_ALLOWED" };
           }
           const username =
@@ -301,11 +320,31 @@ export function createPhase11Repository(
             )
           `;
           provisioned = true;
+          if (input.audit !== undefined) {
+            await transaction`
+              insert into platform_audit_events (
+                event_type, actor_user_id, owner_user_id, details
+              ) values (
+                'user.created',
+                ${createdUser.id},
+                ${createdUser.id},
+                ${transaction.json({
+                  source: "external",
+                  providerId: input.providerId,
+                  role: "user",
+                  requestId: input.audit.requestId,
+                })}
+              )
+            `;
+          }
         }
 
         const user = rows[0];
         if (user === undefined) throw new Error("external identity has no user");
-        if (user.status !== "active") return { outcome: "USER_DISABLED" };
+        if (user.status !== "active") {
+          await recordFailure("user_disabled");
+          return { outcome: "USER_DISABLED" };
+        }
 
         await transaction`
           insert into user_sessions (id, user_id, token_hash, expires_at)
@@ -326,6 +365,18 @@ export function createPhase11Repository(
           where provider_id = ${input.providerId}
             and provider_subject = ${input.providerSubject}
         `;
+        if (input.audit !== undefined) {
+          await transaction`
+            insert into platform_audit_events (
+              event_type, actor_user_id, owner_user_id, details
+            ) values (
+              'auth.login_succeeded',
+              ${user.id},
+              ${user.id},
+              ${transaction.json({ ...input.audit, provisioned })}
+            )
+          `;
+        }
 
         return {
           outcome: "AUTHENTICATED",

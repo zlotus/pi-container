@@ -88,9 +88,11 @@ socket、资源限制与 legacy Runtime 回归，并在结束时删除随机测�
 ### 5. Audit And Security Story
 
 1. 在“最近基础设施事件”中确认出现 created、scheduled、starting/running、opened、
-   stopping/stopped 等事件；admin 还能看到 Worker online/offline/runtime report。
-2. 确认事件不包含 Prompt、assistant message、tool input/output、文件正文、Cookie、session exchange
-   code 或 Worker credential。
+   stopping/stopped 等事件；admin 还能看到 Worker online/offline/runtime report，以及 Phase 12 的
+   login/logout/session revoke、User 管理和 identity bind/unbind 事件。
+2. 确认普通用户只看到自己的 `workspace.*` 事件；确认所有事件不包含 Prompt、assistant message、
+   tool input/output、文件正文、Cookie、password、authorization code、IdP token/client secret、
+   session exchange code 或 Worker credential。
 3. 结合 Gateway 拒绝结果和 Worker/Workspace 信息说明安全边界，并使用准确表述：Docker-based、per-Workspace filesystem/process/resource
    isolation、authenticated reverse proxy；不要宣称 VM-grade、zero-trust 或绝对防逃逸。
 
@@ -105,6 +107,7 @@ socket、资源限制与 legacy Runtime 回归，并在结束时删除随机测�
 - [ ] Stop/Start 后 Workspace 文件和 Pi Session 恢复，Worker ID 不改变。
 - [ ] Portal 能展示实测 Runtime capabilities、Worker 资源容量和平台 Audit Trail；演示时能准确解释安全边界。
 - [ ] Audit 不包含 Pi 对话/tool stream 或 credential；普通用户只看到自己的 Workspace 事件。
+- [ ] 按 [Authentication Runbook](authentication-runbook.md) 完成 SSO failure、认证 Audit 脱敏和 Local Admin break-glass 演练。
 - [ ] 删除演示 Workspace 后，managed Container、network、persistent directory 和 metadata 均按既有
       destructive delete 语义清理；Worker offline 时不伪装删除成功。
 

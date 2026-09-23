@@ -85,6 +85,7 @@ export function createPhase8Repository(
               workspace_id, worker_id, details, created_at
             from platform_audit_events
             where owner_user_id = ${input.userId}
+              and event_type like 'workspace.%'
               and (${input.beforeId}::bigint is null or id < ${input.beforeId}::bigint)
             order by id desc
             limit ${input.limit}

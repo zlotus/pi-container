@@ -2708,7 +2708,7 @@ AUTH_OIDC_AUTO_PROVISION=false
 
 ## Phase 11：Provisioning / Identity Binding / OAuth2 Compatibility
 
-实现状态（2026-09-21）：工程实现与自动验证已完成，等待 Phase 11 人工验收；未进入 Phase 12。
+实现状态（2026-09-23）：工程实现与自动验证已完成，等待 Phase 11 人工验收；Phase 12 工程实现已完成。
 
 目标：
 
@@ -2820,6 +2820,8 @@ display_name_field
 ---
 
 ## Phase 12：Authentication Audit / Hardening
+
+实现状态（2026-09-23）：工程实现与自动验证已完成，等待目标 IdP、生产代理日志策略与 break-glass 人工验收。
 
 目标：
 

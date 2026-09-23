@@ -4,12 +4,13 @@
 [pi-web](https://github.com/agegr/pi-web) 与 Pi Coding Agent，自身只负责认证、
 Workspace、Worker、Docker 生命周期、调度和安全代理。
 
-Phase 9 与 Phase 10 已完成人工验收。当前仓库已完成 **Phase 11：Provisioning / Identity Binding /
-OAuth2 Compatibility** 的工程实现与自动验证，等待目标企业 IdP 人工验收。平台保留 Local Account /
+Phase 9 与 Phase 10 已完成人工验收。当前仓库已完成 **Phase 12：Authentication Audit / Hardening**
+的工程实现与自动验证，Phase 11/12 的目标企业 IdP 人工验收仍待完成。平台保留 Local Account /
 Local Admin 与 Phase 10 Generic OIDC 的完整验证，新增默认关闭的 JIT、exact `allowed_domains` gate、
 Admin External Identity list/bind/unbind，以及与 OIDC 严格分离的 Generic OAuth2 + UserInfo adapter。
 OIDC 与 OAuth2 都归一化为稳定 `(provider_id, subject) -> Platform User -> server-side Platform Session`，
-不按 email 自动合并，也不允许 IdP claim 授予 admin。Phase 12 Authentication Audit / Hardening 尚未进入。
+不按 email 自动合并，也不允许 IdP claim 授予 admin。Local/SSO 登录成败、logout、session revoke、
+User 管理和 identity bind/unbind 已进入追加式 Platform Audit；普通用户仍只看到自己的 Workspace 事件。
 Runtime 现包含
 Python/uv、Node/pnpm、Rust、build tools、ffmpeg、PDF/Office 工具、Playwright/Chromium 和克制的
 Linux/network debugging CLI；Worker 在 hello 前通过本机精确镜像的实际探针上报 capability，不按
@@ -81,7 +82,7 @@ unset LOCAL_USER_PASSWORD
 break-glass 账户应将 `LOCAL_USER_ROLE` 设置为 `admin`；Admin API 会拒绝禁用或降级最后一个
 `active` Local Admin。Admin Users 的创建接口固定创建普通 `user`，需要升权时再走独立 role 操作。
 
-## Configure Phase 11 external authentication
+## Configure external authentication
 
 Phase 10 的单 Generic OIDC Provider 保持不变。先在 IdP 注册 confidential client，并把 callback
 精确设置为：
@@ -147,8 +148,15 @@ Admin Users 可查看每个用户的 External Identities，并为当前已启用
 
 OIDC/OAuth2 client secret、authorization code、access/refresh/ID token 仅在 Control Plane 的协议处理
 期间使用，不返回 Portal、不写 localStorage/普通日志/Audit，也不进入 Worker、managed metadata 或
-Runtime。OIDC/OAuth2 不可用或配置错误时，既有 Local Admin 登录仍独立可用。Phase 11 不新增 Provider
-CRUD、Organization/group RBAC、SCIM/LDAP sync，也不提前实现 Phase 12 的完整 authentication Audit。
+Runtime。OIDC/OAuth2 不可用或配置错误时，既有 Local Admin 登录仍独立可用。平台不新增 Provider CRUD、
+Organization/group RBAC 或 SCIM/LDAP sync。
+
+Phase 12 Audit 记录稳定的 protocol/provider/failure category、request correlation、IP/User-Agent 和
+受控状态变化，不记录 login identifier、password、authorization code、token、client secret、完整
+UserInfo 或底层异常。认证与用户管理事件仅 admin 可见；普通用户的 Audit API 只返回自己的
+`workspace.*` 事件。生产反向代理同样必须禁止记录 callback query、Cookie、Authorization header 和
+request body；OAuth2 query UserInfo 模式还要在所有上游关闭完整 query string 日志。人工验收与 IdP
+故障时的 Local Admin 流程见 [Authentication Audit And Break-glass Runbook](docs/authentication-runbook.md)。
 
 ## Single-host local development
 
