@@ -1,8 +1,11 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   adminUserUpdateConfirmation,
   adminUsersErrorMessage,
+  AuditEventRow,
   ApiError,
   runConfirmedAdminUserUpdate,
 } from "./App.js";
@@ -61,5 +64,95 @@ describe("Admin Users interactions", () => {
     expect(
       adminUsersErrorMessage(new ApiError("Server rejected request", 500), "fallback"),
     ).toBe("Server rejected request");
+  });
+});
+
+describe("Audit event display", () => {
+  const userId = "11111111-1111-4111-8111-111111111111";
+  const adminId = "22222222-2222-4222-8222-222222222222";
+  const event: Parameters<typeof AuditEventRow>[0]["event"] = {
+    id: "1000",
+    eventType: "auth.login_succeeded",
+    actorUserId: userId,
+    ownerUserId: userId,
+    workspaceId: null,
+    workerId: null,
+    details: { protocol: "LOCAL" },
+    createdAt: "2026-09-24T08:00:00.000Z",
+  };
+  const users = [
+    { id: userId, username: "user-a", email: "user-a@example.test" },
+    { id: adminId, username: "admin", email: "admin@example.test" },
+  ];
+
+  function renderAudit(overrides: Partial<typeof event> = {}, options: {
+    users?: Parameters<typeof AuditEventRow>[0]["adminUsers"];
+    workspaces?: Parameters<typeof AuditEventRow>[0]["workspaces"];
+    isAdmin?: boolean;
+  } = {}) {
+    return renderToStaticMarkup(createElement(AuditEventRow, {
+      event: { ...event, ...overrides },
+      workspaces: options.workspaces ?? [],
+      adminUsers: options.users ?? users,
+      isAdmin: options.isAdmin ?? true,
+    }));
+  }
+
+  it("shows the account name for admin login and logout events", () => {
+    expect(renderAudit()).toContain("<p>user-a · LOCAL</p>");
+    expect(renderAudit()).toContain("<strong>登录成功</strong>");
+    expect(renderAudit({ eventType: "auth.logout" })).toContain(
+      "<strong>已退出登录</strong>",
+    );
+    expect(renderAudit({ eventType: "auth.logout" })).toContain(
+      "<p>user-a · LOCAL</p>",
+    );
+  });
+
+  it("distinguishes the target user from the actor on management events", () => {
+    const markup = renderAudit({
+      eventType: "user.disabled",
+      actorUserId: adminId,
+      details: { fromStatus: "active", toStatus: "disabled" },
+    });
+    expect(markup).toContain("<strong>User 已禁用</strong>");
+    expect(markup).toContain("<p>user-a · 操作者 admin · active → disabled</p>");
+  });
+
+  it("keeps unresolved users visible with an eight-character UUID fallback", () => {
+    expect(renderAudit({}, {
+      users: [{ id: userId, username: null, email: "user-a@example.test" }],
+    })).toContain("<p>user-a@example.test · LOCAL</p>");
+
+    const markup = renderAudit({
+      eventType: "auth.session_revoked",
+      actorUserId: adminId,
+    }, { users: [] });
+    expect(markup).toContain("<strong>Session 已撤销</strong>");
+    expect(markup).toContain("<p>11111111 · 操作者 22222222 · LOCAL</p>");
+  });
+
+  it("preserves workspace and worker subjects and hides admin names for regular users", () => {
+    const workspaceId = "33333333-3333-4333-8333-333333333333";
+    const workspace = renderAudit({
+      eventType: "workspace.stopped",
+      workspaceId,
+      workerId: "worker-a",
+      details: { fromState: "RUNNING", toState: "STOPPED" },
+    }, { workspaces: [{ id: workspaceId, name: "build" }] });
+    expect(workspace).toContain("<p>build · worker-a · RUNNING → STOPPED</p>");
+
+    const worker = renderAudit({
+      eventType: "worker.online",
+      actorUserId: adminId,
+      ownerUserId: null,
+      workerId: "worker-a",
+      details: {},
+    });
+    expect(worker).toContain("<p>平台 · worker-a</p>");
+
+    const ordinaryUser = renderAudit({}, { isAdmin: false });
+    expect(ordinaryUser).toContain("<p>平台 · LOCAL</p>");
+    expect(ordinaryUser).not.toContain("user-a");
   });
 });

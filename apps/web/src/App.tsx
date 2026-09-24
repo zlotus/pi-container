@@ -45,6 +45,8 @@ interface Worker {
 interface AuditEvent {
   id: string;
   eventType: string;
+  actorUserId: string | null;
+  ownerUserId: string | null;
   workspaceId: string | null;
   workerId: string | null;
   details: Record<string, unknown>;
@@ -149,6 +151,53 @@ function auditDetail(details: Record<string, unknown>): string | null {
     return `${protocol} · ${category}`;
   }
   return typeof protocol === "string" ? protocol : null;
+}
+
+function auditUserName(userId: string, users: readonly Pick<User, "id" | "username" | "email">[]): string {
+  const user = users.find((candidate) => candidate.id === userId);
+  return user?.username ?? user?.email ?? userId.slice(0, 8);
+}
+
+export function AuditEventRow({
+  event,
+  workspaces,
+  adminUsers,
+  isAdmin,
+}: {
+  event: AuditEvent;
+  workspaces: readonly Pick<Workspace, "id" | "name">[];
+  adminUsers: readonly Pick<User, "id" | "username" | "email">[];
+  isAdmin: boolean;
+}) {
+  const workspace = workspaces.find((candidate) => candidate.id === event.workspaceId);
+  const recordedName = event.details.name;
+  const workspaceSubject = workspace?.name ??
+    (typeof recordedName === "string" ? recordedName : null) ??
+    (event.workspaceId === null ? "平台" : `${event.workspaceId.slice(0, 8)}…`);
+  const isUserEvent = ["auth.", "user.", "identity."].some(
+    (prefix) => event.eventType.startsWith(prefix),
+  );
+  const targetUserId = event.ownerUserId ?? event.actorUserId;
+  const actor = event.actorUserId;
+  const subject = isAdmin && isUserEvent && targetUserId !== null
+    ? `${auditUserName(targetUserId, adminUsers)}${
+      actor !== null && actor !== targetUserId
+        ? ` · 操作者 ${auditUserName(actor, adminUsers)}`
+        : ""
+    }`
+    : workspaceSubject;
+  const transition = auditDetail(event.details);
+
+  return (
+    <li>
+      <span className="audit-dot" aria-hidden="true" />
+      <div>
+        <strong>{AUDIT_LABELS[event.eventType] ?? event.eventType}</strong>
+        <p>{subject}{event.workerId === null ? "" : ` · ${event.workerId}`}{transition === null ? "" : ` · ${transition}`}</p>
+      </div>
+      <time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
+    </li>
+  );
 }
 
 export class ApiError extends Error {
@@ -981,24 +1030,15 @@ export function App() {
             <p className="muted">尚无平台事件。</p>
           ) : (
             <ol className="audit-list">
-              {auditEvents.map((event) => {
-                const workspace = workspaces.find((candidate) => candidate.id === event.workspaceId);
-                const recordedName = event.details.name;
-                const subject = workspace?.name ??
-                  (typeof recordedName === "string" ? recordedName : null) ??
-                  (event.workspaceId === null ? "平台" : `${event.workspaceId.slice(0, 8)}…`);
-                const transition = auditDetail(event.details);
-                return (
-                  <li key={event.id}>
-                    <span className="audit-dot" aria-hidden="true" />
-                    <div>
-                      <strong>{AUDIT_LABELS[event.eventType] ?? event.eventType}</strong>
-                      <p>{subject}{event.workerId === null ? "" : ` · ${event.workerId}`}{transition === null ? "" : ` · ${transition}`}</p>
-                    </div>
-                    <time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
-                  </li>
-                );
-              })}
+              {auditEvents.map((event) => (
+                <AuditEventRow
+                  key={event.id}
+                  event={event}
+                  workspaces={workspaces}
+                  adminUsers={adminUsers}
+                  isAdmin={session.user.role === "admin"}
+                />
+              ))}
             </ol>
           )}
         </section>
