@@ -797,6 +797,71 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
     ).toBe(true);
   });
 
+  it("orders audit IDs numerically across a digit boundary in both list branches", async () => {
+    const repository = createPhase12Repository(database, selectWorker);
+    const ownerUserId = randomUUID();
+    const [maxRow] = await database<{ max_id: string | null }[]>`
+      select max(id)::text as max_id from platform_audit_events
+    `;
+    const maxId = BigInt(maxRow?.max_id ?? "0");
+    let nextPowerOfTen = 1000n;
+    while (nextPowerOfTen - 1n <= maxId) nextPowerOfTen *= 10n;
+    const olderId = (nextPowerOfTen - 1n).toString();
+    const newerId = nextPowerOfTen.toString();
+    const newestId = (nextPowerOfTen + 1n).toString();
+
+    try {
+      await database`
+        insert into platform_audit_events (id, event_type, owner_user_id)
+        overriding system value
+        values
+          (${olderId}::bigint, 'workspace.created', ${ownerUserId}),
+          (${newerId}::bigint, 'workspace.opened', ${ownerUserId}),
+          (${newestId}::bigint, 'auth.logout', ${ownerUserId})
+      `;
+
+      const adminEvents = await repository.listAuditEvents({
+        userId: ownerUserId,
+        includeAllUsers: true,
+        limit: 3,
+        beforeId: null,
+      });
+      expect(adminEvents.map((event) => event.id)).toEqual([
+        newestId,
+        newerId,
+        olderId,
+      ]);
+
+      const adminPage = await repository.listAuditEvents({
+        userId: ownerUserId,
+        includeAllUsers: true,
+        limit: 2,
+        beforeId: newestId,
+      });
+      expect(adminPage.map((event) => event.id)).toEqual([newerId, olderId]);
+
+      const userEvents = await repository.listAuditEvents({
+        userId: ownerUserId,
+        includeAllUsers: false,
+        limit: 2,
+        beforeId: null,
+      });
+      expect(userEvents.map((event) => event.id)).toEqual([newerId, olderId]);
+
+      const userPage = await repository.listAuditEvents({
+        userId: ownerUserId,
+        includeAllUsers: false,
+        limit: 2,
+        beforeId: newerId,
+      });
+      expect(userPage.map((event) => event.id)).toEqual([olderId]);
+    } finally {
+      await database`
+        delete from platform_audit_events where owner_user_id = ${ownerUserId}
+      `;
+    }
+  });
+
   it("persists desired state and conditionally recovers or finalizes deletion", async () => {
     const repository = createPhase12Repository(database, selectWorker);
     const runtimeImage = `agent-runtime:recovery-${suffix}`;
