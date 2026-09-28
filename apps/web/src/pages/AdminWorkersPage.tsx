@@ -59,7 +59,7 @@ export function AdminWorkersPage() {
         <div>
           <p className="eyebrow">ADMIN</p>
           <h1>Workers</h1>
-          <p>查看 Worker 在线状态、架构与 authoritative assignment capacity。</p>
+          <p>查看 Worker 状态和可用容量，并检查运行环境信息。</p>
         </div>
         <button className="secondary" onClick={() => void refreshWorkers()}>刷新</button>
       </div>
@@ -67,7 +67,7 @@ export function AdminWorkersPage() {
       <section className="worker-panel" aria-labelledby="workers-list-title">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">RUNTIME FLEET</p>
+            <p className="eyebrow">WORKERS</p>
             <h2 id="workers-list-title">Worker 列表</h2>
           </div>
         </div>
@@ -88,9 +88,9 @@ export function AdminWorkersPage() {
                       <td><strong>{worker.id}</strong><small>{worker.hostname ?? "尚未连接"}</small></td>
                       <td><span className={`state worker-${worker.status.toLowerCase()}`}>{worker.status}</span></td>
                       <td><strong>{worker.architecture ?? "—"}</strong></td>
-                      <td title="调度以平台 authoritative assignment 为准">
+                      <td title="当前已分配的 Workspace 数量和容量上限">
                         <strong>{worker.assignedWorkspaces}/{worker.maxWorkspaces ?? "—"}</strong>
-                        <span className="capacity-track" aria-label="authoritative assignment capacity"><i style={{ width: `${worker.maxWorkspaces === null || worker.maxWorkspaces === 0 ? 0 : Math.min(100, worker.assignedWorkspaces / worker.maxWorkspaces * 100)}%` }} /></span>
+                        <span className="capacity-track" aria-label="Workspace 容量使用情况"><i style={{ width: `${worker.maxWorkspaces === null || worker.maxWorkspaces === 0 ? 0 : Math.min(100, worker.assignedWorkspaces / worker.maxWorkspaces * 100)}%` }} /></span>
                       </td>
                       <td>{worker.systemResources.logicalCpuCount ?? "—"} vCPU · {formatBytes(worker.systemResources.memoryBytes)}</td>
                       <td>{worker.lastHeartbeatAt === null ? "—" : new Date(worker.lastHeartbeatAt).toLocaleString()}</td>
@@ -100,10 +100,10 @@ export function AdminWorkersPage() {
                       <tr className="metadata-row">
                         <td colSpan={7}>
                           <dl className="worker-details">
-                            <div><dt>Runtime version</dt><dd>{worker.runtimeVersion ?? "—"}</dd></div>
-                            <div><dt>Runtime image</dt><dd>{worker.runtimeImage ?? "尚未上报"}</dd></div>
-                            <div><dt>Heartbeat reported Runtime</dt><dd>{worker.allocatedWorkspaces}</dd></div>
-                            <div><dt>实测能力</dt><dd><span className="capability-list">{Object.entries(CAPABILITY_LABELS).map(([key, label]) => <span className={worker.capabilities[key] ? "capability pass" : "capability fail"} key={key}>{label}</span>)}</span></dd></div>
+                            <div><dt>运行环境版本</dt><dd>{worker.runtimeVersion ?? "—"}</dd></div>
+                            <div><dt>运行环境镜像</dt><dd>{worker.runtimeImage ?? "尚未上报"}</dd></div>
+                            <div><dt>Worker 上报的 Workspace</dt><dd>{worker.allocatedWorkspaces}</dd></div>
+                            <div><dt>可用能力</dt><dd><span className="capability-list">{Object.entries(CAPABILITY_LABELS).map(([key, label]) => <span className={worker.capabilities[key] ? "capability pass" : "capability fail"} key={key}>{label}</span>)}</span></dd></div>
                           </dl>
                         </td>
                       </tr>

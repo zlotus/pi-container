@@ -77,7 +77,7 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
       });
       await loadWorkspaces();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Runtime operation failed");
+      setError(caught instanceof Error ? caught.message : "Workspace operation failed");
       await loadWorkspaces();
     } finally {
       setPendingWorkspaceId(null);
@@ -126,9 +126,9 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
     <>
       <div className="page-heading">
         <div>
-          <p className="eyebrow">YOUR COMPUTE</p>
+          <p className="eyebrow">WORKSPACES</p>
           <h1>Workspaces</h1>
-          <p>每个 Workspace 都有独立、持久的运行环境。</p>
+          <p>创建和管理你的 Workspace，并打开运行中的工作环境。</p>
         </div>
         <form className="create-form" onSubmit={createWorkspace}>
           <input name="name" placeholder="workspace-name" maxLength={80} required />
@@ -152,7 +152,7 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
         <section className="empty-state">
           <span>＋</span>
           <h2>还没有 Workspace</h2>
-          <p>创建第一个工作环境，由 Scheduler 选择 compatible Worker 启动 pi-web。</p>
+          <p>创建第一个 Workspace，开始使用对话、终端和文件等工作能力。</p>
         </section>
       ) : (
         <section className="workspace-grid" aria-label="Workspace 列表">
@@ -185,7 +185,7 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
                 )}
                 <button
                   disabled={workspace.state !== "RUNNING" || pendingWorkspaceId === workspace.id}
-                  title={workspace.state === "RUNNING" ? "在新标签页打开 pi-web" : "请先启动 Workspace"}
+                  title={workspace.state === "RUNNING" ? "在新标签页打开 Workspace" : "请先启动 Workspace"}
                   onClick={() => void openWorkspace(workspace)}
                 >打开 ↗</button>
                 <button

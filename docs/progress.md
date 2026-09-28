@@ -63,9 +63,11 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
   channel 与 Admin Worker 页面；state-changing API 校验 canonical Portal Origin、可选 exact-match
   allowed-origin allowlist 和 CSRF（缺失、未授权或 wildcard Origin 均拒绝），跨用户
   API/Proxy 访问统一按不可见资源拒绝。
-- `apps/web` 提供 Portal，并以轻量 history/location router 将 Workspaces、Admin Users、Admin Workers、
-  Admin Audit 分到 `/`、`/admin/users`、`/admin/workers`、`/admin/audit`。普通用户只显示 Workspaces；
-  各页面按需加载数据，Worker 轮询仅在 Workers 页面挂载期间运行。RUNNING Workspace 的“打开”由用户点击同步预开新标签页，再请求短时
+- `apps/web` 提供 Portal，并以轻量 history/location router 将 Workspaces、普通用户 Activity、Admin
+  Users、Admin Workers、Admin Audit 分到 `/`、`/activity` 与三个 `/admin/*` 路径。普通用户显示
+  Workspaces / Activity，admin 显示 Workspaces / Users / Workers / Audit；Activity 与 Audit 复用事件列表
+  和 `AuditEventRow`，普通用户仍由服务端限定为自己的 `workspace.*` 事件。各页面按需加载数据，Worker
+  轮询仅在 Workers 页面挂载期间运行。RUNNING Workspace 的“打开”由用户点击同步预开新标签页，再请求短时
   exchange code，并在新标签页以 top-level form POST 到 Workspace Host，不使用 query string、
   iframe 或宽域 Cookie；Portal/Workspace 列表保留在原标签页。
 - Portal 与 Workspace Host 使用同一条 server-side session 的不同 host-only Cookie 副本；
@@ -149,12 +151,13 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
 
 ## In Progress
 
-v0.x 封版前 Portal UI / IA cleanup 已完成实现和自动质量门，当前改动尚未提交。
+v0.x 封版前 Portal UI / IA cleanup 与小范围 follow-up 已完成：普通用户 Activity 已恢复，页面说明、
+空状态和 tooltip 已收敛为面向最终用户的功能文案。
 
 ## Next
 
 1. 在部署入口确认所有 Portal 路径都配置 SPA fallback，并回归刷新、前进/后退与登录态恢复。
-2. 做一次目标浏览器的四页视觉检查，确认窄屏没有明显不可用布局。
+2. 做一次目标浏览器的五个页面视觉检查，确认窄屏没有明显不可用布局。
 3. 保持封版边界，不在本次 cleanup 中加入筛选、搜索、分页、Dashboard 或新的平台能力。
 
 ## Risks And Blockers
@@ -188,6 +191,11 @@ v0.x 封版前 Portal UI / IA cleanup 已完成实现和自动质量门，当前
 
 ## Verification
 
+- 2026-09-28：Activity / product-copy follow-up 通过 `pnpm lint`、`pnpm typecheck`、串行全仓
+  `pnpm -r --workspace-concurrency=1 --if-present test`（148 passed，16 个条件测试按设计跳过）、
+  `pnpm build:web` 与 `git diff --check`。Web 14/14 覆盖 user/admin 导航差异、普通用户 `/activity`、
+  workspace event 展示、`/admin/audit` 拒绝、Admin Audit/AuditEventRow 回归和 Worker polling cleanup；
+  Vite production preview 对 `/`、`/activity`、`/admin/audit` 直接请求均返回 HTTP 200 SPA 入口。
 - 2026-09-28：本轮 UI / IA cleanup 通过 `pnpm lint`、`pnpm typecheck`、串行全仓
   `pnpm -r --workspace-concurrency=1 --if-present test`（146 passed，16 个 PostgreSQL/真实 Docker 条件测试
   按设计跳过）、`pnpm build:web` 与 `git diff --check`。Web 12/12 覆盖导航可见性、三条 admin route、

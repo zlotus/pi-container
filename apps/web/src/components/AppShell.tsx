@@ -21,7 +21,7 @@ export function AppShell({
     <div className="portal-shell">
       <header className="app-header">
         <div className="header-main">
-          <div className="brand"><span className="mark">π</span><span>Agent Runtime</span></div>
+          <div className="brand"><span className="mark">π</span><span>Agent Workspace</span></div>
           <Navigation route={route} role={user.role} onNavigate={onNavigate} />
         </div>
         <div className="account">

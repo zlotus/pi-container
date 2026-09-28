@@ -12,8 +12,10 @@ const ITEMS: Array<{
   route: Exclude<PortalRoute, "not-found">;
   label: string;
   adminOnly?: boolean;
+  userOnly?: boolean;
 }> = [
   { route: "workspaces", label: "Workspaces" },
+  { route: "activity", label: "Activity", userOnly: true },
   { route: "admin-users", label: "Users", adminOnly: true },
   { route: "admin-workers", label: "Workers", adminOnly: true },
   { route: "admin-audit", label: "Audit", adminOnly: true },
@@ -34,7 +36,9 @@ export function Navigation({ route, role, onNavigate }: NavigationProps) {
 
   return (
     <nav aria-label="Portal navigation">
-      {ITEMS.filter((item) => !item.adminOnly || role === "admin").map((item) => (
+      {ITEMS.filter((item) =>
+        (!item.adminOnly || role === "admin") && (!item.userOnly || role === "user")
+      ).map((item) => (
         <a
           key={item.route}
           href={ROUTE_PATHS[item.route]}

@@ -11,6 +11,7 @@ import {
   runConfirmedAdminUserUpdate,
 } from "./pages/AdminUsersPage.js";
 import { AdminWorkersPage } from "./pages/AdminWorkersPage.js";
+import { UserActivityPage } from "./pages/UserActivityPage.js";
 import { WorkspacesPage } from "./pages/WorkspacesPage.js";
 import { canAccessRoute, type PortalRoute, usePortalRouter } from "./router.js";
 import type { AuthMethodsResponse, SessionResponse } from "./types.js";
@@ -69,6 +70,8 @@ export function PortalRouteContent({
   switch (route) {
     case "workspaces":
       return <WorkspacesPage session={session} />;
+    case "activity":
+      return <UserActivityPage />;
     case "admin-users":
       return (
         <AdminUsersPage
@@ -152,15 +155,15 @@ export function App() {
     return (
       <main className="login-shell">
         <section className="login-copy">
-          <p className="eyebrow">CONTAINERIZED AGENT RUNTIME</p>
-          <h1>一台属于智能体的隔离工作机。</h1>
-          <p>登录后创建持久 Workspace。对话、终端和文件能力由 Workspace 内的 pi-web 提供。</p>
+          <p className="eyebrow">AGENT WORKSPACE</p>
+          <h1>智能体工作平台</h1>
+          <p>登录后创建 Workspace，使用对话、终端和文件等工作能力。</p>
         </section>
         <form className="login-card" onSubmit={login}>
           <div>
             <span className="mark">π</span>
             <h2>登录平台</h2>
-            <p>使用本地企业账户继续</p>
+            <p>使用平台账户继续</p>
           </div>
           <label>
             邮箱或用户名

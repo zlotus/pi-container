@@ -13,8 +13,9 @@ User 管理和 identity bind/unbind 已进入追加式 Platform Audit；普通�
 Runtime 现包含
 Python/uv、Node/pnpm、Rust、build tools、ffmpeg、PDF/Office 工具、Playwright/Chromium 和克制的
 Linux/network debugging CLI；Worker 在 hello 前通过本机精确镜像的实际探针上报 capability，不按
-architecture 猜测。Portal 使用 `/`、`/admin/users`、`/admin/workers`、`/admin/audit` 四个页面分别承载
-Workspace、User、Worker 与 Platform Audit；普通用户只显示 Workspaces 导航。Artifact 继续复用 pi-web
+architecture 猜测。Portal 使用 `/`、`/activity` 与三个 `/admin/*` 页面分别承载 Workspace、用户活动、
+User、Worker 与 Platform Audit；普通用户显示 Workspaces / Activity，admin 显示 Workspaces / Users /
+Workers / Audit。Artifact 继续复用 pi-web
 的 `/workspace` Files 查看/下载，不复制文件或 Pi
 message/tool stream。仓库记录的 ARM64 工程验证已通过，AMD64 native 自动验证记录仍待补齐。
 HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其

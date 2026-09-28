@@ -280,7 +280,7 @@ export function AdminUsersPage({
       setManagedWorkspaces(result.workspaces);
       setWorkspaceUserId(user.id);
     } catch (caught) {
-      setError(adminUsersErrorMessage(caught, "Unable to load Workspace metadata"));
+      setError(adminUsersErrorMessage(caught, "Unable to load Workspace information"));
     } finally {
       setPendingUserId(null);
     }
@@ -308,7 +308,7 @@ export function AdminUsersPage({
         <div>
           <p className="eyebrow">ADMIN</p>
           <h1>Users</h1>
-          <p>管理本地账户、角色、状态、会话与 External Identity。</p>
+          <p>管理平台用户及其登录方式和访问权限。</p>
         </div>
         <button className="secondary" onClick={() => void refreshUsers()}>刷新</button>
       </div>
@@ -316,21 +316,21 @@ export function AdminUsersPage({
       <section className="user-panel" aria-labelledby="create-user-title">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">LOCAL ACCOUNT</p>
-            <h2 id="create-user-title">创建 Local User</h2>
+            <p className="eyebrow">NEW USER</p>
+            <h2 id="create-user-title">创建本地用户</h2>
           </div>
         </div>
         <form className="user-create-form" onSubmit={createLocalUser}>
           <input name="email" type="email" placeholder="email@example.com" maxLength={320} required />
           <input name="username" placeholder="username（可选）" minLength={3} maxLength={64} pattern="[a-z0-9][a-z0-9._-]{2,63}" />
           <input name="password" type="password" placeholder="初始密码（至少 12 位）" minLength={12} maxLength={1024} autoComplete="new-password" required />
-          <button type="submit">创建 Local User</button>
+          <button type="submit">创建本地用户</button>
         </form>
       </section>
       <section className="user-panel" aria-labelledby="users-list-title">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">PLATFORM USERS</p>
+            <p className="eyebrow">USERS</p>
             <h2 id="users-list-title">用户列表</h2>
           </div>
         </div>
@@ -371,13 +371,13 @@ export function AdminUsersPage({
                             {user.source === "local" ? <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void resetManagedPassword(user)}>重置密码</button> : null}
                             {oidcProviderId === null ? null : <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void bindManagedIdentity(user, oidcProviderId)}>绑定 OIDC subject</button>}
                             {oauth2ProviderId === null ? null : <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void bindManagedIdentity(user, oauth2ProviderId)}>绑定 OAuth2 subject</button>}
-                            <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void toggleManagedIdentities(user)}>External identities</button>
+                            <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void toggleManagedIdentities(user)}>登录方式</button>
                             <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void revokeManagedSessions(user)}>撤销会话</button>
-                            <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void toggleManagedWorkspaces(user)}>Workspace metadata</button>
+                            <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void toggleManagedWorkspaces(user)}>Workspace 信息</button>
                           </div>
                           {workspaceUserId === user.id ? (
                             <div className="detail-block">
-                              <strong>Workspace metadata</strong>
+                              <strong>Workspace 信息</strong>
                               {managedWorkspaces.length === 0 ? <p className="muted">该用户没有 Workspace。</p> : (
                                 <ul>{managedWorkspaces.map((workspace) => <li key={workspace.id}><strong>{workspace.name}</strong><span>{workspace.state} · {workspace.workerId ?? "未分配"} · {workspace.id}</span></li>)}</ul>
                               )}
@@ -385,8 +385,8 @@ export function AdminUsersPage({
                           ) : null}
                           {identityUserId === user.id ? (
                             <div className="detail-block">
-                              <strong>External identities</strong>
-                              {managedIdentities.length === 0 ? <p className="muted">该用户没有 External Identity。</p> : (
+                              <strong>登录方式</strong>
+                              {managedIdentities.length === 0 ? <p className="muted">该用户没有外部登录方式。</p> : (
                                 <ul>{managedIdentities.map((identity) => <li key={identity.id}><strong>{identity.providerId}</strong><span>{identity.providerSubject}{identity.emailSnapshot === null ? "" : ` · ${identity.emailSnapshot}`}{identity.lastLoginAt === null ? "" : ` · 最近登录 ${new Date(identity.lastLoginAt).toLocaleString()}`}</span><button className="secondary" disabled={pendingUserId === user.id} onClick={() => void unbindManagedIdentity(user, identity)}>解绑</button></li>)}</ul>
                               )}
                             </div>

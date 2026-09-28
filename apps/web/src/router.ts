@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 export type PortalRoute =
   | "workspaces"
+  | "activity"
   | "admin-users"
   | "admin-workers"
   | "admin-audit"
@@ -9,6 +10,7 @@ export type PortalRoute =
 
 export const ROUTE_PATHS: Record<Exclude<PortalRoute, "not-found">, string> = {
   workspaces: "/",
+  activity: "/activity",
   "admin-users": "/admin/users",
   "admin-workers": "/admin/workers",
   "admin-audit": "/admin/audit",

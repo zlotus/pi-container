@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { api } from "../api.js";
-import { AuditEventRow } from "../components/AuditEventRow.js";
+import { AuditEventList } from "../components/AuditEventList.js";
 import type { AdminUser, AuditEvent, Workspace } from "../types.js";
 
 export function AdminAuditPage() {
@@ -49,7 +49,7 @@ export function AdminAuditPage() {
         <div>
           <p className="eyebrow">ADMIN</p>
           <h1>Audit</h1>
-          <p>基础设施、认证与用户管理事件，不保存凭据、Pi message 或 tool stream。</p>
+          <p>查看平台最近发生的登录、用户管理和运行状态变更。</p>
         </div>
         <div className="page-toolbar">
           <button className="secondary" onClick={() => void refreshAuditEvents()}>刷新</button>
@@ -59,27 +59,19 @@ export function AdminAuditPage() {
       <section className="audit-panel" aria-labelledby="audit-title">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">PLATFORM AUDIT</p>
+            <p className="eyebrow">RECENT EVENTS</p>
             <h2 id="audit-title">最近平台事件</h2>
           </div>
         </div>
-        {loading ? (
-          <p className="muted">正在载入事件…</p>
-        ) : events.length === 0 ? (
-          <p className="muted">尚无平台事件。</p>
-        ) : (
-          <ol className="audit-list">
-            {events.map((event) => (
-              <AuditEventRow
-                key={event.id}
-                event={event}
-                workspaces={workspaces}
-                adminUsers={users}
-                isAdmin
-              />
-            ))}
-          </ol>
-        )}
+        <AuditEventList
+          events={events}
+          workspaces={workspaces}
+          adminUsers={users}
+          isAdmin
+          loading={loading}
+          loadingMessage="正在载入事件…"
+          emptyMessage="尚无平台事件。"
+        />
       </section>
     </>
   );

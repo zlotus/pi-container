@@ -2236,9 +2236,11 @@ Sign in with SSO
 
 ## Workspace List
 
-Portal 使用轻量前端路由拆分主要信息架构：Workspace 列表位于 `/`；admin-only 的 Users、Workers、
-Audit 分别位于 `/admin/users`、`/admin/workers`、`/admin/audit`。普通用户导航只显示 Workspaces；
-前端无权限页面不能替代后端 authorization。
+Portal 使用轻量前端路由拆分主要信息架构：Workspace 列表位于 `/`，普通用户自己的 Workspace Activity
+位于 `/activity`；admin-only 的 Users、Workers、Audit 分别位于 `/admin/users`、`/admin/workers`、
+`/admin/audit`。普通用户导航显示 Workspaces / Activity，admin 导航显示 Workspaces / Users / Workers /
+Audit；前端无权限页面不能替代后端 authorization。Activity 与 Admin Audit 复用事件展示，普通用户仍只
+能从服务端获得自己的 `workspace.*` 事件。
 
 ```text
 Workspace      State       Worker
