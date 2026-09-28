@@ -4,8 +4,7 @@
 [pi-web](https://github.com/agegr/pi-web) 与 Pi Coding Agent，自身只负责认证、
 Workspace、Worker、Docker 生命周期、调度和安全代理。
 
-Phase 9 与 Phase 10 已完成人工验收。当前仓库已完成 **Phase 12：Authentication Audit / Hardening**
-的工程实现与自动验证，Phase 11/12 的目标企业 IdP 人工验收仍待完成。平台保留 Local Account /
+Phase 9～12 的工程实现、自动验证与人工验收已完成。平台保留 Local Account /
 Local Admin 与 Phase 10 Generic OIDC 的完整验证，新增默认关闭的 JIT、exact `allowed_domains` gate、
 Admin External Identity list/bind/unbind，以及与 OIDC 严格分离的 Generic OAuth2 + UserInfo adapter。
 OIDC 与 OAuth2 都归一化为稳定 `(provider_id, subject) -> Platform User -> server-side Platform Session`，
@@ -14,8 +13,9 @@ User 管理和 identity bind/unbind 已进入追加式 Platform Audit；普通�
 Runtime 现包含
 Python/uv、Node/pnpm、Rust、build tools、ffmpeg、PDF/Office 工具、Playwright/Chromium 和克制的
 Linux/network debugging CLI；Worker 在 hello 前通过本机精确镜像的实际探针上报 capability，不按
-architecture 猜测。Portal 现在展示 Worker/Workspace placement、能力、容量和结构化
-Platform Audit Trail。Artifact 继续复用 pi-web 的 `/workspace` Files 查看/下载，不复制文件或 Pi
+architecture 猜测。Portal 使用 `/`、`/admin/users`、`/admin/workers`、`/admin/audit` 四个页面分别承载
+Workspace、User、Worker 与 Platform Audit；普通用户只显示 Workspaces 导航。Artifact 继续复用 pi-web
+的 `/workspace` Files 查看/下载，不复制文件或 Pi
 message/tool stream。仓库记录的 ARM64 工程验证已通过，AMD64 native 自动验证记录仍待补齐。
 HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其
 Chat、Terminal 或 streaming 实现。

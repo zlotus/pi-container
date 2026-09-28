@@ -2236,6 +2236,10 @@ Sign in with SSO
 
 ## Workspace List
 
+Portal 使用轻量前端路由拆分主要信息架构：Workspace 列表位于 `/`；admin-only 的 Users、Workers、
+Audit 分别位于 `/admin/users`、`/admin/workers`、`/admin/audit`。普通用户导航只显示 Workspaces；
+前端无权限页面不能替代后端 authorization。
+
 ```text
 Workspace      State       Worker
 network-sim    RUNNING     worker-a
@@ -2708,7 +2712,7 @@ AUTH_OIDC_AUTO_PROVISION=false
 
 ## Phase 11：Provisioning / Identity Binding / OAuth2 Compatibility
 
-实现状态（2026-09-23）：工程实现与自动验证已完成，等待 Phase 11 人工验收；Phase 12 工程实现已完成。
+实现状态（2026-09-28）：工程实现、自动验证与人工验收已完成。
 
 目标：
 
@@ -2821,7 +2825,7 @@ display_name_field
 
 ## Phase 12：Authentication Audit / Hardening
 
-实现状态（2026-09-23）：工程实现与自动验证已完成，等待目标 IdP、生产代理日志策略与 break-glass 人工验收。
+实现状态（2026-09-28）：工程实现、自动验证与人工验收已完成。
 
 目标：
 

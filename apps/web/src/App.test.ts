@@ -7,8 +7,13 @@ import {
   adminUsersErrorMessage,
   AuditEventRow,
   ApiError,
+  PortalRouteContent,
   runConfirmedAdminUserUpdate,
 } from "./App.js";
+import { Navigation } from "./components/Navigation.js";
+import { beginWorkerPolling } from "./pages/AdminWorkersPage.js";
+import { routeFromPathname } from "./router.js";
+import type { SessionResponse } from "./types.js";
 
 const user = {
   email: "user@example.test",
@@ -154,5 +159,97 @@ describe("Audit event display", () => {
     const ordinaryUser = renderAudit({}, { isAdmin: false });
     expect(ordinaryUser).toContain("<p>平台 · LOCAL</p>");
     expect(ordinaryUser).not.toContain("user-a");
+  });
+});
+
+describe("Portal navigation and routes", () => {
+  const adminSession: SessionResponse = {
+    csrfToken: "csrf-admin",
+    user: {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      email: "admin@example.test",
+      username: "admin",
+      role: "admin",
+      status: "active",
+    },
+  };
+  const userSession: SessionResponse = {
+    csrfToken: "csrf-user",
+    user: {
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      email: "user@example.test",
+      username: "user",
+      role: "user",
+      status: "active",
+    },
+  };
+
+  function renderNavigation(session: SessionResponse) {
+    return renderToStaticMarkup(createElement(Navigation, {
+      route: "workspaces",
+      role: session.user.role,
+      onNavigate: vi.fn(),
+    }));
+  }
+
+  function renderRoute(pathname: string, session = adminSession) {
+    return renderToStaticMarkup(createElement(PortalRouteContent, {
+      route: routeFromPathname(pathname),
+      session,
+      oidcProviderId: "enterprise-oidc",
+      oauth2ProviderId: "enterprise-oauth2",
+      onNavigate: vi.fn(),
+      onSessionChanged: vi.fn(),
+      onSessionEnded: vi.fn(),
+    }));
+  }
+
+  it("shows only Workspaces navigation to a regular user", () => {
+    const markup = renderNavigation(userSession);
+    expect(markup).toContain('href="/"');
+    expect(markup).toContain("Workspaces");
+    expect(markup).not.toContain("Users");
+    expect(markup).not.toContain("Workers");
+    expect(markup).not.toContain("Audit");
+  });
+
+  it("shows every workspace and admin destination to an admin", () => {
+    const markup = renderNavigation(adminSession);
+    expect(markup).toContain("Workspaces");
+    expect(markup).toContain('href="/admin/users"');
+    expect(markup).toContain('href="/admin/workers"');
+    expect(markup).toContain('href="/admin/audit"');
+  });
+
+  it("maps deep links to their dedicated admin pages", () => {
+    expect(renderRoute("/admin/users")).toContain("<h1>Users</h1>");
+    expect(renderRoute("/admin/workers")).toContain("<h1>Workers</h1>");
+    expect(renderRoute("/admin/audit")).toContain("<h1>Audit</h1>");
+  });
+
+  it("renders a friendly denial without mounting an admin page for a regular user", () => {
+    const markup = renderRoute("/admin/users", userSession);
+    expect(markup).toContain("无权访问 Admin 页面");
+    expect(markup).not.toContain("创建 Local User");
+  });
+});
+
+describe("Worker polling lifecycle", () => {
+  it("cancels the page-owned polling interval during cleanup", () => {
+    const refresh = vi.fn();
+    let scheduledCallback: (() => void) | undefined;
+    const schedule = vi.fn((callback: () => void, delay: number) => {
+      scheduledCallback = callback;
+      expect(delay).toBe(5_000);
+      return 42;
+    });
+    const cancel = vi.fn();
+
+    const cleanup = beginWorkerPolling(refresh, schedule, cancel);
+    scheduledCallback?.();
+    expect(refresh).toHaveBeenCalledOnce();
+
+    cleanup();
+    expect(cancel).toHaveBeenCalledWith(42);
   });
 });

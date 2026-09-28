@@ -1,11 +1,11 @@
 # Project Progress
 
-Last reviewed: 2026-09-23
+Last reviewed: 2026-09-28
 
 ## Current Milestone
 
-Phase 9 与 Phase 10 已完成人工验收；Phase 12 Authentication Audit / Hardening 的工程实现与自动验证
-已完成，Phase 11/12 仍等待目标企业 OIDC/OAuth2 UserInfo、生产 TLS/反向代理日志策略和浏览器人工验收。
+Phase 9～12 的工程实现、自动验证与人工验收已完成。当前里程碑是 v0.x 封版前的 Portal UI /
+Information Architecture cleanup，不新增平台能力、不修改 API contract 或权限模型。
 现有 Local/OIDC/OAuth2、manual/JIT、identity lifecycle 与 Platform Session 主链保持不变；Phase 12 将其
 成功、失败和管理动作纳入脱敏 Audit，并补齐 session fixation、Cookie、CSRF/callback、revocation、
 Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立可用。
@@ -63,7 +63,9 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
   channel 与 Admin Worker 页面；state-changing API 校验 canonical Portal Origin、可选 exact-match
   allowed-origin allowlist 和 CSRF（缺失、未授权或 wildcard Origin 均拒绝），跨用户
   API/Proxy 访问统一按不可见资源拒绝。
-- `apps/web` 提供 Portal；RUNNING Workspace 的“打开”由用户点击同步预开新标签页，再请求短时
+- `apps/web` 提供 Portal，并以轻量 history/location router 将 Workspaces、Admin Users、Admin Workers、
+  Admin Audit 分到 `/`、`/admin/users`、`/admin/workers`、`/admin/audit`。普通用户只显示 Workspaces；
+  各页面按需加载数据，Worker 轮询仅在 Workers 页面挂载期间运行。RUNNING Workspace 的“打开”由用户点击同步预开新标签页，再请求短时
   exchange code，并在新标签页以 top-level form POST 到 Workspace Host，不使用 query string、
   iframe 或宽域 Cookie；Portal/Workspace 列表保留在原标签页。
 - Portal 与 Workspace Host 使用同一条 server-side session 的不同 host-only Cookie 副本；
@@ -134,8 +136,9 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
   delete 与 Worker status/runtime report 由数据库 trigger 在原状态事务内记录；成功签发 Workspace open
   exchange 时另记 `workspace.opened`。普通用户只查询自己的 Workspace 事件，admin 可查询平台事件；
   details 不保存 Cookie、exchange code、credential、Prompt、Pi message/tool stream 或文件正文。
-- Portal 展示 Worker 实测 capability、Runtime 版本、host CPU/Memory、authoritative assignment/max 与
-  heartbeat reported observation，并以紧凑状态栏、Workspace 卡片和可滚动的最近 Audit 呈现日常操作信息。
+- Portal 的独立 Workers 页面展示 Worker 实测 capability、Runtime 版本、host CPU/Memory、
+  authoritative assignment/max 与 heartbeat reported observation；Workspaces 页面保留紧凑概览与卡片，
+  独立 Audit 页面保留可滚动的最近事件。
   Artifact 路径和安全边界说明保留在文档及演示 runbook，不在 Portal 重复展示；资源条是
   assignment capacity，不伪装成未采集的实时 CPU/Memory usage。
 - Artifact 不新增平台 registry/download endpoint。Agent 在 canonical `/workspace` 生成成果，用户继续
@@ -146,18 +149,13 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
 
 ## In Progress
 
-Phase 12 代码与自动质量门已完成；当前等待按 `docs/authentication-runbook.md` 使用目标企业 OIDC 与
-OAuth2 + UserInfo endpoint 执行真实 redirect/callback、Audit 脱敏、revocation 和 Local Admin
-break-glass 人工验收。
+v0.x 封版前 Portal UI / IA cleanup 已完成实现和自动质量门，当前改动尚未提交。
 
 ## Next
 
-1. 完成 Phase 11 尚待的目标 IdP manual/JIT、allowed domain、nested UserInfo mapping 与 identity
-   bind/unbind 人工验收，确认同 email 不合并且 External User 固定从 `role=user` 开始。
-2. 按 Phase 12 runbook 执行 Local/OIDC login、故障分类、disable/enable、role、password reset、session
-   revoke 和 Audit 脱敏检查；模拟 IdP 不可用并确认 Local Admin 可进入排障。
-3. 在目标网络/浏览器回归 Portal、Workspace HTTP/SSE/WebSocket/Terminal/Files、Stop/Start 与 recovery，
-   单独记录生产 TLS、callback proxy 和访问日志去敏结论。
+1. 在部署入口确认所有 Portal 路径都配置 SPA fallback，并回归刷新、前进/后退与登录态恢复。
+2. 做一次目标浏览器的四页视觉检查，确认窄屏没有明显不可用布局。
+3. 保持封版边界，不在本次 cleanup 中加入筛选、搜索、分页、Dashboard 或新的平台能力。
 
 ## Risks And Blockers
 
@@ -169,8 +167,7 @@ break-glass 人工验收。
 - session exchange 存储是单 Control Plane 进程内、短时且 fail-closed；Control Plane restart
   会使尚未消费的 code 失效。Phase 4 单实例不引入 Redis/多实例共享状态。
 - OIDC/OAuth2 authorization transaction 都是单 Control Plane 进程内、短时且一次消费；进程重启会使
-  正在进行的 SSO 回调失败，用户需重新点击 SSO。真实目标 IdP、TLS/反向代理 callback、OAuth2 token
-  endpoint 认证约定和 UserInfo profile 尚待人工验收；mock Provider 不能替代该环境验收。
+  正在进行的 SSO 回调失败，用户需重新点击 SSO。Phase 12 人工验收已通过，但该单实例边界仍保持不变。
 - Phase 9 对已建立 HTTP streaming/SSE/WebSocket 的主动撤销使用同一 Control Plane 进程内连接注册表；
   这与当前单实例边界一致。未来若引入多 Control Plane，必须增加跨实例 revocation fan-out，不能把
   当前机制宣称为多实例一致撤销。
@@ -190,6 +187,14 @@ break-glass 人工验收。
   但目标模型 Prompt streaming、Terminal 交互、比赛浏览器视觉和真实多主机网络仍需人工验收。
 
 ## Verification
+
+- 2026-09-28：本轮 UI / IA cleanup 通过 `pnpm lint`、`pnpm typecheck`、串行全仓
+  `pnpm -r --workspace-concurrency=1 --if-present test`（146 passed，16 个 PostgreSQL/真实 Docker 条件测试
+  按设计跳过）、`pnpm build:web` 与 `git diff --check`。Web 12/12 覆盖导航可见性、三条 admin route、
+  普通用户拒绝页、既有 Admin Users confirm/error、AuditEventRow 与 Worker polling cleanup；Vite production
+  preview 对 `/`、`/admin/users`、`/admin/workers`、`/admin/audit` 直接请求均返回 HTTP 200 SPA 入口。
+- 2026-09-28：用户确认 Phase 12 人工验收、功能与安全链路通过；该结论来自目标环境人工验收反馈，
+  本轮 UI cleanup 不重新声称或替代其环境证据。
 
 - 2026-09-23：Phase 12 根质量门通过 `pnpm lint`、`pnpm typecheck`、`pnpm test`、
   `pnpm build:web` 与 `git diff --check`；常规测试 137 passed，15 个 PostgreSQL/真实 Docker 条件测试
