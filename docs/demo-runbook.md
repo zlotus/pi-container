@@ -36,7 +36,7 @@ socket、资源限制与 legacy Runtime 回归，并在结束时删除随机测�
 2. 运行数据库 migration、`pnpm test:e2e`，并在本机 Runtime image 可用时运行
    `pnpm test:e2e:runtime`。
 3. 打开 `/ready`，确认返回 `200` 和 `{"status":"ready"}`。
-4. 以 admin 登录 Portal，确认目标 Worker 均为 `ONLINE`，架构、Runtime version、六项实测
+4. 以 admin 登录 Portal，确认目标 Worker 均为“在线”（`ONLINE`），架构、Runtime version、六项实测
    capability、主机 CPU/Memory 和 authoritative assignment/max 均符合预期。
 5. 确认浏览器可解析 `WORKSPACE_BASE_URL` 的 wildcard hostname；多主机环境再确认 Control Plane
    能访问每个预注册 Worker Gateway，而最终用户不能绕过 Control Plane 直接访问它。
@@ -80,7 +80,7 @@ socket、资源限制与 legacy Runtime 回归，并在结束时删除随机测�
 ### 4. Persistence
 
 1. 关闭 pi-web 标签页，再从 Portal 打开 `demo-a`；Workspace 与 Agent 不应因浏览器关闭而销毁。
-2. 在 Portal 停止 `demo-a`，确认状态为 `STOPPED`；此状态仍占原 Worker assignment。
+2. 在 Portal 停止 `demo-a`，确认状态为“已停止”（`STOPPED`）；此状态仍占原 Worker assignment。
 3. 再次启动并打开，确认 Worker ID 未变化，原 Pi Session 与 `/workspace/demo-result` 全部恢复。
 4. 如演示 Worker/宿主机恢复，只使用 Phase 6 已验收流程：原 Worker reconnect 后 authoritative
    reconciliation；不得触发迁移、隐式重建或 orphan 自动删除。

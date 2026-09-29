@@ -15,6 +15,8 @@ export interface WorkerRecord {
   architecture: Architecture | null;
   status: WorkerStatus;
   enabled: boolean;
+  /** Admin scheduling pause; false excludes the Worker from new placements only. */
+  schedulable: boolean;
   runtimeImage: string | null;
   runtimeVersion: string | null;
   capabilities: Partial<WorkerCapabilities>;
@@ -40,6 +42,7 @@ interface WorkerRow {
   architecture: Architecture | null;
   status: WorkerStatus;
   enabled: boolean;
+  schedulable: boolean;
   runtime_image: string | null;
   runtime_version: string | null;
   capabilities: Partial<WorkerCapabilities>;
@@ -59,6 +62,7 @@ function mapWorker(row: WorkerRow): WorkerRecord {
     architecture: row.architecture,
     status: row.status,
     enabled: row.enabled,
+    schedulable: row.schedulable,
     runtimeImage: row.runtime_image,
     runtimeVersion: row.runtime_version,
     capabilities: row.capabilities,
@@ -197,7 +201,7 @@ export function createPhase2Repository(database: DatabaseClient) {
     async listWorkers(): Promise<WorkerRecord[]> {
       const rows = await database<WorkerRow[]>`
         select
-          id, hostname, architecture, status, enabled, runtime_image,
+          id, hostname, architecture, status, enabled, schedulable, runtime_image,
           runtime_version, capabilities, max_workspaces,
           allocated_workspaces, cpu_capacity, memory_bytes,
           last_heartbeat_at, created_at, updated_at

@@ -34,11 +34,12 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   const phase11SameEmailUserId = randomUUID();
   const phase12AdminId = randomUUID();
   const phase12UserId = randomUUID();
+  const schedulingUserId = randomUUID();
   const suffix = randomUUID();
   const workerId = `worker-${suffix}`;
   const phase3WorkerId = `runtime-${suffix}`;
   const phase6WorkerId = `recovery-${suffix}`;
-  const phase5WorkerIds = ["a", "b", "arch", "cap", "image", "last"].map(
+  const phase5WorkerIds = ["a", "b", "arch", "cap", "image", "last", "paused", "active"].map(
     (name) => `scheduler-${name}-${suffix}`,
   );
   const phase3RuntimeImage = `agent-runtime:integration-${suffix}`;
@@ -52,18 +53,18 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   });
 
   afterAll(async () => {
-    await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId}, ${phase10UserId}, ${phase10OtherUserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId}, ${phase12AdminId}, ${phase12UserId})`;
+    await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId}, ${phase10UserId}, ${phase10OtherUserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId}, ${phase12AdminId}, ${phase12UserId}, ${schedulingUserId})`;
     await database`delete from workers where id = ${workerId} or id = ${phase3WorkerId} or id = ${phase6WorkerId} or id = any(${phase5WorkerIds})`;
     await database`
       delete from platform_audit_events
-      where owner_user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId}, ${phase12AdminId}, ${phase12UserId})
-        or actor_user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase11AdminId}, ${phase12AdminId}, ${phase12UserId})
+      where owner_user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId}, ${phase12AdminId}, ${phase12UserId}, ${schedulingUserId})
+        or actor_user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase11AdminId}, ${phase12AdminId}, ${phase12UserId}, ${schedulingUserId})
         or worker_id = ${workerId}
         or worker_id = ${phase3WorkerId}
         or worker_id = ${phase6WorkerId}
         or worker_id = any(${phase5WorkerIds})
     `;
-    await database`delete from users where id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId}, ${phase10UserId}, ${phase10OtherUserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId}, ${phase12AdminId}, ${phase12UserId})`;
+    await database`delete from users where id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId}, ${phase10UserId}, ${phase10OtherUserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId}, ${phase12AdminId}, ${phase12UserId}, ${schedulingUserId})`;
     await database.end({ timeout: 5 });
   });
 
@@ -1166,5 +1167,137 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       where worker_id = ${lastSlot}
     `;
     expect(assignments[0]?.count).toBe(1);
+  });
+
+  it("pauses Worker scheduling with audit while keeping sticky placement", async () => {
+    const repository = createPhase12Repository(database, selectWorker);
+    const runtimeImage = `agent-runtime:scheduling-pause-${suffix}`;
+    const pausedWorker = phase5WorkerIds[6];
+    const activeWorker = phase5WorkerIds[7];
+    if (pausedWorker === undefined || activeWorker === undefined) {
+      throw new Error("scheduling pause Worker fixtures are missing");
+    }
+    await repository.createUser({
+      id: schedulingUserId,
+      email: `scheduling-pause-${suffix}@example.test`,
+      username: null,
+      passwordHash: await hashPassword("integration-scheduling-password"),
+      role: "user",
+    });
+    for (const id of [pausedWorker, activeWorker]) {
+      const token = hashOpaqueToken(`scheduling-${id}-credential-token`);
+      await repository.provisionWorker({ workerId: id, credentialHash: token });
+      await repository.recordWorkerHello({
+        credentialHash: token,
+        workerId: id,
+        hostname: `${id}.internal`,
+        architecture: "arm64",
+        runtimeImage,
+        runtimeVersion: "phase-3",
+        capabilities: {
+          browser: false,
+          office: false,
+          ffmpeg: false,
+          python: true,
+          node: true,
+          rust: false,
+        },
+        maxWorkspaces: 4,
+        allocatedWorkspaces: 0,
+        systemResources: { logicalCpuCount: 8, memoryBytes: 16 * 1024 ** 3 },
+        receivedAt: NOW,
+      });
+    }
+    // Load activeWorker so the paused Worker would win on score if it were eligible.
+    const sticky = await repository.createWorkspace({
+      id: randomUUID(),
+      userId: schedulingUserId,
+      name: "sticky-on-paused",
+      runtimeImage,
+    });
+    await database`
+      update workspaces set worker_id = ${pausedWorker}, state = 'STOPPED'
+      where id = ${sticky.id}
+    `;
+    for (let index = 0; index < 2; index += 1) {
+      await database`
+        insert into workspaces (id, user_id, name, worker_id, state, runtime_image)
+        values (
+          ${randomUUID()}, ${schedulingUserId}, ${`load-active-${index}`},
+          ${activeWorker}, 'STOPPED', ${runtimeImage}
+        )
+      `;
+    }
+    const audit = {
+      actorUserId: schedulingUserId,
+      requestId: "req-scheduling",
+      ipAddress: "127.0.0.1",
+      userAgent: null,
+    };
+
+    expect(
+      await repository.setWorkerSchedulable({
+        workerId: `missing-${suffix}`,
+        schedulable: false,
+        audit,
+      }),
+    ).toEqual({ outcome: "NOT_FOUND" });
+    const paused = await repository.setWorkerSchedulable({
+      workerId: pausedWorker,
+      schedulable: false,
+      audit,
+    });
+    expect(paused).toMatchObject({
+      outcome: "UPDATED",
+      worker: { id: pausedWorker, schedulable: false, enabled: true, status: "ONLINE" },
+    });
+    await repository.setWorkerSchedulable({ workerId: pausedWorker, schedulable: false, audit });
+
+    const target = await repository.createWorkspace({
+      id: randomUUID(),
+      userId: schedulingUserId,
+      name: "placed-while-paused",
+      runtimeImage,
+    });
+    const connected = [pausedWorker, activeWorker];
+    const cutoff = new Date(NOW.getTime() - 35_000);
+    expect(
+      await repository.scheduleWorkspaceStart({
+        workspaceId: target.id,
+        userId: schedulingUserId,
+        heartbeatCutoff: cutoff,
+        connectedWorkerIds: connected,
+      }),
+    ).toMatchObject({ outcome: "STARTING", sticky: false, workspace: { workerId: activeWorker } });
+    expect(
+      await repository.scheduleWorkspaceStart({
+        workspaceId: sticky.id,
+        userId: schedulingUserId,
+        heartbeatCutoff: cutoff,
+        connectedWorkerIds: connected,
+      }),
+    ).toMatchObject({ outcome: "STARTING", sticky: true, workspace: { workerId: pausedWorker } });
+
+    await repository.setWorkerSchedulable({ workerId: pausedWorker, schedulable: true, audit });
+    const events = await database<Array<{ event_type: string; actor_user_id: string; details: Record<string, unknown> }>>`
+      select event_type, actor_user_id, details
+      from platform_audit_events
+      where worker_id = ${pausedWorker} and event_type like 'worker.scheduling_%'
+      order by id asc
+    `;
+    expect(events.map((event) => event.event_type)).toEqual([
+      "worker.scheduling_paused",
+      "worker.scheduling_resumed",
+    ]);
+    expect(events[0]).toMatchObject({
+      actor_user_id: schedulingUserId,
+      details: { requestId: "req-scheduling", ipAddress: "127.0.0.1" },
+    });
+    // The pause is not a status change, so the status trigger adds no worker.* status event.
+    const statusEvents = await database<Array<{ count: number }>>`
+      select count(*)::integer as count from platform_audit_events
+      where worker_id = ${pausedWorker} and event_type in ('worker.disabled', 'worker.offline')
+    `;
+    expect(statusEvents[0]?.count).toBe(0);
   });
 });

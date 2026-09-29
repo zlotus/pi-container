@@ -16,6 +16,7 @@ function candidate(
     architecture: "arm64",
     status: "ONLINE",
     enabled: true,
+    schedulable: true,
     runtimeImage: "agent-runtime:phase3-minimal",
     runtimeVersion: "phase-3",
     capabilities: {
@@ -55,6 +56,8 @@ describe("Phase 5 Worker selection", () => {
     const candidates = [
       candidate({ id: "disconnected" }),
       candidate({ id: "disabled", enabled: false }),
+      // Sorts ahead of "eligible", so only the schedulable filter can exclude it.
+      candidate({ id: "a-paused", schedulable: false }),
       candidate({ id: "stale", lastHeartbeatAt: new Date(NOW.getTime() - 35_000) }),
       candidate({ id: "offline", status: "OFFLINE" }),
       candidate({ id: "full", assignedWorkspaces: 4 }),
@@ -67,6 +70,18 @@ describe("Phase 5 Worker selection", () => {
     });
 
     expect(selectWorker(input)?.id).toBe("eligible");
+  });
+
+  it("skips an admin-paused Worker even when it has the lowest load", () => {
+    const candidates = [
+      candidate({ id: "worker-a", schedulable: false, assignedWorkspaces: 0 }),
+      candidate({ id: "worker-b", assignedWorkspaces: 3 }),
+    ];
+
+    expect(selectWorker(selectionInput(candidates))?.id).toBe("worker-b");
+    expect(
+      selectWorker(selectionInput([candidate({ schedulable: false })])),
+    ).toBeNull();
   });
 
   it("requires exact Runtime image and requested architecture", () => {

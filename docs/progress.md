@@ -1,11 +1,14 @@
 # Project Progress
 
-Last reviewed: 2026-09-28
+Last reviewed: 2026-09-29
 
 ## Current Milestone
 
 Phase 9～12 的工程实现、自动验证与人工验收已完成。当前里程碑是 v0.x 封版前的 Portal UI /
-Information Architecture cleanup，不新增平台能力、不修改 API contract 或权限模型。
+Information Architecture cleanup：第一轮为纯前端的中文化、状态/时间展示、删除确认、过渡状态轮询与
+Audit 着色，不改 API contract 或权限模型；第二轮只增加 UI 所需的小型 admin 能力，目前已完成 Worker
+暂停/恢复调度（`0009_worker_scheduling` 与 `PATCH /api/admin/workers/:id`），不改变既有权限模型、
+sticky placement 或 Worker 吊销语义。
 现有 Local/OIDC/OAuth2、manual/JIT、identity lifecycle 与 Platform Session 主链保持不变；Phase 12 将其
 成功、失败和管理动作纳入脱敏 Audit，并补齐 session fixation、Cookie、CSRF/callback、revocation、
 Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立可用。
@@ -65,9 +68,10 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
   API/Proxy 访问统一按不可见资源拒绝。
 - `apps/web` 提供 Portal，并以轻量 history/location router 将 Workspaces、普通用户 Activity、Admin
   Users、Admin Workers、Admin Audit 分到 `/`、`/activity` 与三个 `/admin/*` 路径。普通用户显示
-  Workspaces / Activity，admin 显示 Workspaces / Users / Workers / Audit；Activity 与 Audit 复用事件列表
+  Workspace / 活动，admin 显示 Workspace / 用户 / Worker / 审计；Activity 与 Audit 复用事件列表
   和 `AuditEventRow`，普通用户仍由服务端限定为自己的 `workspace.*` 事件。各页面按需加载数据，Worker
-  轮询仅在 Workers 页面挂载期间运行。RUNNING Workspace 的“打开”由用户点击同步预开新标签页，再请求短时
+  轮询仅在 Workers 页面挂载期间运行；Workspaces 页面仅在存在 SCHEDULING/STARTING/STOPPING/DELETING
+  过渡状态时每 3 秒轮询。RUNNING Workspace 的“打开”由用户点击同步预开新标签页，再请求短时
   exchange code，并在新标签页以 top-level form POST 到 Workspace Host，不使用 query string、
   iframe 或宽域 Cookie；Portal/Workspace 列表保留在原标签页。
 - Portal 与 Workspace Host 使用同一条 server-side session 的不同 host-only Cookie 副本；
@@ -138,9 +142,18 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
   delete 与 Worker status/runtime report 由数据库 trigger 在原状态事务内记录；成功签发 Workspace open
   exchange 时另记 `workspace.opened`。普通用户只查询自己的 Workspace 事件，admin 可查询平台事件；
   details 不保存 Cookie、exchange code、credential、Prompt、Pi message/tool stream 或文件正文。
+- `0009_worker_scheduling` 为 `workers` 增加默认 `true` 的 `schedulable`。admin 可通过
+  `PATCH /api/admin/workers/:id` 与 Workers 页面暂停/恢复调度（cordon）：Scheduler 与 Phase 3 eligible
+  查询都排除 `schedulable = false`，但已有 sticky Workspace 的 start/stop/open/delete、control channel
+  与 Gateway 不受影响。变更与 `worker.scheduling_paused/resumed` Audit 同事务提交，并与首次 placement
+  共用 scheduler advisory lock。`enabled = false`（吊销 Worker）仍无 Portal 入口；已知其在运行中被置为
+  false 时，周期 offline 检查不会把其 Workspace 置为 `WORKER_OFFLINE`，要到 Control Plane 重启才修正，
+  将来开放吊销入口前需先修复。
 - Portal 的独立 Workers 页面展示 Worker 实测 capability、Runtime 版本、host CPU/Memory、
-  authoritative assignment/max 与 heartbeat reported observation；Workspaces 页面保留紧凑概览与卡片，
-  独立 Audit 页面保留可滚动的最近事件。
+  authoritative assignment/max 与 heartbeat reported observation；Workspaces 页面以标题摘要和卡片展示，
+  删除收进卡片“更多”菜单并要求输入 Workspace 名称确认；Audit/Activity 整页展示最近 50 条事件，按
+  success/info/warning/danger 着色。Portal 文案统一中文，状态枚举与时间（相对时间 + 悬停绝对时间）只在
+  `apps/web/src/labels.ts` 展示层映射，API contract 不变。
   Artifact 路径和安全边界说明保留在文档及演示 runbook，不在 Portal 重复展示；资源条是
   assignment capacity，不伪装成未采集的实时 CPU/Memory usage。
 - Artifact 不新增平台 registry/download endpoint。Agent 在 canonical `/workspace` 生成成果，用户继续

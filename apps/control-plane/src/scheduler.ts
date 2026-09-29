@@ -12,6 +12,7 @@ function isCompatible(
   if (
     !connectedWorkerIds.has(candidate.id) ||
     !candidate.enabled ||
+    !candidate.schedulable ||
     candidate.status !== "ONLINE" ||
     candidate.lastHeartbeatAt === null ||
     candidate.lastHeartbeatAt <= heartbeatCutoff ||

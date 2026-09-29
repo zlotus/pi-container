@@ -56,6 +56,8 @@ export {
   createPhase5Repository,
   type Phase5Repository,
   type ScheduleWorkspaceStartResult,
+  type SetWorkerSchedulableResult,
+  type WorkerSchedulingAuditMetadata,
   type WorkerPlacementRecord,
   type WorkerScheduleCandidate,
   type WorkerSelectionInput,

@@ -66,6 +66,7 @@ export function createPhase3Repository(database: DatabaseClient) {
         from workspaces workspace
         join workers on
           workers.enabled
+          and workers.schedulable
           and workers.status = 'ONLINE'
           and workers.last_heartbeat_at > ${input.heartbeatCutoff}
           and workers.runtime_image = workspace.runtime_image

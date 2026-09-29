@@ -27,10 +27,10 @@ export {
 function AccessDeniedPage({ onNavigate }: { onNavigate: (path: string) => void }) {
   return (
     <section className="status-page">
-      <p className="eyebrow">ACCESS DENIED</p>
+      <p className="eyebrow">403</p>
       <h1>无权访问 Admin 页面</h1>
       <p>当前账户没有管理员权限。服务端仍会对所有 Admin API 请求执行授权校验。</p>
-      <button onClick={() => onNavigate("/")}>返回 Workspaces</button>
+      <button onClick={() => onNavigate("/")}>返回 Workspace 列表</button>
     </section>
   );
 }
@@ -38,10 +38,10 @@ function AccessDeniedPage({ onNavigate }: { onNavigate: (path: string) => void }
 function NotFoundPage({ onNavigate }: { onNavigate: (path: string) => void }) {
   return (
     <section className="status-page">
-      <p className="eyebrow">NOT FOUND</p>
+      <p className="eyebrow">404</p>
       <h1>页面不存在</h1>
       <p>该 Portal 路径不存在。</p>
-      <button onClick={() => onNavigate("/")}>返回 Workspaces</button>
+      <button onClick={() => onNavigate("/")}>返回 Workspace 列表</button>
     </section>
   );
 }
@@ -83,7 +83,7 @@ export function PortalRouteContent({
         />
       );
     case "admin-workers":
-      return <AdminWorkersPage />;
+      return <AdminWorkersPage session={session} />;
     case "admin-audit":
       return <AdminAuditPage />;
     case "not-found":
@@ -178,11 +178,11 @@ export function App() {
           {authMethods.oidc.enabled ? (
             <>
               <div className="login-divider"><span>或</span></div>
-              <a className="sso-link" href="/auth/oidc/login">Sign in with SSO</a>
+              <a className="sso-link" href="/auth/oidc/login">使用企业 SSO 登录</a>
             </>
           ) : null}
           {authMethods.oauth2.enabled ? (
-            <a className="sso-link" href="/auth/oauth2/login">Sign in with Enterprise OAuth2</a>
+            <a className="sso-link" href="/auth/oauth2/login">使用企业 OAuth2 登录</a>
           ) : null}
         </form>
       </main>

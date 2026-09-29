@@ -1,4 +1,6 @@
+import { authProtocolLabel, transitionValueLabel } from "../labels.js";
 import type { AuditEvent, User, Workspace } from "../types.js";
+import { RelativeTime } from "./RelativeTime.js";
 
 const AUDIT_LABELS: Record<string, string> = {
   "workspace.created": "Workspace 已创建",
@@ -16,6 +18,8 @@ const AUDIT_LABELS: Record<string, string> = {
   "worker.online": "Worker 已上线",
   "worker.offline": "Worker 已离线",
   "worker.disabled": "Worker 已禁用",
+  "worker.scheduling_paused": "Worker 已暂停调度",
+  "worker.scheduling_resumed": "Worker 已恢复调度",
   "worker.runtime_reported": "Worker 运行环境已更新",
   "identity.bound": "登录方式已绑定",
   "identity.unbound": "登录方式已解绑",
@@ -23,35 +27,68 @@ const AUDIT_LABELS: Record<string, string> = {
   "auth.login_failed": "登录失败",
   "auth.logout": "已退出登录",
   "auth.session_revoked": "登录会话已撤销",
-  "user.created": "User 已创建",
-  "user.enabled": "User 已启用",
-  "user.disabled": "User 已禁用",
-  "user.role_changed": "User role 已变更",
-  "user.password_reset": "Local password 已重置",
+  "user.created": "用户已创建",
+  "user.enabled": "用户已启用",
+  "user.disabled": "用户已禁用",
+  "user.role_changed": "用户角色已变更",
+  "user.password_reset": "本地密码已重置",
+};
+
+export type AuditSeverity = "success" | "info" | "warning" | "danger";
+
+const AUDIT_SEVERITY: Record<string, AuditSeverity> = {
+  "auth.login_succeeded": "success",
+  "workspace.running": "success",
+  "worker.online": "success",
+  "worker.scheduling_resumed": "success",
+  "user.enabled": "success",
+  "auth.login_failed": "danger",
+  "workspace.error": "danger",
+  "workspace.worker_offline": "danger",
+  "worker.offline": "danger",
+  "auth.session_revoked": "warning",
+  "user.disabled": "warning",
+  "user.role_changed": "warning",
+  "user.password_reset": "warning",
+  "identity.unbound": "warning",
+  "workspace.deleted": "warning",
+  "worker.disabled": "warning",
+  "worker.scheduling_paused": "warning",
+};
+
+export function auditSeverity(eventType: string): AuditSeverity {
+  return AUDIT_SEVERITY[eventType] ?? "info";
+}
+
+const SEVERITY_LABELS: Record<AuditSeverity, string> = {
+  success: "成功",
+  info: "信息",
+  warning: "注意",
+  danger: "异常",
 };
 
 function auditDetail(details: Record<string, unknown>): string | null {
   const fromState = details.fromState;
   const toState = details.toState;
   if (typeof fromState === "string" && typeof toState === "string") {
-    return `${fromState} → ${toState}`;
+    return `${transitionValueLabel(fromState)} → ${transitionValueLabel(toState)}`;
   }
   const fromStatus = details.fromStatus;
   const toStatus = details.toStatus;
   if (typeof fromStatus === "string" && typeof toStatus === "string") {
-    return `${fromStatus} → ${toStatus}`;
+    return `${transitionValueLabel(fromStatus)} → ${transitionValueLabel(toStatus)}`;
   }
   const fromRole = details.fromRole;
   const toRole = details.toRole;
   if (typeof fromRole === "string" && typeof toRole === "string") {
-    return `${fromRole} → ${toRole}`;
+    return `${transitionValueLabel(fromRole)} → ${transitionValueLabel(toRole)}`;
   }
   const protocol = details.protocol;
   const category = details.category;
   if (typeof protocol === "string" && typeof category === "string") {
-    return `${protocol} · ${category}`;
+    return `${authProtocolLabel(protocol)} · ${category}`;
   }
-  return typeof protocol === "string" ? protocol : null;
+  return typeof protocol === "string" ? authProtocolLabel(protocol) : null;
 }
 
 function auditUserName(
@@ -83,23 +120,27 @@ export function AuditEventRow({
   );
   const targetUserId = event.ownerUserId ?? event.actorUserId;
   const actor = event.actorUserId;
+  const isWorkerAdminEvent = event.eventType.startsWith("worker.scheduling_");
   const subject = isAdmin && isUserEvent && targetUserId !== null
     ? `${auditUserName(targetUserId, adminUsers)}${
       actor !== null && actor !== targetUserId
         ? ` · 操作者 ${auditUserName(actor, adminUsers)}`
         : ""
     }`
-    : workspaceSubject;
+    : isAdmin && isWorkerAdminEvent && actor !== null
+      ? `操作者 ${auditUserName(actor, adminUsers)}`
+      : workspaceSubject;
   const detail = auditDetail(event.details);
+  const severity = auditSeverity(event.eventType);
 
   return (
     <li>
-      <span className="audit-dot" aria-hidden="true" />
+      <span className={`audit-dot audit-${severity}`} role="img" aria-label={SEVERITY_LABELS[severity]} title={SEVERITY_LABELS[severity]} />
       <div>
         <strong>{AUDIT_LABELS[event.eventType] ?? event.eventType}</strong>
         <p>{subject}{event.workerId === null ? "" : ` · ${event.workerId}`}{detail === null ? "" : ` · ${detail}`}</p>
       </div>
-      <time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
+      <RelativeTime value={event.createdAt} />
     </li>
   );
 }

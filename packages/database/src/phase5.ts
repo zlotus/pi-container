@@ -22,6 +22,7 @@ export interface WorkerScheduleCandidate {
   architecture: Architecture | null;
   status: WorkerStatus;
   enabled: boolean;
+  schedulable: boolean;
   runtimeImage: string | null;
   runtimeVersion: string | null;
   capabilities: Partial<WorkerCapabilities>;
@@ -44,6 +45,17 @@ export interface WorkerSelectionInput {
 export type WorkerSelector = (
   input: WorkerSelectionInput,
 ) => WorkerScheduleCandidate | null;
+
+export type SetWorkerSchedulableResult =
+  | { outcome: "UPDATED"; worker: WorkerPlacementRecord }
+  | { outcome: "NOT_FOUND" };
+
+export interface WorkerSchedulingAuditMetadata {
+  actorUserId: string;
+  requestId: string;
+  ipAddress: string;
+  userAgent: string | null;
+}
 
 export type ScheduleWorkspaceStartResult =
   | { outcome: "STARTING"; workspace: WorkspaceRecord; sticky: boolean }
@@ -69,6 +81,7 @@ interface CandidateRow {
   architecture: Architecture | null;
   status: WorkerStatus;
   enabled: boolean;
+  schedulable: boolean;
   runtime_image: string | null;
   runtime_version: string | null;
   capabilities: Partial<WorkerCapabilities>;
@@ -97,6 +110,7 @@ function mapCandidate(row: CandidateRow): WorkerScheduleCandidate {
     architecture: row.architecture,
     status: row.status,
     enabled: row.enabled,
+    schedulable: row.schedulable,
     runtimeImage: row.runtime_image,
     runtimeVersion: row.runtime_version,
     capabilities: row.capabilities,
@@ -111,26 +125,70 @@ export function createPhase5Repository(
   selectWorker: WorkerSelector,
 ) {
   const phase4 = createPhase4Repository(database);
+
+  async function listWorkersWithAssignments(): Promise<WorkerPlacementRecord[]> {
+    const [workers, counts] = await Promise.all([
+      phase4.listWorkers(),
+      database<Array<{ worker_id: string; assigned_workspaces: number }>>`
+        select worker_id, count(*)::integer as assigned_workspaces
+        from workspaces
+        where worker_id is not null
+        group by worker_id
+      `,
+    ]);
+    const assignedByWorker = new Map(
+      counts.map((row) => [row.worker_id, row.assigned_workspaces]),
+    );
+    return workers.map((worker) => ({
+      ...worker,
+      assignedWorkspaces: assignedByWorker.get(worker.id) ?? 0,
+    }));
+  }
+
   return {
     ...phase4,
 
-    async listWorkersWithAssignments(): Promise<WorkerPlacementRecord[]> {
-      const [workers, counts] = await Promise.all([
-        phase4.listWorkers(),
-        database<Array<{ worker_id: string; assigned_workspaces: number }>>`
-          select worker_id, count(*)::integer as assigned_workspaces
-          from workspaces
-          where worker_id is not null
-          group by worker_id
-        `,
-      ]);
-      const assignedByWorker = new Map(
-        counts.map((row) => [row.worker_id, row.assigned_workspaces]),
-      );
-      return workers.map((worker) => ({
-        ...worker,
-        assignedWorkspaces: assignedByWorker.get(worker.id) ?? 0,
-      }));
+    listWorkersWithAssignments,
+
+    async setWorkerSchedulable(input: {
+      workerId: string;
+      schedulable: boolean;
+      audit: WorkerSchedulingAuditMetadata;
+    }): Promise<SetWorkerSchedulableResult> {
+      const changed = await database.begin(async (transaction) => {
+        // Share the placement lock so a pause cannot interleave with an
+        // in-flight first placement that already read this Worker as eligible.
+        await transaction`select pg_advisory_xact_lock(${SCHEDULER_ADVISORY_LOCK_ID})`;
+        const rows = await transaction<Array<{ schedulable: boolean }>>`
+          select schedulable from workers where id = ${input.workerId} for update
+        `;
+        const current = rows[0];
+        if (current === undefined) return null;
+        if (current.schedulable === input.schedulable) return false;
+        await transaction`
+          update workers
+          set schedulable = ${input.schedulable}, updated_at = now()
+          where id = ${input.workerId}
+        `;
+        const { actorUserId, ...request } = input.audit;
+        await transaction`
+          insert into platform_audit_events (
+            event_type, actor_user_id, worker_id, details
+          ) values (
+            ${input.schedulable ? "worker.scheduling_resumed" : "worker.scheduling_paused"},
+            ${actorUserId},
+            ${input.workerId},
+            ${transaction.json(request)}
+          )
+        `;
+        return true;
+      });
+      if (changed === null) return { outcome: "NOT_FOUND" };
+      const workers = await listWorkersWithAssignments();
+      const worker = workers.find((candidate) => candidate.id === input.workerId);
+      return worker === undefined
+        ? { outcome: "NOT_FOUND" }
+        : { outcome: "UPDATED", worker };
     },
 
     async scheduleWorkspaceStart(input: {
@@ -173,6 +231,7 @@ export function createPhase5Repository(
               workers.architecture,
               workers.status,
               workers.enabled,
+              workers.schedulable,
               workers.runtime_image,
               workers.runtime_version,
               workers.capabilities,

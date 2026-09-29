@@ -12,7 +12,7 @@ export function AdminAuditPage() {
   const [error, setError] = useState<string | null>(null);
 
   const loadAuditEvents = useCallback(async () => {
-    const result = await api<{ events: AuditEvent[] }>("/api/audit-events?limit=30");
+    const result = await api<{ events: AuditEvent[] }>("/api/audit-events?limit=50");
     setEvents(result.events);
   }, []);
 
@@ -21,7 +21,7 @@ export function AdminAuditPage() {
     try {
       await loadAuditEvents();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Unable to load Audit events");
+      setError(caught instanceof Error ? caught.message : "无法载入事件");
     }
   }, [loadAuditEvents]);
 
@@ -33,7 +33,7 @@ export function AdminAuditPage() {
       api<{ users: AdminUser[] }>("/api/admin/users").then((result) => setUsers(result.users)),
     ])
       .catch((caught: unknown) => {
-        if (active) setError(caught instanceof Error ? caught.message : "Unable to load Audit events");
+        if (active) setError(caught instanceof Error ? caught.message : "无法载入事件");
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -47,22 +47,15 @@ export function AdminAuditPage() {
     <>
       <div className="page-heading">
         <div>
-          <p className="eyebrow">ADMIN</p>
-          <h1>Audit</h1>
-          <p>查看平台最近发生的登录、用户管理和运行状态变更。</p>
+          <h1>审计</h1>
+          <p>平台最近 50 条登录、用户管理和运行状态事件。</p>
         </div>
         <div className="page-toolbar">
           <button className="secondary" onClick={() => void refreshAuditEvents()}>刷新</button>
         </div>
       </div>
       {error === null ? null : <p className="error banner" role="alert">{error}</p>}
-      <section className="audit-panel" aria-labelledby="audit-title">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">RECENT EVENTS</p>
-            <h2 id="audit-title">最近平台事件</h2>
-          </div>
-        </div>
+      <section className="audit-panel" aria-label="最近平台事件">
         <AuditEventList
           events={events}
           workspaces={workspaces}

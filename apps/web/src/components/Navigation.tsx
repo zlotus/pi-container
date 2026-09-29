@@ -14,11 +14,11 @@ const ITEMS: Array<{
   adminOnly?: boolean;
   userOnly?: boolean;
 }> = [
-  { route: "workspaces", label: "Workspaces" },
-  { route: "activity", label: "Activity", userOnly: true },
-  { route: "admin-users", label: "Users", adminOnly: true },
-  { route: "admin-workers", label: "Workers", adminOnly: true },
-  { route: "admin-audit", label: "Audit", adminOnly: true },
+  { route: "workspaces", label: "Workspace" },
+  { route: "activity", label: "活动", userOnly: true },
+  { route: "admin-users", label: "用户", adminOnly: true },
+  { route: "admin-workers", label: "Worker", adminOnly: true },
+  { route: "admin-audit", label: "审计", adminOnly: true },
 ];
 
 export function Navigation({ route, role, onNavigate }: NavigationProps) {

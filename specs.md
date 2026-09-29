@@ -572,12 +572,22 @@ Workspace
 
 - ONLINE
 - enabled
+- schedulable（未被 admin 暂停调度）
 - 当前 Control Plane 上存在 authenticated control channel
 - heartbeat 未超过 offline threshold
 - 未超容量
 - architecture compatible
 - runtime image compatible
 - capability compatible
+
+`enabled` 与 `schedulable` 语义不同，不得混用：
+
+- `enabled = false`：吊销 Worker。control channel 握手与后续消息被拒绝，Gateway 不再路由，其 sticky
+  Workspace 全部不可用；当前只能由运维直接修改数据库，Portal 不提供入口。
+- `schedulable = false`：暂停调度（cordon）。Worker 身份、control channel、Gateway 路由和已分配的
+  sticky Workspace 均不受影响，可照常 start/stop/open/delete；只是不再参与新 Workspace 的首次
+  placement。admin 可在 Portal 随时暂停或恢复，并记录 `worker.scheduling_paused/resumed` Audit。
+  暂停与首次 placement 共用 scheduler advisory lock，避免与进行中的 reservation 交错。
 
 Phase 5 的 capacity authoritative source 固定为 Control Plane PostgreSQL 中已有的
 sticky assignment 数量：
@@ -1348,6 +1358,7 @@ hostname text
 architecture text
 status text
 enabled bool
+schedulable bool
 runtime_image text
 runtime_version text
 gateway_base_url text
@@ -1421,6 +1432,16 @@ user.password_reset
 identity.bound
 identity.unbound
 ```
+
+Worker 调度管理增加：
+
+```text
+worker.scheduling_paused
+worker.scheduling_resumed
+```
+
+两者由 admin 请求在同一事务内写入，`actor_user_id` 为操作者，`details` 只含 requestId、IP 与截断
+User-Agent。暂停调度不改变 `workers.status`，因此不会产生 `worker.offline/disabled` 状态事件。
 
 Workspace/Worker 的数据库生命周期事件与状态变更在同一事务追加，避免状态已经生效但 Audit 漏记。
 Workspace 删除后 Audit 仍保留，因此 subject ID 不作为级联删除外键。普通用户只能查询
@@ -1538,8 +1559,12 @@ POST   /api/workspaces/:id/stop
 
 ```text
 GET /api/admin/workers
+PATCH /api/admin/workers/:id      { "schedulable": boolean }
 GET /api/admin/workspaces
 ```
+
+`PATCH /api/admin/workers/:id` 仅 admin 可用，要求可信 Origin 与 CSRF；body 严格只接受
+`schedulable`，不能修改 `enabled`、capacity 或 credential。重复设置相同值是幂等的，不追加 Audit。
 
 ## Audit
 
@@ -2229,7 +2254,7 @@ password
 Phase 10 在同一 Login 页面增加：
 
 ```text
-Sign in with SSO
+使用企业 SSO 登录
 ```
 
 不要为了 OIDC 自己实现 IdP 风格复杂登录页。跳转、MFA、条件访问等交给上游 IdP。
@@ -2238,9 +2263,10 @@ Sign in with SSO
 
 Portal 使用轻量前端路由拆分主要信息架构：Workspace 列表位于 `/`，普通用户自己的 Workspace Activity
 位于 `/activity`；admin-only 的 Users、Workers、Audit 分别位于 `/admin/users`、`/admin/workers`、
-`/admin/audit`。普通用户导航显示 Workspaces / Activity，admin 导航显示 Workspaces / Users / Workers /
-Audit；前端无权限页面不能替代后端 authorization。Activity 与 Admin Audit 复用事件展示，普通用户仍只
-能从服务端获得自己的 `workspace.*` 事件。
+`/admin/audit`。普通用户导航显示 Workspace / 活动，admin 导航显示 Workspace / 用户 / Worker /
+审计；Portal 文案统一为中文，状态枚举仅在展示层映射为中文标签，API 值不变。前端无权限页面不能
+替代后端 authorization。Activity 与 Admin Audit 复用事件展示，普通用户仍只能从服务端获得自己的
+`workspace.*` 事件。
 
 ```text
 Workspace      State       Worker
@@ -2265,6 +2291,9 @@ Worker        State    Arch     Workspace
 worker-a      ONLINE   amd64    3/8
 worker-b      ONLINE   arm64    2/4
 ```
+
+操作仅限暂停调度 / 恢复调度（见第 14 节）；暂停需确认并说明已有 Workspace 不受影响。Portal 不提供
+吊销（`enabled = false`）、删除 Worker 或修改 capacity 的入口。
 
 ## Admin Users
 

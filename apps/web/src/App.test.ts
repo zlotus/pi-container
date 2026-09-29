@@ -25,20 +25,20 @@ const user = {
 describe("Admin Users interactions", () => {
   it("describes status and role changes with the preferred user identifier", () => {
     expect(adminUserUpdateConfirmation(user, { status: "disabled" })).toBe(
-      'Disable user "user-phase9"?',
+      "禁用用户“user-phase9”？",
     );
     expect(adminUserUpdateConfirmation(user, { status: "active" })).toBe(
-      'Enable user "user-phase9"?',
+      "启用用户“user-phase9”？",
     );
     expect(adminUserUpdateConfirmation(user, { role: "admin" })).toBe(
-      'Change "user-phase9" role from user to admin?',
+      "将“user-phase9”的角色从普通用户改为管理员？",
     );
     expect(
       adminUserUpdateConfirmation(
         { ...user, username: null, role: "admin" },
         { role: "user" },
       ),
-    ).toBe('Change "user@example.test" role from admin to user?');
+    ).toBe("将“user@example.test”的角色从管理员改为普通用户？");
   });
 
   it("sends no managed-user request when confirmation is cancelled", async () => {
@@ -105,13 +105,13 @@ describe("Audit event display", () => {
   }
 
   it("shows the account name for admin login and logout events", () => {
-    expect(renderAudit()).toContain("<p>user-a · LOCAL</p>");
+    expect(renderAudit()).toContain("<p>user-a · 本地账户</p>");
     expect(renderAudit()).toContain("<strong>登录成功</strong>");
     expect(renderAudit({ eventType: "auth.logout" })).toContain(
       "<strong>已退出登录</strong>",
     );
     expect(renderAudit({ eventType: "auth.logout" })).toContain(
-      "<p>user-a · LOCAL</p>",
+      "<p>user-a · 本地账户</p>",
     );
   });
 
@@ -121,21 +121,21 @@ describe("Audit event display", () => {
       actorUserId: adminId,
       details: { fromStatus: "active", toStatus: "disabled" },
     });
-    expect(markup).toContain("<strong>User 已禁用</strong>");
-    expect(markup).toContain("<p>user-a · 操作者 admin · active → disabled</p>");
+    expect(markup).toContain("<strong>用户已禁用</strong>");
+    expect(markup).toContain("<p>user-a · 操作者 admin · 正常 → 已禁用</p>");
   });
 
   it("keeps unresolved users visible with an eight-character UUID fallback", () => {
     expect(renderAudit({}, {
       users: [{ id: userId, username: null, email: "user-a@example.test" }],
-    })).toContain("<p>user-a@example.test · LOCAL</p>");
+    })).toContain("<p>user-a@example.test · 本地账户</p>");
 
     const markup = renderAudit({
       eventType: "auth.session_revoked",
       actorUserId: adminId,
     }, { users: [] });
     expect(markup).toContain("<strong>登录会话已撤销</strong>");
-    expect(markup).toContain("<p>11111111 · 操作者 22222222 · LOCAL</p>");
+    expect(markup).toContain("<p>11111111 · 操作者 22222222 · 本地账户</p>");
   });
 
   it("preserves workspace and worker subjects and hides admin names for regular users", () => {
@@ -146,7 +146,7 @@ describe("Audit event display", () => {
       workerId: "worker-a",
       details: { fromState: "RUNNING", toState: "STOPPED" },
     }, { workspaces: [{ id: workspaceId, name: "build" }] });
-    expect(workspace).toContain("<p>build · worker-a · RUNNING → STOPPED</p>");
+    expect(workspace).toContain("<p>build · worker-a · 运行中 → 已停止</p>");
 
     const worker = renderAudit({
       eventType: "worker.online",
@@ -157,8 +157,19 @@ describe("Audit event display", () => {
     });
     expect(worker).toContain("<p>平台 · worker-a</p>");
 
+    const paused = renderAudit({
+      eventType: "worker.scheduling_paused",
+      actorUserId: adminId,
+      ownerUserId: null,
+      workerId: "worker-a",
+      details: { requestId: "req-1", ipAddress: "127.0.0.1", userAgent: null },
+    });
+    expect(paused).toContain("<strong>Worker 已暂停调度</strong>");
+    expect(paused).toContain("<p>操作者 admin · worker-a</p>");
+    expect(paused).toContain("audit-warning");
+
     const ordinaryUser = renderAudit({}, { isAdmin: false });
-    expect(ordinaryUser).toContain("<p>平台 · LOCAL</p>");
+    expect(ordinaryUser).toContain("<p>平台 · 本地账户</p>");
     expect(ordinaryUser).not.toContain("user-a");
   });
 });
@@ -208,17 +219,17 @@ describe("Portal navigation and routes", () => {
   it("shows Workspaces and Activity navigation to a regular user", () => {
     const markup = renderNavigation(userSession);
     expect(markup).toContain('href="/"');
-    expect(markup).toContain("Workspaces");
+    expect(markup).toContain("Workspace");
     expect(markup).toContain('href="/activity"');
-    expect(markup).toContain("Activity");
-    expect(markup).not.toContain("Users");
-    expect(markup).not.toContain("Workers");
-    expect(markup).not.toContain("Audit");
+    expect(markup).toContain("活动");
+    expect(markup).not.toContain('href="/admin/');
+    expect(markup).not.toContain("用户");
+    expect(markup).not.toContain("审计");
   });
 
   it("shows every workspace and admin destination to an admin", () => {
     const markup = renderNavigation(adminSession);
-    expect(markup).toContain("Workspaces");
+    expect(markup).toContain("Workspace");
     expect(markup).toContain('href="/admin/users"');
     expect(markup).toContain('href="/admin/workers"');
     expect(markup).toContain('href="/admin/audit"');
@@ -227,20 +238,20 @@ describe("Portal navigation and routes", () => {
 
   it("renders the Activity page for a regular user", () => {
     const markup = renderRoute("/activity", userSession);
-    expect(markup).toContain("<h1>Activity</h1>");
-    expect(markup).toContain("查看你的 Workspace 最近发生的状态变化和操作记录。");
+    expect(markup).toContain("<h1>活动</h1>");
+    expect(markup).toContain("你的 Workspace 最近 50 条状态变化和操作记录。");
   });
 
   it("maps deep links to their dedicated admin pages", () => {
-    expect(renderRoute("/admin/users")).toContain("<h1>Users</h1>");
-    expect(renderRoute("/admin/workers")).toContain("<h1>Workers</h1>");
-    expect(renderRoute("/admin/audit")).toContain("<h1>Audit</h1>");
+    expect(renderRoute("/admin/users")).toContain("<h1>用户</h1>");
+    expect(renderRoute("/admin/workers")).toContain("<h1>Worker</h1>");
+    expect(renderRoute("/admin/audit")).toContain("<h1>审计</h1>");
   });
 
   it("denies direct Admin Audit access to a regular user", () => {
     const markup = renderRoute("/admin/audit", userSession);
     expect(markup).toContain("无权访问 Admin 页面");
-    expect(markup).not.toContain("最近平台事件");
+    expect(markup).not.toContain("audit-panel");
   });
 });
 
@@ -272,7 +283,7 @@ describe("Activity event display", () => {
     }));
 
     expect(markup).toContain("<strong>Workspace 已启动</strong>");
-    expect(markup).toContain("<p>build · worker-a · STARTING → RUNNING</p>");
+    expect(markup).toContain("<p>build · worker-a · 启动中 → 运行中</p>");
     expect(markup).not.toContain("操作者");
   });
 });

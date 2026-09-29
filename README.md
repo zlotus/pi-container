@@ -14,8 +14,8 @@ Runtime 现包含
 Python/uv、Node/pnpm、Rust、build tools、ffmpeg、PDF/Office 工具、Playwright/Chromium 和克制的
 Linux/network debugging CLI；Worker 在 hello 前通过本机精确镜像的实际探针上报 capability，不按
 architecture 猜测。Portal 使用 `/`、`/activity` 与三个 `/admin/*` 页面分别承载 Workspace、用户活动、
-User、Worker 与 Platform Audit；普通用户显示 Workspaces / Activity，admin 显示 Workspaces / Users /
-Workers / Audit。Artifact 继续复用 pi-web
+User、Worker 与 Platform Audit；普通用户显示 Workspace / 活动，admin 显示 Workspace / 用户 /
+Worker / 审计。Artifact 继续复用 pi-web
 的 `/workspace` Files 查看/下载，不复制文件或 Pi
 message/tool stream。仓库记录的 ARM64 工程验证已通过，AMD64 native 自动验证记录仍待补齐。
 HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其
@@ -447,14 +447,20 @@ Phase 11 identity 管理只允许 active admin；写操作要求 exact-match Por
 且 `providerId` 必须属于当前启用的 OIDC/OAuth2 provider。旧的 OIDC 预绑定 path 保留兼容，新的通用
 identity API 支持 list/bind/unbind；平台仍不提供 Provider CRUD 或基于 email 的自动绑定。
 
-首次启动会从当前 Control Plane 已认证连接、在线、enabled、heartbeat 新鲜、容量未满且
+首次启动会从当前 Control Plane 已认证连接、在线、enabled、未被暂停调度、heartbeat 新鲜、容量未满且
 Runtime image/架构/capability 兼容的 Worker 中选择。load score 为 PostgreSQL 中该 Worker 的
 sticky Workspace assignment 数除以 `max_workspaces`，最低者优先，相同 score 按 Worker ID
 升序确定性选择。capacity 的 authoritative source 是 `workspaces.worker_id` assignment count；
 heartbeat 的 `allocated_workspaces` 只作为 Worker 本机观测，不参与 reservation。选择和写入
 `worker_id` 在同一 PostgreSQL placement transaction 中完成，因此并发首次启动不能共同占用
-最后一个 slot。Admin Worker 表的 `Workspace` 列显示 authoritative assignment/max，悬停可看
-最近 heartbeat 上报的 Runtime 数。
+最后一个 slot。Admin Worker 表的 `Workspace 容量` 列显示 authoritative assignment/max，展开“详情”
+可看最近 heartbeat 上报的 Runtime 数。
+
+admin 可在 Workers 页面对某个 Worker“暂停调度”（`PATCH /api/admin/workers/:id`，
+`{"schedulable": false}`），用于维护或逐步腾空节点：它不再参与新 Workspace 的首次 placement，
+但身份、control channel、Gateway 路由和已分配的 sticky Workspace 都不受影响，“恢复调度”即可撤销。
+暂停/恢复记录 `worker.scheduling_paused/resumed` Audit。这与数据库中的 `enabled = false` 不同：后者会
+吊销 Worker，使其全部 Workspace 不可用，Portal 不提供该入口。
 
 Workspace 一旦拥有 `workerId` 就保持 sticky placement；stop、Worker offline/reconnect、Runtime
 错误或 Worker capability 变化都不会触发 Scheduler 自动迁移。已分配 Workspace 的删除必须等待

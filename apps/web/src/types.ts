@@ -27,6 +27,8 @@ export interface Worker {
   hostname: string | null;
   architecture: "amd64" | "arm64" | null;
   status: "ONLINE" | "OFFLINE" | "DISABLED";
+  /** false when an admin paused new placements on this Worker. */
+  schedulable: boolean;
   runtimeImage: string | null;
   runtimeVersion: string | null;
   capabilities: Record<string, boolean>;

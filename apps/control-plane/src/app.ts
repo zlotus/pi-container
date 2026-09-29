@@ -63,6 +63,14 @@ const LoginBodySchema = z
   .strict();
 
 const AdminUserParamsSchema = z.object({ id: z.string().uuid() }).strict();
+const AdminWorkerParamsSchema = z
+  .object({ id: z.string().min(1).max(64).regex(/^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$/) })
+  .strict();
+
+const UpdateWorkerSchedulingBodySchema = z
+  .object({ schedulable: z.boolean() })
+  .strict();
+
 const AdminIdentityParamsSchema = z
   .object({ id: z.string().uuid(), identityId: z.string().uuid() })
   .strict();
@@ -164,7 +172,7 @@ type Phase1Store = Pick<
 
 type WorkerAdminStore = Pick<
   Phase2Repository & Phase3Repository & Phase5Repository,
-  "listWorkersWithAssignments"
+  "listWorkersWithAssignments" | "setWorkerSchedulable"
 >;
 
 export interface ControlPlaneDependencies {
@@ -322,6 +330,7 @@ function publicWorker(
     architecture: worker.architecture,
     status,
     enabled: worker.enabled,
+    schedulable: worker.schedulable,
     runtimeImage: worker.runtimeImage,
     runtimeVersion: worker.runtimeVersion,
     capabilities: worker.capabilities,
@@ -1218,6 +1227,44 @@ export function buildControlPlane(
           dependencies.workerOfflineAfterMs,
         ),
       ),
+    };
+  });
+
+  app.patch("/api/admin/workers/:id", async (request, reply) => {
+    const auth = await authenticateAdmin(request, reply);
+    if (auth === null) return reply;
+    if (
+      !validateOrigin(request, reply) ||
+      !validateCsrf(request, reply, auth.rawToken)
+    ) {
+      return reply;
+    }
+    const params = AdminWorkerParamsSchema.safeParse(request.params);
+    const body = UpdateWorkerSchedulingBodySchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return reply
+        .code(400)
+        .send(errorBody("INVALID_REQUEST", "Invalid Worker update"));
+    }
+    const userAgent = request.headers["user-agent"];
+    const result = await dependencies.workerStore.setWorkerSchedulable({
+      workerId: params.data.id,
+      schedulable: body.data.schedulable,
+      audit: {
+        actorUserId: auth.session.user.id,
+        requestId: String(request.id).slice(0, 128),
+        ipAddress: request.ip.slice(0, 128),
+        userAgent: typeof userAgent === "string" ? userAgent.slice(0, 512) : null,
+      },
+    });
+    if (result.outcome === "NOT_FOUND") {
+      return reply
+        .code(404)
+        .send(errorBody("WORKER_NOT_FOUND", "Worker was not found"));
+    }
+    reply.header("cache-control", "no-store");
+    return {
+      worker: publicWorker(result.worker, now(), dependencies.workerOfflineAfterMs),
     };
   });
 
