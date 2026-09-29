@@ -80,8 +80,13 @@ export function transitionValueLabel(value: string): string {
     value;
 }
 
+/** Local time as YYYY-MM-DD HH:mm:ss, the Portal's single absolute timestamp format. */
 export function formatAbsoluteTime(value: string): string {
-  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 // Each unit is used until its rounded value reaches the next unit's size.

@@ -20,7 +20,8 @@
 1. 不关闭 `state`、`nonce`、issuer、audience、PKCE、CSRF、Origin 或 callback 校验，也不把 IdP token
    临时改成平台 bearer token。
 2. 在独立浏览器 profile 使用 Local Admin 登录 Portal，确认 `/ready` 正常且 Admin Users 可访问。
-3. 在 Audit 中按时间检查 `auth.login_failed`。只使用 `protocol`、`providerId`、`category`、
+3. 在 Portal“审计”页选择类别“登录与会话”并限定日期范围，按时间检查“登录失败”（`auth.login_failed`，
+   红点）；需要留档时可导出已加载事件为 CSV。只使用 `protocol`、`providerId`、`category`、
    `requestId`、IP 和 User-Agent 定位；不要收集 callback URL、token response 或完整 UserInfo。
 4. 从服务端配置核对 issuer/authorization/token/UserInfo URL、client ID、callback 和 secret 是否存在，
    但不要把 secret 值打印到终端、工单或聊天记录。

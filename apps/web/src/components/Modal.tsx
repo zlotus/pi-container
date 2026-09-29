@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 export function Modal({
   open,
@@ -102,4 +102,113 @@ export function ConfirmDialog({
       </form>
     </Modal>
   );
+}
+
+interface ConfirmRequest {
+  title: string;
+  message: ReactNode;
+  confirmLabel: string;
+  tone: "danger" | "primary";
+  resolve: (confirmed: boolean) => void;
+}
+
+/** Promise-based replacement for window.confirm that renders the Portal dialog. */
+export function useConfirm() {
+  const [request, setRequest] = useState<ConfirmRequest | null>(null);
+
+  const confirm = useCallback(
+    (options: Omit<ConfirmRequest, "resolve" | "tone"> & { tone?: "danger" | "primary" }) =>
+      new Promise<boolean>((resolve) => {
+        setRequest({ tone: "primary", ...options, resolve });
+      }),
+    [],
+  );
+
+  const settle = (confirmed: boolean) => {
+    request?.resolve(confirmed);
+    setRequest(null);
+  };
+
+  const dialog = (
+    <ConfirmDialog
+      open={request !== null}
+      title={request?.title ?? ""}
+      confirmLabel={request?.confirmLabel ?? "确认"}
+      tone={request?.tone ?? "primary"}
+      onConfirm={() => settle(true)}
+      onCancel={() => settle(false)}
+    >
+      <p>{request?.message}</p>
+    </ConfirmDialog>
+  );
+
+  return [confirm, dialog] as const;
+}
+
+export interface TextPromptOptions {
+  title: string;
+  label: string;
+  confirmLabel: string;
+  description?: ReactNode;
+  type?: "text" | "password";
+  minLength?: number;
+  maxLength?: number;
+  autoComplete?: string;
+}
+
+/** Promise-based replacement for window.prompt; resolves to null when cancelled. */
+export function useTextPrompt() {
+  const [request, setRequest] = useState<
+    (TextPromptOptions & { resolve: (value: string | null) => void }) | null
+  >(null);
+  const [value, setValue] = useState("");
+
+  const prompt = useCallback(
+    (options: TextPromptOptions) =>
+      new Promise<string | null>((resolve) => {
+        setValue("");
+        setRequest({ ...options, resolve });
+      }),
+    [],
+  );
+
+  const settle = (result: string | null) => {
+    request?.resolve(result);
+    setRequest(null);
+    setValue("");
+  };
+
+  const dialog = (
+    <Modal open={request !== null} title={request?.title ?? ""} onClose={() => settle(null)}>
+      <form
+        className="modal-body"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (event.currentTarget.checkValidity()) settle(value);
+        }}
+      >
+        {request?.description === undefined ? null : <div className="modal-message">{request.description}</div>}
+        <label>
+          {request?.label}
+          <input
+            type={request?.type ?? "text"}
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+            required
+            minLength={request?.minLength}
+            maxLength={request?.maxLength}
+            autoComplete={request?.autoComplete ?? "off"}
+            spellCheck={false}
+            autoFocus
+          />
+        </label>
+        <div className="modal-actions">
+          <button type="button" className="secondary" onClick={() => settle(null)}>取消</button>
+          <button type="submit">{request?.confirmLabel}</button>
+        </div>
+      </form>
+    </Modal>
+  );
+
+  return [prompt, dialog] as const;
 }

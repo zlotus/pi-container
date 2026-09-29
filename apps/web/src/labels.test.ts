@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { auditSeverity } from "./components/AuditEventRow.js";
 import {
+  formatAbsoluteTime,
   formatRelativeTime,
   STARTABLE_WORKSPACE_STATES,
   TRANSITIONAL_WORKSPACE_STATES,
@@ -20,6 +21,12 @@ describe("Portal labels", () => {
     expect(workerStatusLabel("ONLINE")).toBe("在线");
     expect(transitionValueLabel("disabled")).toBe("已禁用");
     expect(workspaceStateLabel("FUTURE_STATE")).toBe("FUTURE_STATE");
+  });
+
+  it("formats absolute time as zero-padded local YYYY-MM-DD HH:mm:ss", () => {
+    const local = new Date(2026, 0, 5, 7, 8, 9).toISOString();
+    expect(formatAbsoluteTime(local)).toBe("2026-01-05 07:08:09");
+    expect(formatAbsoluteTime("not-a-date")).toBe("—");
   });
 
   it("formats relative time and carries rounding into the next unit", () => {

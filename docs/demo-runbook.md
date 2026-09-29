@@ -87,9 +87,10 @@ socket、资源限制与 legacy Runtime 回归，并在结束时删除随机测�
 
 ### 5. Audit And Security Story
 
-1. 在“最近基础设施事件”中确认出现 created、scheduled、starting/running、opened、
-   stopping/stopped 等事件；admin 还能看到 Worker online/offline/runtime report，以及 Phase 12 的
-   login/logout/session revoke、User 管理和 identity bind/unbind 事件。
+1. 普通用户在“活动”页、admin 在“审计”页确认出现 created、scheduled、starting/running、opened、
+   stopping/stopped 等事件；admin 还能看到 Worker online/offline/runtime report、暂停/恢复调度，以及
+   Phase 12 的 login/logout/session revoke、User 管理和 identity bind/unbind 事件，并可按类别、用户、
+   Workspace、Worker 与日期筛选。
 2. 确认普通用户只看到自己的 `workspace.*` 事件；确认所有事件不包含 Prompt、assistant message、
    tool input/output、文件正文、Cookie、password、authorization code、IdP token/client secret、
    session exchange code 或 Worker credential。

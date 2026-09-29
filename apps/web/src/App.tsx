@@ -11,6 +11,7 @@ import {
   runConfirmedAdminUserUpdate,
 } from "./pages/AdminUsersPage.js";
 import { AdminWorkersPage } from "./pages/AdminWorkersPage.js";
+import { AdminWorkspacesPage } from "./pages/AdminWorkspacesPage.js";
 import { UserActivityPage } from "./pages/UserActivityPage.js";
 import { WorkspacesPage } from "./pages/WorkspacesPage.js";
 import { canAccessRoute, type PortalRoute, usePortalRouter } from "./router.js";
@@ -82,6 +83,8 @@ export function PortalRouteContent({
           onSessionEnded={onSessionEnded}
         />
       );
+    case "admin-workspaces":
+      return <AdminWorkspacesPage />;
     case "admin-workers":
       return <AdminWorkersPage session={session} />;
     case "admin-audit":

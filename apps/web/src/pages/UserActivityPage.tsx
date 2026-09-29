@@ -1,66 +1,70 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api } from "../api.js";
+import { EMPTY_AUDIT_FILTER, type AuditFilter, useAuditEvents } from "../audit.js";
 import { AuditEventList } from "../components/AuditEventList.js";
-import type { AuditEvent, Workspace } from "../types.js";
+import type { Workspace } from "../types.js";
 
 export function UserActivityPage() {
-  const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [filter, setFilter] = useState<AuditFilter>(EMPTY_AUDIT_FILTER);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const loadEvents = useCallback(async () => {
-    const result = await api<{ events: AuditEvent[] }>("/api/audit-events?limit=50");
-    setEvents(result.events);
-  }, []);
-
-  const refreshEvents = useCallback(async () => {
-    setError(null);
-    try {
-      await loadEvents();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "无法载入事件");
-    }
-  }, [loadEvents]);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+  const activity = useAuditEvents(filter);
 
   useEffect(() => {
     let active = true;
-    void Promise.all([
-      loadEvents(),
-      api<{ workspaces: Workspace[] }>("/api/workspaces")
-        .then((result) => setWorkspaces(result.workspaces)),
-    ])
-      .catch((caught: unknown) => {
-        if (active) setError(caught instanceof Error ? caught.message : "无法载入事件");
+    void api<{ workspaces: Workspace[] }>("/api/workspaces")
+      .then((result) => {
+        if (active) setWorkspaces(result.workspaces);
       })
-      .finally(() => {
-        if (active) setLoading(false);
+      .catch((caught: unknown) => {
+        if (active) setLookupError(caught instanceof Error ? caught.message : "无法载入 Workspace");
       });
     return () => {
       active = false;
     };
-  }, [loadEvents]);
+  }, []);
+
+  const error = activity.error ?? lookupError;
 
   return (
     <>
       <div className="page-heading">
         <div>
           <h1>活动</h1>
-          <p>你的 Workspace 最近 50 条状态变化和操作记录。</p>
+          <p>你的 Workspace 的状态变化和操作记录，按时间倒序。</p>
         </div>
-        <button className="secondary" onClick={() => void refreshEvents()}>刷新</button>
+        <button className="secondary" onClick={activity.refresh}>刷新</button>
       </div>
       {error === null ? null : <p className="error banner" role="alert">{error}</p>}
       <section className="audit-panel" aria-label="最近活动">
+        {workspaces.length > 1 ? (
+          <div className="filter-bar">
+            <select
+              aria-label="按 Workspace 筛选"
+              value={filter.workspaceId}
+              onChange={(event) => setFilter({ ...filter, workspaceId: event.target.value })}
+            >
+              <option value="">全部 Workspace</option>
+              {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
+            </select>
+          </div>
+        ) : null}
         <AuditEventList
-          events={events}
+          events={activity.events}
           workspaces={workspaces}
           isAdmin={false}
-          loading={loading}
+          loading={activity.loading}
           loadingMessage="正在载入活动…"
           emptyMessage="你的 Workspace 暂无活动记录。"
         />
+        {activity.hasMore && !activity.loading ? (
+          <div className="load-more">
+            <button className="secondary" disabled={activity.loadingMore} onClick={() => void activity.loadMore()}>
+              {activity.loadingMore ? "正在加载…" : "加载更多"}
+            </button>
+          </div>
+        ) : null}
       </section>
     </>
   );

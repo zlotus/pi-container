@@ -24,6 +24,12 @@ export interface AdminUserRecord {
   updatedAt: Date;
 }
 
+/** Read-only Workspace metadata for the admin overview; never includes Runtime content. */
+export interface AdminWorkspaceRecord extends WorkspaceRecord {
+  ownerUsername: string | null;
+  ownerEmail: string | null;
+}
+
 export type UpdateManagedUserResult =
   | { outcome: "UPDATED"; user: AdminUserRecord }
   | { outcome: "NOT_FOUND" }
@@ -285,6 +291,26 @@ export function createPhase9Repository(
         }
         return true;
       });
+    },
+
+    async listAllWorkspaces(): Promise<AdminWorkspaceRecord[]> {
+      const rows = await database<
+        Array<WorkspaceRow & { owner_username: string | null; owner_email: string | null }>
+      >`
+        select
+          workspaces.id, workspaces.user_id, workspaces.name, workspaces.worker_id,
+          workspaces.state, workspaces.runtime_image, workspaces.created_at,
+          workspaces.updated_at, workspaces.last_activity_at,
+          users.username as owner_username, users.email as owner_email
+        from workspaces
+        join users on users.id = workspaces.user_id
+        order by workspaces.created_at desc, workspaces.id asc
+      `;
+      return rows.map((row) => ({
+        ...mapWorkspace(row),
+        ownerUsername: row.owner_username,
+        ownerEmail: row.owner_email,
+      }));
     },
 
     async listManagedUserWorkspaces(

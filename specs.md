@@ -1563,6 +1563,10 @@ PATCH /api/admin/workers/:id      { "schedulable": boolean }
 GET /api/admin/workspaces
 ```
 
+`GET /api/admin/workspaces` 仅 admin 可用，返回全平台 Workspace 的只读 metadata 与所有者
+（`owner.id/username/email`），不含 runtime image、Runtime 内容或 open/exchange 能力；admin 打开他人
+Workspace 仍按不可见资源拒绝。响应禁止缓存。
+
 `PATCH /api/admin/workers/:id` 仅 admin 可用，要求可信 Origin 与 CSRF；body 严格只接受
 `schedulable`，不能修改 `enabled`、capacity 或 credential。重复设置相同值是幂等的，不追加 Audit。
 
@@ -1570,10 +1574,18 @@ GET /api/admin/workspaces
 
 ```text
 GET /api/audit-events?limit=30&before=<event-id>
+    &category=workspace|worker|auth|user|identity
+    &userId=<uuid>&workspaceId=<uuid>&workerId=<id>
+    &from=<ISO datetime>&to=<ISO datetime>
 ```
 
 返回倒序、cursor pagination 的结构化平台事件。普通用户只看到自己的 Workspace 事件；admin 可看到
 全平台 Workspace/Worker/Authentication 管理事件。响应禁止缓存，不提供 Pi conversation 或 tool stream 导出。
+
+筛选参数全部可选，只在调用者既有可见范围内进一步收窄，不能扩大范围：普通用户传 `category=auth` 或
+他人 `userId` 只会得到空结果。`userId` 同时匹配 actor 与 owner；`from` 包含、`to` 不包含。未知参数或
+格式错误返回 400。Portal 的 CSV 导出在浏览器端基于已加载事件生成，不新增服务端导出接口；导出单元格
+对 `= + - @` 等前缀做公式注入防护。
 
 ## Proxy
 
@@ -2263,8 +2275,10 @@ Phase 10 在同一 Login 页面增加：
 
 Portal 使用轻量前端路由拆分主要信息架构：Workspace 列表位于 `/`，普通用户自己的 Workspace Activity
 位于 `/activity`；admin-only 的 Users、Workers、Audit 分别位于 `/admin/users`、`/admin/workers`、
-`/admin/audit`。普通用户导航显示 Workspace / 活动，admin 导航显示 Workspace / 用户 / Worker /
-审计；Portal 文案统一为中文，状态枚举仅在展示层映射为中文标签，API 值不变。前端无权限页面不能
+`/admin/audit`，只读的全平台 Workspace 列表位于 `/admin/workspaces`。普通用户导航显示 Workspace /
+活动，admin 导航显示 Workspace / 用户 / 全部 Workspace / Worker / 审计；Portal 文案统一为中文，状态枚举仅在展示层映射为中文标签，API 值不变。Audit/Activity 等日志
+类事件显示本地 `YYYY-MM-DD HH:mm:ss` 绝对时间（悬停显示相对时间）；Workspace 创建时间、Worker 心跳
+等新鲜度信息显示相对时间（悬停显示绝对时间）。API 时间字段仍为 ISO 8601 UTC。前端无权限页面不能
 替代后端 authorization。Activity 与 Admin Audit 复用事件展示，普通用户仍只能从服务端获得自己的
 `workspace.*` 事件。
 
@@ -2318,6 +2332,15 @@ View Workspace Metadata
 ```
 
 Phase 11 可展示 Identity binding，但不要做 Organization / Department / group-policy 管理后台。
+
+用户列表支持按用户名/邮箱/ID 搜索和按来源、角色、状态筛选，均在浏览器端对已加载列表进行，不新增
+服务端查询接口。创建用户、重置密码、绑定 subject 及启停、角色变更、撤销会话、解绑的确认都使用
+Portal 内对话框，不使用浏览器原生 `prompt/confirm`；失败信息显示中文并附 API error code。
+
+## Admin Workspaces
+
+只读列表：Workspace、所有者、状态、Worker、创建时间、最近活动，支持按名称/所有者/ID 搜索和按状态、
+Worker 筛选。不提供 start/stop/open/delete；admin role 不因此获得 Workspace 内容访问权。
 
 点击 Open Workspace 后进入：
 

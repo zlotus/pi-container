@@ -22,6 +22,12 @@ export interface Workspace {
   createdAt: string;
 }
 
+export interface AdminWorkspace extends Workspace {
+  updatedAt: string;
+  lastActivityAt: string;
+  owner: { id: string; username: string | null; email: string | null };
+}
+
 export interface Worker {
   id: string;
   hostname: string | null;

@@ -8,7 +8,9 @@ Phase 9～12 的工程实现、自动验证与人工验收已完成。当前里�
 Information Architecture cleanup：第一轮为纯前端的中文化、状态/时间展示、删除确认、过渡状态轮询与
 Audit 着色，不改 API contract 或权限模型；第二轮只增加 UI 所需的小型 admin 能力，目前已完成 Worker
 暂停/恢复调度（`0009_worker_scheduling` 与 `PATCH /api/admin/workers/:id`），不改变既有权限模型、
-sticky placement 或 Worker 吊销语义。
+sticky placement 或 Worker 吊销语义；随后补齐 specs 中已规划但未实现的只读
+`GET /api/admin/workspaces`、Audit 服务端筛选与分页加载/CSV 导出、用户搜索、Portal 内对话框与
+API error code 中文化。
 现有 Local/OIDC/OAuth2、manual/JIT、identity lifecycle 与 Platform Session 主链保持不变；Phase 12 将其
 成功、失败和管理动作纳入脱敏 Audit，并补齐 session fixation、Cookie、CSRF/callback、revocation、
 Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立可用。
@@ -149,11 +151,21 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
   共用 scheduler advisory lock。`enabled = false`（吊销 Worker）仍无 Portal 入口；已知其在运行中被置为
   false 时，周期 offline 检查不会把其 Workspace 置为 `WORKER_OFFLINE`，要到 Control Plane 重启才修正，
   将来开放吊销入口前需先修复。
+- Admin 的只读 `/admin/workspaces` 页面使用 `GET /api/admin/workspaces` 列出全平台 Workspace 与所有者，
+  可按名称/所有者/ID、状态、Worker 筛选；不提供生命周期或 open 操作，admin 打开他人 Workspace 仍被拒绝。
+  Admin Audit 使用该列表解析 Workspace 名称，并在 admin 视图中显示所有者。
+- `GET /api/audit-events` 增加可选 `category/userId/workspaceId/workerId/from/to` 过滤，在两种可见范围
+  的 SQL 内部追加条件，只能收窄不能扩大；Audit/Activity 页面每次加载 50 条并通过 `before` cursor
+  “加载更多”，Admin 可导出已加载事件为 CSV（UTF-8 BOM，公式注入防护）。
+- Admin Users 支持浏览器端搜索与来源/角色/状态筛选；所有 `window.prompt/confirm` 替换为 Portal 对话框
+  （`useConfirm`/`useTextPrompt`），重置密码对话框明确说明不会自动撤销已有会话。`api()` 统一把已知
+  API error code 映射为中文，未知 code 保留服务端原文，Admin Users 仍附带 code 便于排障。
 - Portal 的独立 Workers 页面展示 Worker 实测 capability、Runtime 版本、host CPU/Memory、
   authoritative assignment/max 与 heartbeat reported observation；Workspaces 页面以标题摘要和卡片展示，
-  删除收进卡片“更多”菜单并要求输入 Workspace 名称确认；Audit/Activity 整页展示最近 50 条事件，按
-  success/info/warning/danger 着色。Portal 文案统一中文，状态枚举与时间（相对时间 + 悬停绝对时间）只在
-  `apps/web/src/labels.ts` 展示层映射，API contract 不变。
+  删除收进卡片“更多”菜单并要求输入 Workspace 名称确认；Audit/Activity 整页展示事件（每次 50 条，
+  可加载更多，无内嵌滚动），按 success/info/warning/danger 着色。Portal 文案统一中文，状态枚举与时间只在 `apps/web/src/labels.ts`
+  展示层映射，API contract 不变。Audit/Activity 事件显示本地 `YYYY-MM-DD HH:mm:ss` 绝对时间（悬停显示
+  相对时间，CSV 同格式）；Workspace 创建时间、Worker 心跳等“新鲜度”信息显示相对时间，悬停显示绝对时间。
   Artifact 路径和安全边界说明保留在文档及演示 runbook，不在 Portal 重复展示；资源条是
   assignment capacity，不伪装成未采集的实时 CPU/Memory usage。
 - Artifact 不新增平台 registry/download endpoint。Agent 在 canonical `/workspace` 生成成果，用户继续

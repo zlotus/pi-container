@@ -35,6 +35,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   const phase12AdminId = randomUUID();
   const phase12UserId = randomUUID();
   const schedulingUserId = randomUUID();
+  const auditFilterUserId = randomUUID();
   const suffix = randomUUID();
   const workerId = `worker-${suffix}`;
   const phase3WorkerId = `runtime-${suffix}`;
@@ -53,18 +54,18 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   });
 
   afterAll(async () => {
-    await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId}, ${phase10UserId}, ${phase10OtherUserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId}, ${phase12AdminId}, ${phase12UserId}, ${schedulingUserId})`;
+    await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId}, ${phase10UserId}, ${phase10OtherUserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId}, ${phase12AdminId}, ${phase12UserId}, ${schedulingUserId}, ${auditFilterUserId})`;
     await database`delete from workers where id = ${workerId} or id = ${phase3WorkerId} or id = ${phase6WorkerId} or id = any(${phase5WorkerIds})`;
     await database`
       delete from platform_audit_events
-      where owner_user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId}, ${phase12AdminId}, ${phase12UserId}, ${schedulingUserId})
-        or actor_user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase11AdminId}, ${phase12AdminId}, ${phase12UserId}, ${schedulingUserId})
+      where owner_user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId}, ${phase12AdminId}, ${phase12UserId}, ${schedulingUserId}, ${auditFilterUserId})
+        or actor_user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase11AdminId}, ${phase12AdminId}, ${phase12UserId}, ${schedulingUserId}, ${auditFilterUserId})
         or worker_id = ${workerId}
         or worker_id = ${phase3WorkerId}
         or worker_id = ${phase6WorkerId}
         or worker_id = any(${phase5WorkerIds})
     `;
-    await database`delete from users where id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId}, ${phase10UserId}, ${phase10OtherUserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId}, ${phase12AdminId}, ${phase12UserId}, ${schedulingUserId})`;
+    await database`delete from users where id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId}, ${phase10UserId}, ${phase10OtherUserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId}, ${phase12AdminId}, ${phase12UserId}, ${schedulingUserId}, ${auditFilterUserId})`;
     await database.end({ timeout: 5 });
   });
 
@@ -1299,5 +1300,67 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       where worker_id = ${pausedWorker} and event_type in ('worker.disabled', 'worker.offline')
     `;
     expect(statusEvents[0]?.count).toBe(0);
+  });
+
+  it("filters audit events in SQL within each visibility scope and lists all Workspaces", async () => {
+    const repository = createPhase12Repository(database, selectWorker);
+    await repository.createUser({
+      id: auditFilterUserId,
+      email: `audit-filter-${suffix}@example.test`,
+      username: `audit-filter-${suffix.slice(0, 8)}`,
+      passwordHash: await hashPassword("integration-audit-filter-password"),
+      role: "user",
+    });
+    const workspace = await repository.createWorkspace({
+      id: randomUUID(),
+      userId: auditFilterUserId,
+      name: "audit-filter-target",
+      runtimeImage: "agent-runtime:audit-filter",
+    });
+    await database`
+      insert into platform_audit_events (event_type, actor_user_id, owner_user_id, details)
+      values ('auth.logout', ${auditFilterUserId}, ${auditFilterUserId}, '{}'::jsonb)
+    `;
+
+    const admin = (filter: Parameters<typeof repository.listAuditEvents>[0]["filter"]) =>
+      repository.listAuditEvents({
+        userId: auditFilterUserId,
+        includeAllUsers: true,
+        limit: 100,
+        beforeId: null,
+        ...(filter === undefined ? {} : { filter }),
+      });
+    const own = (filter: Parameters<typeof repository.listAuditEvents>[0]["filter"]) =>
+      repository.listAuditEvents({
+        userId: auditFilterUserId,
+        includeAllUsers: false,
+        limit: 100,
+        beforeId: null,
+        ...(filter === undefined ? {} : { filter }),
+      });
+
+    const byUser = await admin({ userId: auditFilterUserId });
+    expect(byUser.map((event) => event.eventType).sort()).toEqual([
+      "auth.logout",
+      "workspace.created",
+    ]);
+    expect((await admin({ userId: auditFilterUserId, category: "auth" }))
+      .map((event) => event.eventType)).toEqual(["auth.logout"]);
+    expect((await admin({ workspaceId: workspace.id })).map((event) => event.eventType))
+      .toEqual(["workspace.created"]);
+    expect(await admin({ userId: auditFilterUserId, from: new Date("2099-01-01T00:00:00Z") }))
+      .toEqual([]);
+    expect(await admin({ userId: auditFilterUserId, to: new Date("2000-01-01T00:00:00Z") }))
+      .toEqual([]);
+    // The ordinary-user scope stays workspace.* only, even when a filter names another category.
+    expect(await own({ category: "auth" })).toEqual([]);
+    expect((await own({})).map((event) => event.eventType)).toEqual(["workspace.created"]);
+
+    const all = await repository.listAllWorkspaces();
+    expect(all.find((candidate) => candidate.id === workspace.id)).toMatchObject({
+      name: "audit-filter-target",
+      userId: auditFilterUserId,
+      ownerEmail: `audit-filter-${suffix}@example.test`,
+    });
   });
 });

@@ -13,6 +13,7 @@ import {
 import { AuditEventList } from "./components/AuditEventList.js";
 import { Navigation } from "./components/Navigation.js";
 import { beginWorkerPolling } from "./pages/AdminWorkersPage.js";
+import { formatAbsoluteTime } from "./labels.js";
 import { routeFromPathname } from "./router.js";
 import type { SessionResponse } from "./types.js";
 
@@ -58,18 +59,20 @@ describe("Admin Users interactions", () => {
         new ApiError("At least one active Local Admin is required", 409, "LAST_ACTIVE_LOCAL_ADMIN"),
         "fallback",
       ),
-    ).toBe(
-      "LAST_ACTIVE_LOCAL_ADMIN: At least one active Local Admin is required",
-    );
+    ).toBe("必须至少保留一个可用的本地管理员（LAST_ACTIVE_LOCAL_ADMIN）");
     expect(
       adminUsersErrorMessage(
         new ApiError("Email or username already exists", 409, "USER_ALREADY_EXISTS"),
         "fallback",
       ),
-    ).toBe("USER_ALREADY_EXISTS: Email or username already exists");
+    ).toBe("邮箱或用户名已存在（USER_ALREADY_EXISTS）");
     expect(
       adminUsersErrorMessage(new ApiError("Server rejected request", 500), "fallback"),
     ).toBe("Server rejected request");
+    // An unknown code keeps the server message instead of guessing a translation.
+    expect(
+      adminUsersErrorMessage(new ApiError("Brand new failure", 409, "BRAND_NEW_CODE"), "fallback"),
+    ).toBe("Brand new failure（BRAND_NEW_CODE）");
   });
 });
 
@@ -146,7 +149,8 @@ describe("Audit event display", () => {
       workerId: "worker-a",
       details: { fromState: "RUNNING", toState: "STOPPED" },
     }, { workspaces: [{ id: workspaceId, name: "build" }] });
-    expect(workspace).toContain("<p>build · worker-a · 运行中 → 已停止</p>");
+    // Admins see whose Workspace it is; regular users (Activity) see only the name.
+    expect(workspace).toContain("<p>build（user-a） · worker-a · 运行中 → 已停止</p>");
 
     const worker = renderAudit({
       eventType: "worker.online",
@@ -231,6 +235,7 @@ describe("Portal navigation and routes", () => {
     const markup = renderNavigation(adminSession);
     expect(markup).toContain("Workspace");
     expect(markup).toContain('href="/admin/users"');
+    expect(markup).toContain('href="/admin/workspaces"');
     expect(markup).toContain('href="/admin/workers"');
     expect(markup).toContain('href="/admin/audit"');
     expect(markup).not.toContain('href="/activity"');
@@ -239,13 +244,20 @@ describe("Portal navigation and routes", () => {
   it("renders the Activity page for a regular user", () => {
     const markup = renderRoute("/activity", userSession);
     expect(markup).toContain("<h1>活动</h1>");
-    expect(markup).toContain("你的 Workspace 最近 50 条状态变化和操作记录。");
+    expect(markup).toContain("你的 Workspace 的状态变化和操作记录，按时间倒序。");
   });
 
   it("maps deep links to their dedicated admin pages", () => {
     expect(renderRoute("/admin/users")).toContain("<h1>用户</h1>");
+    expect(renderRoute("/admin/workspaces")).toContain("<h1>全部 Workspace</h1>");
     expect(renderRoute("/admin/workers")).toContain("<h1>Worker</h1>");
     expect(renderRoute("/admin/audit")).toContain("<h1>审计</h1>");
+  });
+
+  it("denies direct all-Workspace access to a regular user", () => {
+    const markup = renderRoute("/admin/workspaces", userSession);
+    expect(markup).toContain("无权访问 Admin 页面");
+    expect(markup).not.toContain("全部 Workspace</h1>");
   });
 
   it("denies direct Admin Audit access to a regular user", () => {
@@ -284,6 +296,8 @@ describe("Activity event display", () => {
 
     expect(markup).toContain("<strong>Workspace 已启动</strong>");
     expect(markup).toContain("<p>build · worker-a · 启动中 → 运行中</p>");
+    // Log rows show a precise absolute timestamp, with the relative age only as a hover hint.
+    expect(markup).toContain(`>${formatAbsoluteTime("2026-09-28T08:00:00.000Z")}</time>`);
     expect(markup).not.toContain("操作者");
   });
 });

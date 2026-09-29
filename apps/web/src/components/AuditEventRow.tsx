@@ -1,6 +1,6 @@
 import { authProtocolLabel, transitionValueLabel } from "../labels.js";
 import type { AuditEvent, User, Workspace } from "../types.js";
-import { RelativeTime } from "./RelativeTime.js";
+import { AbsoluteTime } from "./RelativeTime.js";
 
 const AUDIT_LABELS: Record<string, string> = {
   "workspace.created": "Workspace 已创建",
@@ -99,6 +99,54 @@ function auditUserName(
   return user?.username ?? user?.email ?? userId.slice(0, 8);
 }
 
+export interface AuditEventDescription {
+  label: string;
+  subject: string;
+  detail: string | null;
+  severity: AuditSeverity;
+  severityLabel: string;
+}
+
+/** Single source of the human-readable event text, shared by the list and the CSV export. */
+export function describeAuditEvent(
+  event: AuditEvent,
+  workspaces: readonly Pick<Workspace, "id" | "name">[],
+  users: readonly Pick<User, "id" | "username" | "email">[],
+  isAdmin: boolean,
+): AuditEventDescription {
+  const workspace = workspaces.find((candidate) => candidate.id === event.workspaceId);
+  const recordedName = event.details.name;
+  const workspaceName = workspace?.name ??
+    (typeof recordedName === "string" ? recordedName : null) ??
+    (event.workspaceId === null ? "平台" : `${event.workspaceId.slice(0, 8)}…`);
+  const isUserEvent = ["auth.", "user.", "identity."].some(
+    (prefix) => event.eventType.startsWith(prefix),
+  );
+  const targetUserId = event.ownerUserId ?? event.actorUserId;
+  const actor = event.actorUserId;
+  const isWorkerAdminEvent = event.eventType.startsWith("worker.scheduling_");
+  const workspaceSubject = isAdmin && event.workspaceId !== null && event.ownerUserId !== null
+    ? `${workspaceName}（${auditUserName(event.ownerUserId, users)}）`
+    : workspaceName;
+  const subject = isAdmin && isUserEvent && targetUserId !== null
+    ? `${auditUserName(targetUserId, users)}${
+      actor !== null && actor !== targetUserId
+        ? ` · 操作者 ${auditUserName(actor, users)}`
+        : ""
+    }`
+    : isAdmin && isWorkerAdminEvent && actor !== null
+      ? `操作者 ${auditUserName(actor, users)}`
+      : workspaceSubject;
+  const severity = auditSeverity(event.eventType);
+  return {
+    label: AUDIT_LABELS[event.eventType] ?? event.eventType,
+    subject,
+    detail: auditDetail(event.details),
+    severity,
+    severityLabel: SEVERITY_LABELS[severity],
+  };
+}
+
 export function AuditEventRow({
   event,
   workspaces,
@@ -110,37 +158,21 @@ export function AuditEventRow({
   adminUsers: readonly Pick<User, "id" | "username" | "email">[];
   isAdmin: boolean;
 }) {
-  const workspace = workspaces.find((candidate) => candidate.id === event.workspaceId);
-  const recordedName = event.details.name;
-  const workspaceSubject = workspace?.name ??
-    (typeof recordedName === "string" ? recordedName : null) ??
-    (event.workspaceId === null ? "平台" : `${event.workspaceId.slice(0, 8)}…`);
-  const isUserEvent = ["auth.", "user.", "identity."].some(
-    (prefix) => event.eventType.startsWith(prefix),
+  const { label, subject, detail, severity, severityLabel } = describeAuditEvent(
+    event,
+    workspaces,
+    adminUsers,
+    isAdmin,
   );
-  const targetUserId = event.ownerUserId ?? event.actorUserId;
-  const actor = event.actorUserId;
-  const isWorkerAdminEvent = event.eventType.startsWith("worker.scheduling_");
-  const subject = isAdmin && isUserEvent && targetUserId !== null
-    ? `${auditUserName(targetUserId, adminUsers)}${
-      actor !== null && actor !== targetUserId
-        ? ` · 操作者 ${auditUserName(actor, adminUsers)}`
-        : ""
-    }`
-    : isAdmin && isWorkerAdminEvent && actor !== null
-      ? `操作者 ${auditUserName(actor, adminUsers)}`
-      : workspaceSubject;
-  const detail = auditDetail(event.details);
-  const severity = auditSeverity(event.eventType);
 
   return (
     <li>
-      <span className={`audit-dot audit-${severity}`} role="img" aria-label={SEVERITY_LABELS[severity]} title={SEVERITY_LABELS[severity]} />
+      <span className={`audit-dot audit-${severity}`} role="img" aria-label={severityLabel} title={severityLabel} />
       <div>
-        <strong>{AUDIT_LABELS[event.eventType] ?? event.eventType}</strong>
+        <strong>{label}</strong>
         <p>{subject}{event.workerId === null ? "" : ` · ${event.workerId}`}{detail === null ? "" : ` · ${detail}`}</p>
       </div>
-      <RelativeTime value={event.createdAt} />
+      <AbsoluteTime value={event.createdAt} />
     </li>
   );
 }

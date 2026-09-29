@@ -70,13 +70,17 @@ export {
   type WorkspaceRecoveryRecord,
 } from "./phase6.js";
 export {
+  AUDIT_EVENT_CATEGORIES,
   createPhase8Repository,
+  type AuditEventCategory,
+  type AuditEventFilter,
   type Phase8Repository,
   type PlatformAuditEvent,
 } from "./phase8.js";
 export {
   createPhase9Repository,
   type AdminUserRecord,
+  type AdminWorkspaceRecord,
   type Phase9Repository,
   type UpdateManagedUserResult,
 } from "./phase9.js";

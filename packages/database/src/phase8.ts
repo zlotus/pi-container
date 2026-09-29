@@ -13,6 +13,27 @@ export interface PlatformAuditEvent {
   createdAt: Date;
 }
 
+export const AUDIT_EVENT_CATEGORIES = [
+  "workspace",
+  "worker",
+  "auth",
+  "user",
+  "identity",
+] as const;
+
+export type AuditEventCategory = (typeof AUDIT_EVENT_CATEGORIES)[number];
+
+/** Optional narrowing filters; they only ever intersect the caller's visibility scope. */
+export interface AuditEventFilter {
+  category?: AuditEventCategory | null;
+  /** Matches either the acting user or the owning/target user. */
+  userId?: string | null;
+  workspaceId?: string | null;
+  workerId?: string | null;
+  from?: Date | null;
+  to?: Date | null;
+}
+
 interface PlatformAuditEventRow {
   id: string;
   event_type: string;
@@ -68,7 +89,27 @@ export function createPhase8Repository(
       includeAllUsers: boolean;
       limit: number;
       beforeId: string | null;
+      filter?: AuditEventFilter;
     }): Promise<PlatformAuditEvent[]> {
+      const filter = input.filter ?? {};
+      const typePrefix = filter.category == null ? null : `${filter.category}.%`;
+      const userId = filter.userId ?? null;
+      const workspaceId = filter.workspaceId ?? null;
+      const workerId = filter.workerId ?? null;
+      const from = filter.from ?? null;
+      const to = filter.to ?? null;
+      const filters = database`
+        and (${typePrefix}::text is null or event_type like ${typePrefix}::text)
+        and (
+          ${userId}::uuid is null
+          or actor_user_id = ${userId}::uuid
+          or owner_user_id = ${userId}::uuid
+        )
+        and (${workspaceId}::uuid is null or workspace_id = ${workspaceId}::uuid)
+        and (${workerId}::text is null or worker_id = ${workerId}::text)
+        and (${from}::timestamptz is null or created_at >= ${from}::timestamptz)
+        and (${to}::timestamptz is null or created_at < ${to}::timestamptz)
+      `;
       const rows = input.includeAllUsers
         ? await database<PlatformAuditEventRow[]>`
             select
@@ -76,6 +117,7 @@ export function createPhase8Repository(
               workspace_id, worker_id, details, created_at
             from platform_audit_events
             where (${input.beforeId}::bigint is null or id < ${input.beforeId}::bigint)
+              ${filters}
             order by platform_audit_events.id desc
             limit ${input.limit}
           `
@@ -87,6 +129,7 @@ export function createPhase8Repository(
             where owner_user_id = ${input.userId}
               and event_type like 'workspace.%'
               and (${input.beforeId}::bigint is null or id < ${input.beforeId}::bigint)
+              ${filters}
             order by platform_audit_events.id desc
             limit ${input.limit}
           `;

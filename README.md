@@ -14,8 +14,8 @@ Runtime 现包含
 Python/uv、Node/pnpm、Rust、build tools、ffmpeg、PDF/Office 工具、Playwright/Chromium 和克制的
 Linux/network debugging CLI；Worker 在 hello 前通过本机精确镜像的实际探针上报 capability，不按
 architecture 猜测。Portal 使用 `/`、`/activity` 与三个 `/admin/*` 页面分别承载 Workspace、用户活动、
-User、Worker 与 Platform Audit；普通用户显示 Workspace / 活动，admin 显示 Workspace / 用户 /
-Worker / 审计。Artifact 继续复用 pi-web
+User、Worker 与 Platform Audit，admin 另有只读的 `/admin/workspaces` 全平台 Workspace 列表；普通用户
+显示 Workspace / 活动，admin 显示 Workspace / 用户 / 全部 Workspace / Worker / 审计。Artifact 继续复用 pi-web
 的 `/workspace` Files 查看/下载，不复制文件或 Pi
 message/tool stream。仓库记录的 ARM64 工程验证已通过，AMD64 native 自动验证记录仍待补齐。
 HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其

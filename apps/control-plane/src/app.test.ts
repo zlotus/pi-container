@@ -296,6 +296,19 @@ async function createTestDependencies(
               input.beforeId === null ||
               BigInt(event.id) < BigInt(input.beforeId),
           )
+          .filter((event) => {
+            const filter = input.filter ?? {};
+            return (
+              (filter.category == null || event.eventType.startsWith(`${filter.category}.`)) &&
+              (filter.userId == null ||
+                event.actorUserId === filter.userId ||
+                event.ownerUserId === filter.userId) &&
+              (filter.workspaceId == null || event.workspaceId === filter.workspaceId) &&
+              (filter.workerId == null || event.workerId === filter.workerId) &&
+              (filter.from == null || event.createdAt >= filter.from) &&
+              (filter.to == null || event.createdAt < filter.to)
+            );
+          })
           .slice(0, input.limit);
       },
       async recordAuthenticationFailure(input) {
@@ -689,6 +702,16 @@ async function createTestDependencies(
           });
         }
         return true;
+      },
+      async listAllWorkspaces() {
+        return workspaces.map((workspace) => {
+          const owner = users.find((user) => user.id === workspace.userId);
+          return {
+            ...workspace,
+            ownerUsername: owner?.username ?? null,
+            ownerEmail: owner?.email ?? null,
+          };
+        });
       },
       async listManagedUserWorkspaces(userId) {
         if (!users.some((user) => user.id === userId)) return null;
@@ -2182,6 +2205,100 @@ describe("Phase 9 Admin Users", () => {
 });
 
 describe("workspace ownership", () => {
+  it("narrows audit queries by filters without widening a regular user's scope", async () => {
+    const app = buildControlPlane(await createTestDependencies());
+    const userA = await login(app, "user-a", "password-for-user-a");
+    const admin = await login(app, "admin", "password-for-admin");
+    await app.inject({
+      method: "POST",
+      url: "/api/workspaces",
+      headers: { cookie: userA.cookie, origin: ORIGIN, "x-csrf-token": userA.csrfToken },
+      payload: { name: "audited" },
+    });
+    const query = async (session: { cookie: string }, search: string) => {
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/audit-events?${search}`,
+        headers: { cookie: session.cookie },
+      });
+      return {
+        status: response.statusCode,
+        events: response.statusCode === 200
+          ? response.json<{ events: Array<{ eventType: string; actorUserId: string | null; ownerUserId: string | null }> }>().events
+          : [],
+      };
+    };
+
+    const auth = await query(admin, "category=auth");
+    expect(auth.events.length).toBeGreaterThan(0);
+    expect(auth.events.every((event) => event.eventType.startsWith("auth."))).toBe(true);
+    const byUser = await query(admin, `userId=${USER_A_ID}`);
+    expect(byUser.events.length).toBeGreaterThan(0);
+    expect(byUser.events.every((event) =>
+      event.actorUserId === USER_A_ID || event.ownerUserId === USER_A_ID)).toBe(true);
+    expect((await query(admin, "from=2099-01-01T00:00:00Z")).events).toEqual([]);
+
+    // A regular user asking for auth events or another user's events still sees only own workspace.* events.
+    expect((await query(userA, "category=auth")).events).toEqual([]);
+    const otherUser = await query(userA, `userId=${USER_B_ID}`);
+    expect(otherUser.events).toEqual([]);
+
+    for (const invalid of ["category=secrets", "userId=not-a-uuid", "from=yesterday", "unknown=1"]) {
+      expect((await query(admin, invalid)).status).toBe(400);
+    }
+    await app.close();
+  });
+
+  it("lists every Workspace with its owner only for an admin, as metadata", async () => {
+    const app = buildControlPlane(await createTestDependencies());
+    const userA = await login(app, "user-a", "password-for-user-a");
+    const userB = await login(app, "user-b", "password-for-user-b");
+    const admin = await login(app, "admin", "password-for-admin");
+    for (const [session, name] of [[userA, "alpha"], [userB, "beta"]] as const) {
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/workspaces",
+        headers: { cookie: session.cookie, origin: ORIGIN, "x-csrf-token": session.csrfToken },
+        payload: { name },
+      });
+      expect(created.statusCode).toBe(201);
+    }
+
+    const forbidden = await app.inject({
+      method: "GET",
+      url: "/api/admin/workspaces",
+      headers: { cookie: userA.cookie },
+    });
+    expect(forbidden.statusCode).toBe(403);
+    const anonymous = await app.inject({ method: "GET", url: "/api/admin/workspaces" });
+    expect(anonymous.statusCode).toBe(401);
+
+    const allowed = await app.inject({
+      method: "GET",
+      url: "/api/admin/workspaces",
+      headers: { cookie: admin.cookie },
+    });
+    expect(allowed.statusCode).toBe(200);
+    expect(allowed.headers["cache-control"]).toBe("no-store");
+    const body = allowed.json<{
+      workspaces: Array<{ name: string; owner: { id: string; username: string | null } }>;
+    }>();
+    expect(body.workspaces.map((workspace) => [workspace.name, workspace.owner.username]).sort())
+      .toEqual([["alpha", "user-a"], ["beta", "user-b"]]);
+    expect(JSON.stringify(body)).not.toContain("runtimeImage");
+
+    // The overview grants no content access: the admin still cannot open another user's Workspace.
+    const betaId = (body.workspaces.find((workspace) => workspace.name === "beta") as unknown as { id: string }).id;
+    const open = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${betaId}/open`,
+      headers: { cookie: admin.cookie, origin: ORIGIN, "x-csrf-token": admin.csrfToken },
+      payload: {},
+    });
+    expect(open.statusCode).toBe(404);
+    await app.close();
+  });
+
   it("keeps User A and User B workspace lists isolated", async () => {
     const app = buildControlPlane(await createTestDependencies());
     const userA = await login(app, "user-a", "password-for-user-a");

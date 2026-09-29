@@ -17,6 +17,7 @@ const ITEMS: Array<{
   { route: "workspaces", label: "Workspace" },
   { route: "activity", label: "活动", userOnly: true },
   { route: "admin-users", label: "用户", adminOnly: true },
+  { route: "admin-workspaces", label: "全部 Workspace", adminOnly: true },
   { route: "admin-workers", label: "Worker", adminOnly: true },
   { route: "admin-audit", label: "审计", adminOnly: true },
 ];

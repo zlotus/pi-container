@@ -1,7 +1,7 @@
 import { Fragment, type FormEvent, useCallback, useEffect, useState } from "react";
 
-import { api, ApiError } from "../api.js";
-import { Modal } from "../components/Modal.js";
+import { api, ApiError, apiErrorText } from "../api.js";
+import { Modal, useConfirm, useTextPrompt } from "../components/Modal.js";
 import { RelativeTime } from "../components/RelativeTime.js";
 import { formatAbsoluteTime, roleLabel, userStatusLabel, workspaceStateLabel } from "../labels.js";
 import type {
@@ -31,21 +31,23 @@ export function adminUserUpdateConfirmation(
   return `将“${identifier}”的角色从${roleLabel(user.role)}改为${roleLabel(update.role ?? user.role)}？`;
 }
 
+export type ConfirmMessage = (message: string) => boolean | Promise<boolean>;
+
 export function confirmAdminUserUpdate(
   user: AdminUserUpdateTarget,
   update: AdminUserUpdate,
-  confirm: (message: string) => boolean,
-): boolean {
+  confirm: ConfirmMessage,
+): boolean | Promise<boolean> {
   return confirm(adminUserUpdateConfirmation(user, update));
 }
 
 export async function runConfirmedAdminUserUpdate(
   user: AdminUserUpdateTarget,
   update: AdminUserUpdate,
-  confirm: (message: string) => boolean,
+  confirm: ConfirmMessage,
   request: () => Promise<void>,
 ): Promise<boolean> {
-  if (!confirmAdminUserUpdate(user, update, confirm)) return false;
+  if (!(await confirmAdminUserUpdate(user, update, confirm))) return false;
   await request();
   return true;
 }
@@ -54,9 +56,32 @@ export function adminUsersErrorMessage(caught: unknown, fallback: string): strin
   if (caught instanceof ApiError) {
     return caught.code === undefined
       ? caught.message
-      : `${caught.code}: ${caught.message}`;
+      : `${apiErrorText(caught.code, caught.message)}（${caught.code}）`;
   }
   return caught instanceof Error ? caught.message : fallback;
+}
+
+export interface AdminUserFilter {
+  query: string;
+  source: "" | AdminUser["source"];
+  role: "" | AdminUser["role"];
+  status: "" | AdminUser["status"];
+}
+
+export const EMPTY_ADMIN_USER_FILTER: AdminUserFilter = { query: "", source: "", role: "", status: "" };
+
+export function filterAdminUsers(users: readonly AdminUser[], filter: AdminUserFilter): AdminUser[] {
+  const query = filter.query.trim().toLowerCase();
+  return users.filter((user) =>
+    (filter.source === "" || user.source === filter.source) &&
+    (filter.role === "" || user.role === filter.role) &&
+    (filter.status === "" || user.status === filter.status) &&
+    (query === "" || [user.username, user.email, user.id].some((value) =>
+      value?.toLowerCase().includes(query))));
+}
+
+function displayName(user: Pick<AdminUser, "username" | "email" | "id">): string {
+  return user.username ?? user.email ?? user.id;
 }
 
 export function AdminUsersPage({
@@ -83,6 +108,9 @@ export function AdminUsersPage({
   const [managedIdentities, setManagedIdentities] = useState<ExternalIdentity[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<AdminUserFilter>(EMPTY_ADMIN_USER_FILTER);
+  const [confirm, confirmDialog] = useConfirm();
+  const [prompt, promptDialog] = useTextPrompt();
 
   const loadUsers = useCallback(async () => {
     const result = await api<{ users: AdminUser[] }>("/api/admin/users");
@@ -139,7 +167,18 @@ export function AdminUsersPage({
     await runConfirmedAdminUserUpdate(
       user,
       update,
-      (message) => window.confirm(message),
+      (message) => confirm({
+        title: update.status !== undefined
+          ? update.status === "active" ? "启用用户" : "禁用用户"
+          : "变更角色",
+        message: update.status === "disabled"
+          ? `${message} 禁用后该用户的全部登录会话会立即失效。`
+          : message,
+        confirmLabel: update.status !== undefined
+          ? update.status === "active" ? "启用" : "禁用"
+          : "变更",
+        tone: update.status === "disabled" ? "danger" : "primary",
+      }),
       async () => {
         setError(null);
         setPendingUserId(user.id);
@@ -175,7 +214,16 @@ export function AdminUsersPage({
   }
 
   async function resetManagedPassword(user: AdminUser) {
-    const password = window.prompt(`为 ${user.username ?? user.email ?? user.id} 设置新密码（至少 12 个字符）`);
+    const password = await prompt({
+      title: "重置本地密码",
+      label: "新密码（至少 12 位）",
+      confirmLabel: "重置密码",
+      type: "password",
+      minLength: 12,
+      maxLength: 1024,
+      autoComplete: "new-password",
+      description: <p>为 <strong>{displayName(user)}</strong> 设置新的本地密码。已有登录会话不会自动失效，如需强制下线请再执行“撤销会话”。</p>,
+    });
     if (password === null) return;
     setError(null);
     setPendingUserId(user.id);
@@ -193,9 +241,13 @@ export function AdminUsersPage({
   }
 
   async function bindManagedIdentity(user: AdminUser, providerId: string) {
-    const providerSubject = window.prompt(
-      `将 ${providerId} 的精确 subject 绑定到 ${user.username ?? user.email ?? user.id}`,
-    );
+    const providerSubject = await prompt({
+      title: "绑定外部登录方式",
+      label: `${providerId} subject`,
+      confirmLabel: "绑定",
+      maxLength: 512,
+      description: <p>输入 <code>{providerId}</code> 中该用户的精确 subject，绑定到 <strong>{displayName(user)}</strong>。平台不会按 email 自动匹配。</p>,
+    });
     if (providerSubject === null || providerSubject.length === 0) return;
     setError(null);
     setPendingUserId(user.id);
@@ -234,7 +286,12 @@ export function AdminUsersPage({
   }
 
   async function unbindManagedIdentity(user: AdminUser, identity: ExternalIdentity) {
-    if (!window.confirm(`解除 ${identity.providerId} / ${identity.providerSubject} 的绑定？`)) return;
+    if (!(await confirm({
+      title: "解绑登录方式",
+      message: `解除 ${identity.providerId} / ${identity.providerSubject} 与 ${displayName(user)} 的绑定？解绑后该外部身份将无法再登录此用户。`,
+      confirmLabel: "解绑",
+      tone: "danger",
+    }))) return;
     setError(null);
     setPendingUserId(user.id);
     try {
@@ -254,7 +311,12 @@ export function AdminUsersPage({
   }
 
   async function revokeManagedSessions(user: AdminUser) {
-    if (!window.confirm(`撤销 ${user.username ?? user.email ?? user.id} 的全部登录会话？`)) return;
+    if (!(await confirm({
+      title: "撤销登录会话",
+      message: `撤销 ${displayName(user)} 的全部登录会话？该用户需要重新登录，已打开的 Workspace 连接也会断开。`,
+      confirmLabel: "撤销会话",
+      tone: "danger",
+    }))) return;
     setError(null);
     setPendingUserId(user.id);
     try {
@@ -308,6 +370,8 @@ export function AdminUsersPage({
     setManagedIdentities([]);
   }
 
+  const visibleUsers = filterAdminUsers(users, filter);
+
   return (
     <>
       <div className="page-heading">
@@ -343,11 +407,38 @@ export function AdminUsersPage({
           </div>
         </form>
       </Modal>
+      {confirmDialog}
+      {promptDialog}
       <section className="user-panel" aria-label="用户列表">
+        <div className="filter-bar">
+          <input
+            type="search"
+            placeholder="搜索用户名、邮箱或 ID"
+            aria-label="搜索用户"
+            value={filter.query}
+            onChange={(event) => setFilter({ ...filter, query: event.target.value })}
+          />
+          <select aria-label="按来源筛选" value={filter.source} onChange={(event) => setFilter({ ...filter, source: event.target.value as AdminUserFilter["source"] })}>
+            <option value="">全部来源</option>
+            <option value="local">本地账户</option>
+            <option value="external">外部身份</option>
+          </select>
+          <select aria-label="按角色筛选" value={filter.role} onChange={(event) => setFilter({ ...filter, role: event.target.value as AdminUserFilter["role"] })}>
+            <option value="">全部角色</option>
+            <option value="admin">管理员</option>
+            <option value="user">普通用户</option>
+          </select>
+          <select aria-label="按状态筛选" value={filter.status} onChange={(event) => setFilter({ ...filter, status: event.target.value as AdminUserFilter["status"] })}>
+            <option value="">全部状态</option>
+            <option value="active">正常</option>
+            <option value="disabled">已禁用</option>
+          </select>
+          <span className="filter-count">{visibleUsers.length} / {users.length}</span>
+        </div>
         {loading ? (
           <p className="muted">正在载入用户…</p>
-        ) : users.length === 0 ? (
-          <p className="muted">尚无用户记录。</p>
+        ) : visibleUsers.length === 0 ? (
+          <p className="muted">{users.length === 0 ? "尚无用户记录。" : "没有符合条件的用户。"}</p>
         ) : (
           <div className="table-wrap">
             <table>
@@ -355,7 +446,7 @@ export function AdminUsersPage({
                 <tr><th>用户</th><th>来源</th><th>角色</th><th>状态</th><th>Workspace</th><th>最近登录</th><th>操作</th></tr>
               </thead>
               <tbody>
-                {users.map((user) => (
+                {visibleUsers.map((user) => (
                   <Fragment key={user.id}>
                     <tr>
                       <td><strong>{user.username ?? user.email ?? user.id}</strong><small>{user.email ?? "无 email"}</small></td>

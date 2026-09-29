@@ -8,6 +8,7 @@ import {
   hashOpaqueToken,
   verifyPassword,
 } from "@agent-runtime/auth";
+import { AUDIT_EVENT_CATEGORIES } from "@agent-runtime/database";
 import type {
   AuthenticatedSessionRecord,
   AdminUserRecord,
@@ -121,6 +122,12 @@ const AuditQuerySchema = z
   .object({
     limit: z.coerce.number().int().min(1).max(100).default(30),
     before: z.string().regex(/^[1-9][0-9]*$/).optional(),
+    category: z.enum(AUDIT_EVENT_CATEGORIES).optional(),
+    userId: z.string().uuid().optional(),
+    workspaceId: z.string().uuid().optional(),
+    workerId: z.string().min(1).max(128).optional(),
+    from: z.string().datetime({ offset: true }).optional(),
+    to: z.string().datetime({ offset: true }).optional(),
   })
   .strict();
 
@@ -163,6 +170,7 @@ type Phase1Store = Pick<
   | "resetLocalPassword"
   | "revokeUserSessions"
   | "listManagedUserWorkspaces"
+  | "listAllWorkspaces"
   | "listUserIdentities"
   | "bindExternalIdentity"
   | "unbindExternalIdentity"
@@ -1201,13 +1209,21 @@ export function buildControlPlane(
     if (!query.success) {
       return reply
         .code(400)
-        .send(errorBody("INVALID_REQUEST", "Invalid audit event cursor"));
+        .send(errorBody("INVALID_REQUEST", "Invalid audit event query"));
     }
     const events = await dependencies.store.listAuditEvents({
       userId: auth.session.user.id,
       includeAllUsers: auth.session.user.role === "admin",
       limit: query.data.limit,
       beforeId: query.data.before ?? null,
+      filter: {
+        category: query.data.category ?? null,
+        userId: query.data.userId ?? null,
+        workspaceId: query.data.workspaceId ?? null,
+        workerId: query.data.workerId ?? null,
+        from: query.data.from === undefined ? null : new Date(query.data.from),
+        to: query.data.to === undefined ? null : new Date(query.data.to),
+      },
     });
     reply.header("cache-control", "no-store");
     return { events: events.map(publicAuditEvent) };
@@ -1564,6 +1580,24 @@ export function buildControlPlane(
     }
     dependencies.sessionConnections?.closeUser(params.data.id);
     return reply.code(204).send();
+  });
+
+  app.get("/api/admin/workspaces", async (request, reply) => {
+    const auth = await authenticateAdmin(request, reply);
+    if (auth === null) return reply;
+    const workspaces = await dependencies.store.listAllWorkspaces();
+    reply.header("cache-control", "no-store");
+    // Metadata only: admin role grants no Workspace content access or open/exchange.
+    return {
+      workspaces: workspaces.map((workspace) => ({
+        ...publicWorkspace(workspace),
+        owner: {
+          id: workspace.userId,
+          username: workspace.ownerUsername,
+          email: workspace.ownerEmail,
+        },
+      })),
+    };
   });
 
   app.get("/api/admin/users/:id/workspaces", async (request, reply) => {
