@@ -3371,14 +3371,92 @@ Worker、Docker Runtime、pi-web、pi-agent 不认识 OIDC/OAuth2。
 
 ## Phase 13：工程基线
 
-状态：待开工设计。
+状态：**设计已确认（2026-09-30），实现中**。分支：`phase-13-engineering-baseline`。
 
-- CI 在 push/PR 上运行 typecheck、lint、单元测试、`test:e2e` 与带 PostgreSQL 的集成测试；
-  runtime-toolchain 在 master push 与定时任务上运行；AMD64 只以原生 runner 证据为准。
-- Control Plane 与 Worker 结构化日志、request ID、凭据 redaction。
-- 按领域拆分 `apps/control-plane/src/app.ts` 与 `packages/database/src/phaseN.ts`；纯重构。
-- 测试夹具归位（`mock_weaver.py`）。
-- 验收要点：CI 全绿；抽查日志无凭据；重构前后 API 与 Portal 行为无差异。
+目标：为后续 Phase 建立可靠的自动验证、可排障的日志和可读的代码结构。**不改变任何对外行为**：API、
+数据库 schema、Worker protocol、Portal 行为与 v0.13.0 一致。
+
+### 13.1 持续集成
+
+- 新增 `.github/workflows/ci.yml`，在所有分支 push 与 pull request 上运行，runner 为
+  `ubuntu-24.04-arm`（主验证架构；仓库公开，GitHub 托管 ARM64 runner 可用）：
+  - `pnpm install --frozen-lockfile`、`pnpm typecheck`、`pnpm lint`、`pnpm test`、`pnpm build:web`；
+  - `pnpm test:e2e`；
+  - PostgreSQL 17 service 容器上的集成测试（`TEST_DATABASE_URL` 指向 CI 专用库）。
+- `runtime-toolchain.yml` 的触发条件增加：master 上 `runtime/**`、`apps/worker/**`、
+  `packages/protocol/**` 变化的 push、每周定时、手动触发。保留 amd64 / arm64 矩阵；AMD64 的原生证据
+  由此产生，并回填 `docs/runtime-capability-matrix.md`。
+- 每个 Phase 通过 pull request 合入 master：CI 必须为绿，负责人人工验收后再合并。
+
+### 13.2 结构化日志
+
+- 新增 `packages/logging`，基于 pino（Fastify 内置的日志库，版本精确 pin），提供
+  `createLogger(service)`：JSON 输出到 stdout，`LOG_LEVEL` 控制级别（默认 `info`）。开发时可设
+  `LOG_FORMAT=pretty` 输出人类可读格式。
+- Control Plane：启用 Fastify logger，沿用现有 request ID；Portal API 请求完成时记录 method、路由模板、
+  status、耗时、request ID，已认证时附 user ID。
+- Workspace Gateway 与 Worker Gateway：每个请求记录 Workspace ID、method、status、耗时、request ID，
+  WebSocket 记录建立与关闭；**只记录路径模板或去掉 query 的路径，不记录 Workspace 内的完整 URL**
+  （可能包含用户文件名）。
+- 以下内容**永不进入日志**：Cookie / Set-Cookie、Authorization、`x-csrf-token`、请求与响应 body、
+  任何 query string 中的值（OIDC/OAuth2 callback 的 `code`、`state` 等）、password、token、Worker
+  credential、exchange code、IdP 响应。通过 pino redaction 与“只记录白名单字段”两层保证。
+- 替换现有静默吞掉的错误：Control Plane 周期 offline 检查、Worker 恢复问题、Worker Gateway 上游错误、
+  Worker control channel 错误都改为带上下文的 `warn`/`error` 日志；不改变其原有的 fail-closed 行为。
+- 现有 `console.*` 输出（`create-user`、`migrate-cli` 等 CLI 的结果提示）保持为面向人的 stdout，不纳入
+  结构化日志。
+
+### 13.3 Control Plane 按领域拆分
+
+- `apps/control-plane/src/app.ts` 只保留 `buildControlPlane` 的组装逻辑。共享的认证、Origin/CSRF 校验、
+  Worker 命令分发等 helper 集中到一个 route context；路由按领域拆到 `src/routes/`：health、
+  local auth、external auth（OIDC/OAuth2）、workspaces、audit、admin users、admin workers/workspaces。
+  public 表示层函数与 HTTP 工具（errorBody、cookie）单独成文件。
+- `app.test.ts` 同步拆分：共享夹具（`createTestDependencies`、`login`、Worker 响应 helper）移到测试
+  支持文件，测试按领域分文件。**只移动，不修改断言**；拆分前后测试条目数与名称一致作为校验。
+  `test:e2e` 脚本更新为新文件列表。
+
+### 13.4 数据库 repository 按领域重组
+
+- 以单一的 `createRepository(database, selectWorker)` 取代 `createPhase1Repository` …
+  `createPhase12Repository` 的继承链，内部按领域组织：users & sessions、workspaces、workspace
+  lifecycle、workers、scheduling、recovery、audit、identities。唯一的同名覆盖 `markWorkersOffline`
+  只保留当前生效的版本（同时把 Workspace 置为 `WORKER_OFFLINE` 的实现）。
+- `create-user`、`provision-worker` 等 CLI 改用同一个 repository。
+- **migration 文件名与 `platform_migrations` 记录保持不变**（它们已写入已部署数据库）。
+- 删除应用代码已不再调用、只被旧集成测试使用的 7 个方法（见 13.7 待决问题 Q1）。
+
+### 13.5 仓库整理
+
+- `mock_weaver.py`（手工 OAuth2 + UserInfo 联调用的模拟 IdP）移到 `tools/dev/`，并在
+  `docs/authentication-runbook.md` 补充用途与用法；它只用于开发，不进入部署产物。
+
+### 13.6 验收
+
+自动验收：
+
+- CI 在 ARM64 上全绿；runtime-toolchain 的 AMD64 与 ARM64 任务各至少成功一次，capability matrix
+  更新为原生证据。
+- 拆分前后：Control Plane 测试条目数与名称一致，全部测试、e2e、真实 PostgreSQL 集成测试通过。
+- 日志脱敏测试：对登录、OIDC/OAuth2 callback、Workspace open/exchange、Worker 连接等路径发请求，断言
+  日志输出中不包含测试用 password、Cookie、CSRF token、authorization code、Worker token、exchange code；
+  变异检查：去掉 redaction 时测试应失败。
+
+人工验收步骤在 Phase 完成时随交付说明给出，至少覆盖：GitHub Actions 结果检查、本地启动 Control Plane
+与 Worker 后的完整 Portal 回归（登录、创建/启动/打开/停止/删除 Workspace、各 admin 页面、暂停调度）、
+检查日志中能按 request ID 追踪一次 Workspace 打开且无凭据、Worker 重启后 reconciliation 正常。
+
+### 13.7 已确认决策
+
+负责人已确认以下四项均按建议执行。
+
+- **Q1**：删除 7 个已无调用方的 repository 方法（`listEligibleWorkerIds`、`listWorkerOfflineWorkspaces`、
+  `reconcileWorkerOfflineWorkspace`、`beginWorkspaceStart`、`bindUserIdentity`、`completeOidcLogin`、
+  `provisionWorker`），并把只测它们的集成测试改为测当前实际使用的方法？建议删除：它们代表已被取代的
+  语义（例如绕过 Scheduler 的启动），保留会误导后续开发。
+- **Q2**：`app.test.ts` 是否一并拆分？建议拆分，并以测试条目数与名称不变作为校验。
+- **Q3**：每个 Phase 通过 GitHub pull request 合入（CI 记录与验收记录都留在 PR 上）？建议是。
+- **Q4**：开发时是否需要 `LOG_FORMAT=pretty`（引入 `pino-pretty` 作为开发依赖）？建议需要，生产默认 JSON。
 
 ## Phase 14：Workspace 网络出口控制
 
