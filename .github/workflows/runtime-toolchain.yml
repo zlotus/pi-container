@@ -10,6 +10,18 @@ on:
       - "runtime/**"
       - "package.json"
       - "pnpm-lock.yaml"
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/runtime-toolchain.yml"
+      - "apps/worker/**"
+      - "packages/protocol/**"
+      - "runtime/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+  schedule:
+    # Weekly native AMD64/ARM64 evidence even without Runtime changes.
+    - cron: "0 3 * * 1"
 
 permissions:
   contents: read
