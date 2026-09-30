@@ -54,7 +54,7 @@ v0.x 证明了主链可行：多用户、Workspace 隔离、多 Worker 调度、
 - Control Plane 与 Worker 启用结构化日志，统一 request ID，并对 Cookie、token、password、
   Authorization 头做 redaction。
 - 按领域拆分 `app.ts` 路由，repository 按领域重命名；纯重构，以现有测试全绿为准。
-- `mock_weaver.py` 移入测试夹具目录。
+- `mock_weaver.py` 移入 `tools/dev/`（开发用模拟 OAuth2 Provider，不进入部署产物）。
 - 修订 `AGENTS.md` / `specs.md` 中与 v1 冲突的描述（本次路线图确认时已完成主体）。
 
 ### Phase 14：Workspace 网络出口控制（G1，P0）

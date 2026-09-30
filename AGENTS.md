@@ -403,6 +403,11 @@ Workspace Container
 
 不要为了“让测试绿”而降低原本应保证的安全或语义要求。
 
+日志规则：使用 `@agent-runtime/logging` 的结构化 logger，只记录白名单字段。永不记录 Cookie、
+Authorization、CSRF token、请求/响应 body、query string、password、token、Worker credential、
+exchange code 或 Workspace 内完整路径；Portal API 记录路由模板，Workspace 流量只记录路径第一段。
+新增日志字段时同步扩展脱敏测试。
+
 v1.0 Phase 开发流程（详见 `specs.md` 第 65 节）：
 
 - 开工前先扩写 `specs.md` 第 64 节对应小节并由负责人确认；未扩写的小节不能当作详细设计直接编码。

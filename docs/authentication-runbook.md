@@ -75,3 +75,30 @@ where details::text ~* '(password|authorization[_ -]?code|access[_ -]?token|refr
 6. 按上述 outage drill 暂停或错误配置测试 IdP，确认 Local Admin 仍能登录并完成排障。
 
 自动测试使用 mock Provider，不能替代目标企业 IdP、生产 TLS、反向代理日志策略和浏览器人工验收。
+
+## Development Mock OAuth2 Provider
+
+`tools/dev/mock_oauth2_userinfo.py` 是开发联调用的模拟 OAuth2 + UserInfo Provider，模拟 UserInfo 返回
+嵌套 `attributes` 的企业系统。它只用于开发，不进入任何部署产物，也不做完整 PKCE 校验。
+
+```bash
+python3 tools/dev/mock_oauth2_userinfo.py   # 监听 0.0.0.0:9000
+```
+
+Control Plane 只接受 loopback 的 HTTP OAuth2 endpoint，因此模拟服务必须与 Control Plane 在同一台主机，
+浏览器也必须能以 `127.0.0.1:9000` 访问它（同机浏览器或端口转发）。对应的 `.env` 配置：
+
+```bash
+AUTH_OAUTH2_ENABLED=true
+AUTH_OAUTH2_AUTHORIZATION_URL=http://127.0.0.1:9000/authorize
+AUTH_OAUTH2_TOKEN_URL=http://127.0.0.1:9000/token
+AUTH_OAUTH2_USERINFO_URL=http://127.0.0.1:9000/profile
+AUTH_OAUTH2_CLIENT_ID=pi-container-test
+AUTH_OAUTH2_CLIENT_SECRET=pi-container-secret
+AUTH_OAUTH2_SUBJECT_FIELD=attributes.workcode
+AUTH_OAUTH2_USERNAME_FIELD=attributes.workcode
+AUTH_OAUTH2_EMAIL_FIELD=attributes.email
+AUTH_OAUTH2_DISPLAY_NAME_FIELD=attributes.displayName
+```
+
+修改脚本顶部的 `CURRENT_USER` 可切换模拟登录的用户。

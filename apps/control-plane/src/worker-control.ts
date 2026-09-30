@@ -1,5 +1,5 @@
 import { hashOpaqueToken } from "@agent-runtime/auth";
-import type { Phase2Repository } from "@agent-runtime/database";
+import type { Repository } from "@agent-runtime/database";
 import {
   WorkerTokenSchema,
   WorkerToControlMessageSchema,
@@ -9,7 +9,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { WorkerChannel } from "./worker-channel.js";
 
 export type WorkerControlStore = Pick<
-  Phase2Repository,
+  Repository,
   | "findWorkerByCredentialHash"
   | "recordWorkerHello"
   | "recordWorkerHeartbeat"

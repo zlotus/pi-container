@@ -4,8 +4,7 @@ import type {
 } from "@agent-runtime/protocol";
 
 import type { DatabaseClient } from "./index.js";
-import type { WorkspaceRecord } from "./phase1.js";
-import { createPhase5Repository, type WorkerSelector } from "./phase5.js";
+import type { WorkspaceRecord } from "./records.js";
 
 export interface WorkspaceRecoveryRecord extends WorkspaceRecord {
   desiredState: WorkspaceDesiredState;
@@ -41,13 +40,8 @@ function mapRecoveryWorkspace(
   };
 }
 
-export function createPhase6Repository(
-  database: DatabaseClient,
-  selectWorker: WorkerSelector,
-) {
+export function createRecoveryRepository(database: DatabaseClient) {
   return {
-    ...createPhase5Repository(database, selectWorker),
-
     async markAllWorkersOfflineForRecovery(startedAt: Date): Promise<number> {
       return database.begin(async (transaction) => {
         const workers = await transaction<{ id: string }[]>`
@@ -135,5 +129,3 @@ export function createPhase6Repository(
     },
   };
 }
-
-export type Phase6Repository = ReturnType<typeof createPhase6Repository>;

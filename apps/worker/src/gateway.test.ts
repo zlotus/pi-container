@@ -2,6 +2,9 @@ import { once } from "node:events";
 import { createServer, request as httpRequest } from "node:http";
 import type { IncomingHttpHeaders } from "node:http";
 import type { AddressInfo } from "node:net";
+import { Writable } from "node:stream";
+
+import { createJsonLogger } from "@agent-runtime/logging";
 
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
@@ -183,5 +186,66 @@ describe("Worker Gateway", () => {
     expect(message.toString()).toBe("pty-bytes");
     client.close();
     wss.close();
+  });
+});
+
+describe("Worker Gateway logging", () => {
+  it("logs with the forwarded request ID and never forwards it to pi-web", async () => {
+    const lines: string[] = [];
+    const log = createJsonLogger(
+      "worker",
+      { LOG_LEVEL: "info", LOG_FORMAT: "json" },
+      new Writable({
+        write(chunk, _encoding, callback) {
+          lines.push(String(chunk));
+          callback();
+        },
+      }),
+    );
+    let runtimeHeaders: IncomingHttpHeaders = {};
+    const runtime = createServer((request, response) => {
+      runtimeHeaders = request.headers;
+      response.end("ok");
+    });
+    const runtimePort = await listen(runtime);
+    const gateway = buildWorkerGateway({
+      gatewayToken: GATEWAY_TOKEN,
+      workspaceBaseUrl: "http://agent.test",
+      resolveWorkspaceTarget: async () => new URL(`http://127.0.0.1:${runtimePort}/`),
+      log,
+    });
+    const port = await listen(gateway);
+    const requestId = "5d0bd6d2-6a9e-4c4f-9b8e-2c1f6d6c9a11";
+
+    const response = await request({
+      port,
+      path: "/api/files/private-name.txt?token=query-secret-value",
+      headers: platformHeaders({ "x-platform-request-id": requestId }),
+    });
+    const rejected = await request({
+      port,
+      path: "/",
+      headers: platformHeaders({ authorization: "Bearer wrong-token-0123456789abcdef0123456789" }),
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(response.statusCode).toBe(200);
+    expect(rejected.statusCode).toBe(401);
+    expect(runtimeHeaders["x-platform-request-id"]).toBeUndefined();
+    const output = lines.join("");
+    for (const secret of [GATEWAY_TOKEN, "private-name", "query-secret-value", "wrong-token"]) {
+      expect(output).not.toContain(secret);
+    }
+    const records = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        msg: "workspace request",
+        requestId,
+        workspaceId: WORKSPACE_ID,
+        path: "/api",
+        statusCode: 200,
+      }),
+      expect.objectContaining({ msg: "workspace request", path: "/", statusCode: 401 }),
+    ]));
   });
 });

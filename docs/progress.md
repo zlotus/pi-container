@@ -17,6 +17,11 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
 
 ## Current Baseline
 
+- Phase 13（待验收）：Control Plane 路由按领域拆分到 `apps/control-plane/src/routes/`（`app.ts` 只做组装），
+  repository 由 `packages/database/src/repository.ts` 的单一 `createRepository` 按领域模块组合，移除 7 个
+  已无调用方的旧方法；新增 `packages/logging` 结构化日志（凭据脱敏、request ID 贯穿两级 Gateway）；
+  新增 ARM64 CI 质量门（含 PostgreSQL 集成测试）与每周 runtime-toolchain 原生验证。
+
 - `packages/auth` 使用 Node.js scrypt、随机 salt、opaque session token hash 和
   session-bound HMAC CSRF token，不保存明文密码或 Portal session token。
 - `packages/database` 提供幂等 migration 和 Phase 1～12 repository；users、server-side
@@ -182,9 +187,9 @@ v0.x 已以 `v0.13.0` 封版：Portal UI 两轮调整（中文化、交互与审
 
 ## Next
 
-1. `v1-roadmap.md` 已确认（决策 D1–D6）；`AGENTS.md` 与 `specs.md` 已按 v1 计划修订。
-2. Phase 13（工程基线）开工设计：扩写 `specs.md` 第 64 节 Phase 13 小节，经负责人确认后在
-   `phase-13-engineering-baseline` 分支实现。
+1. Phase 13（工程基线）已在 `phase-13-engineering-baseline` 分支实现，待 CI 首次运行与负责人人工验收；
+   验收通过后合入 master 并打 `v1.0.0-alpha.1`。
+2. Phase 14（网络出口控制）开工设计。
 3. 生产部署入口的 SPA fallback、刷新/前进后退与登录态恢复回归，并入 Phase 19 验收。
 
 ## Risks And Blockers

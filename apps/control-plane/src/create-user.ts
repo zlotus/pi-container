@@ -3,10 +3,12 @@ import { randomUUID } from "node:crypto";
 import { hashPassword } from "@agent-runtime/auth";
 import {
   createDatabaseClient,
-  createPhase1Repository,
+  createRepository,
   migrateDatabase,
 } from "@agent-runtime/database";
 import { z } from "zod";
+
+import { selectWorker } from "./scheduler.js";
 
 const InputSchema = z.object({
   DATABASE_URL: z.string().min(1),
@@ -26,7 +28,7 @@ const database = createDatabaseClient(input.DATABASE_URL);
 
 try {
   await migrateDatabase(database);
-  const repository = createPhase1Repository(database);
+  const repository = createRepository(database, selectWorker);
   const user = await repository.createUser({
     id: randomUUID(),
     email: input.LOCAL_USER_EMAIL,

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { cpus, hostname, totalmem } from "node:os";
 
+import { createJsonLogger, type Logger } from "@agent-runtime/logging";
 import {
   ControlToWorkerMessageSchema,
   type Architecture,
@@ -112,7 +113,7 @@ export class WorkerDaemon {
     readonly config: WorkerConfig,
     readonly runtime: WorkspaceRuntime,
     readonly capabilityProbe: RuntimeCapabilityProbe,
-    readonly log: Pick<Console, "info" | "warn"> = console,
+    readonly log: Pick<Logger, "info" | "warn"> = createJsonLogger("worker"),
   ) {
     this.#reconnectDelayMs = config.WORKER_RECONNECT_INITIAL_MS;
   }
@@ -143,7 +144,7 @@ export class WorkerDaemon {
 
     socket.on("open", () => {
       this.#reconnectDelayMs = this.config.WORKER_RECONNECT_INITIAL_MS;
-      this.log.info(`Worker ${this.config.WORKER_ID} control channel connected`);
+      this.log.info({ workerId: this.config.WORKER_ID }, "control channel connected");
       void this.#beginReporting(socket);
     });
 
@@ -169,8 +170,8 @@ export class WorkerDaemon {
         .catch(() => undefined);
     });
 
-    socket.on("error", () => {
-      this.log.warn(`Worker ${this.config.WORKER_ID} control channel error`);
+    socket.on("error", (error) => {
+      this.log.warn({ workerId: this.config.WORKER_ID, err: error }, "control channel error");
     });
 
     socket.on("close", () => {
@@ -212,8 +213,8 @@ export class WorkerDaemon {
       }, this.config.WORKER_HEARTBEAT_INTERVAL_MS);
     } catch (error) {
       this.log.warn(
-        `Worker ${this.config.WORKER_ID} could not verify the configured Runtime image`,
-        error,
+        { workerId: this.config.WORKER_ID, err: error },
+        "could not verify the configured Runtime image",
       );
       socket.close(1011, "Configured Runtime image unavailable or unverified");
     }
@@ -230,9 +231,10 @@ export class WorkerDaemon {
           allocatedWorkspaces,
         ),
       );
-    } catch {
+    } catch (error) {
       this.log.warn(
-        `Worker ${this.config.WORKER_ID} lost access to the local Docker runtime`,
+        { workerId: this.config.WORKER_ID, err: error },
+        "lost access to the local Docker runtime",
       );
       socket.close(1011, "Local Docker runtime unavailable");
     }
@@ -311,7 +313,8 @@ export class WorkerDaemon {
       this.config.WORKER_RECONNECT_MAX_MS,
     );
     this.log.warn(
-      `Worker ${this.config.WORKER_ID} reconnecting in ${delay}ms`,
+      { workerId: this.config.WORKER_ID, delayMs: delay },
+      "control channel reconnecting",
     );
     this.#reconnectTimer = setTimeout(() => {
       this.#reconnectTimer = null;
