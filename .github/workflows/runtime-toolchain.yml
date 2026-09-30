@@ -65,4 +65,6 @@ jobs:
         env:
           TEST_DOCKER_RUNTIME: "1"
           TEST_RUNTIME_IMAGE: agent-runtime:phase7-toolchain
-        run: pnpm --filter @agent-runtime/worker test
+        # Like a production Worker, the real-Docker tests must chown managed directories
+        # to the Runtime user (UID 1000), which the unprivileged runner user cannot do.
+        run: sudo -E env "PATH=$PATH" pnpm --filter @agent-runtime/worker test

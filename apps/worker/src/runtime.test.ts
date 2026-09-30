@@ -187,6 +187,13 @@ class FakeNetwork {
 
 const temporaryRoots: string[] = [];
 
+// The fake-Docker tests exercise real chown calls on a temporary root. A non-root test
+// process can only chown to itself, so use its own IDs; root (UID 0 is not a valid
+// Workspace UID) keeps the production default.
+const TEST_UID = process.getuid?.() || 1_000;
+const TEST_GID = process.getgid?.() || 1_000;
+const TEST_USER = `${TEST_UID}:${TEST_GID}`;
+
 afterEach(async () => {
   await Promise.all(
     temporaryRoots.splice(0).map((path) =>
@@ -206,6 +213,8 @@ async function fixture() {
     WORKSPACE_BASE_URL: "https://agent.example.internal",
     WORKER_MAX_WORKSPACES: "8",
     WORKER_MANAGED_ROOT: root,
+    WORKSPACE_UID: String(TEST_UID),
+    WORKSPACE_GID: String(TEST_GID),
   });
   const docker = new FakeDocker();
   const runtime = new DockerWorkspaceRuntime(
@@ -236,7 +245,7 @@ describe("Docker Workspace Runtime", () => {
     expect(docker.containers.size).toBe(1);
     expect(docker.networks.size).toBe(1);
     expect(docker.createdOptions).toMatchObject({
-      User: "1000:1000",
+      User: TEST_USER,
       WorkingDir: "/workspace",
       HostConfig: {
         Privileged: false,
@@ -320,7 +329,7 @@ describe("Docker Workspace Runtime", () => {
           State: { Running: false },
           Config: {
             Image: config.RUNTIME_IMAGE,
-            User: "1000:1000",
+            User: TEST_USER,
             Labels: {},
             WorkingDir: "/workspace",
             Env: ["PI_CODING_AGENT_DIR=/agent/pi"],
