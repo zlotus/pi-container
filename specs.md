@@ -3371,7 +3371,7 @@ Worker、Docker Runtime、pi-web、pi-agent 不认识 OIDC/OAuth2。
 
 ## Phase 13：工程基线
 
-状态：**设计已确认（2026-09-30），实现中**。分支：`phase-13-engineering-baseline`。
+状态：**实现完成，待人工验收**。分支：`phase-13-engineering-baseline`。
 
 目标：为后续 Phase 建立可靠的自动验证、可排障的日志和可读的代码结构。**不改变任何对外行为**：API、
 数据库 schema、Worker protocol、Portal 行为与 v0.13.0 一致。
@@ -3396,8 +3396,11 @@ Worker、Docker Runtime、pi-web、pi-agent 不认识 OIDC/OAuth2。
 - Control Plane：启用 Fastify logger，沿用现有 request ID；Portal API 请求完成时记录 method、路由模板、
   status、耗时、request ID，已认证时附 user ID。
 - Workspace Gateway 与 Worker Gateway：每个请求记录 Workspace ID、method、status、耗时、request ID，
-  WebSocket 记录建立与关闭；**只记录路径模板或去掉 query 的路径，不记录 Workspace 内的完整 URL**
-  （可能包含用户文件名）。
+  WebSocket 记录建立与关闭；**只记录路径的第一段**（如 `/api`），因为更深的路径可能包含用户文件名。
+- request ID 统一为 UUID（Control Plane 由 Fastify `genReqId` 生成，因此 Audit details 中的
+  `requestId` 也变为 UUID 格式）。Control Plane 的 Workspace Gateway 总是自行生成 request ID，以
+  `x-platform-request-id` 转发给 Worker Gateway 并覆盖浏览器提供的同名头；Worker Gateway 只接受 UUID
+  格式用于日志，并在转发给 pi-web 前删除该头。
 - 以下内容**永不进入日志**：Cookie / Set-Cookie、Authorization、`x-csrf-token`、请求与响应 body、
   任何 query string 中的值（OIDC/OAuth2 callback 的 `code`、`state` 等）、password、token、Worker
   credential、exchange code、IdP 响应。通过 pino redaction 与“只记录白名单字段”两层保证。
