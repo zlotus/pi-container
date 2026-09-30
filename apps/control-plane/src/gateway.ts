@@ -1,6 +1,6 @@
 import { hashOpaqueToken } from "@agent-runtime/auth";
 import type {
-  Phase4Repository,
+  Repository,
   WorkspaceRecord,
 } from "@agent-runtime/database";
 import {
@@ -28,7 +28,7 @@ import type { SessionConnectionRegistry } from "./session-connections.js";
 const ExchangeBodySchema = z.object({ code: z.string().min(32).max(256) }).strict();
 
 export type WorkspaceGatewayStore = Pick<
-  Phase4Repository,
+  Repository,
   "findActiveSession" | "findOwnedWorkspace" | "findWorkerGatewayRoute"
 >;
 

@@ -1,7 +1,7 @@
 import {
   checkDatabase,
   createDatabaseClient,
-  createPhase12Repository,
+  createRepository,
   migrateDatabase,
 } from "@agent-runtime/database";
 import { buildControlPlane } from "./app.js";
@@ -21,7 +21,7 @@ const database = createDatabaseClient(config.DATABASE_URL);
 
 await migrateDatabase(database);
 
-const repository = createPhase12Repository(database, selectWorker);
+const repository = createRepository(database, selectWorker);
 await repository.markAllWorkersOfflineForRecovery(new Date());
 const sessionExchanges = new WorkspaceSessionExchange(
   config.WORKSPACE_SESSION_EXCHANGE_TTL_MS,

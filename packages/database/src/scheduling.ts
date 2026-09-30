@@ -5,9 +5,9 @@ import type {
 } from "@agent-runtime/protocol";
 
 import type { DatabaseClient } from "./index.js";
-import { createPhase4Repository } from "./phase4.js";
-import type { WorkspaceRecord } from "./phase1.js";
-import type { WorkerRecord, WorkerStatus } from "./phase2.js";
+import { createWorkerRepository } from "./workers.js";
+import type { WorkspaceRecord } from "./records.js";
+import type { WorkerRecord, WorkerStatus } from "./workers.js";
 
 const SCHEDULER_ADVISORY_LOCK_ID = 708_913_425;
 
@@ -120,15 +120,15 @@ function mapCandidate(row: CandidateRow): WorkerScheduleCandidate {
   };
 }
 
-export function createPhase5Repository(
+export function createSchedulingRepository(
   database: DatabaseClient,
   selectWorker: WorkerSelector,
 ) {
-  const phase4 = createPhase4Repository(database);
+  const workerRepository = createWorkerRepository(database);
 
   async function listWorkersWithAssignments(): Promise<WorkerPlacementRecord[]> {
     const [workers, counts] = await Promise.all([
-      phase4.listWorkers(),
+      workerRepository.listWorkers(),
       database<Array<{ worker_id: string; assigned_workspaces: number }>>`
         select worker_id, count(*)::integer as assigned_workspaces
         from workspaces
@@ -146,8 +146,6 @@ export function createPhase5Repository(
   }
 
   return {
-    ...phase4,
-
     listWorkersWithAssignments,
 
     async setWorkerSchedulable(input: {
@@ -282,5 +280,3 @@ export function createPhase5Repository(
     },
   };
 }
-
-export type Phase5Repository = ReturnType<typeof createPhase5Repository>;
