@@ -17,7 +17,7 @@ architecture 猜测。Portal 使用 `/`、`/activity` 与三个 `/admin/*` 页�
 User、Worker 与 Platform Audit，admin 另有只读的 `/admin/workspaces` 全平台 Workspace 列表；普通用户
 显示 Workspace / 活动，admin 显示 Workspace / 用户 / 全部 Workspace / Worker / 审计。Artifact 继续复用 pi-web
 的 `/workspace` Files 查看/下载，不复制文件或 Pi
-message/tool stream。仓库记录的 ARM64 工程验证已通过，AMD64 native 自动验证记录仍待补齐。
+message/tool stream。ARM64 与 AMD64 均有原生验证记录（ARM64 为主开发架构，AMD64 由 CI 原生 runner 提供），见 capability matrix。
 HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其
 Chat、Terminal 或 streaming 实现。
 
