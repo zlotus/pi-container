@@ -22,12 +22,18 @@
 
 > 不是给大模型挂几个工具，而是给智能体提供一台隔离的计算机。
 
+当前状态：v0.x（Phase 0–12 与 v0.13 Portal 调整）已实现并验收，tag `v0.13.0`。现在进入 v1.0 产品化，
+按 Phase 13–19 逐个开发、逐个验收，目标是可交给企业内部团队长期使用。范围与顺序见
+`docs/v1-roadmap.md`，各 Phase 详细规范见 `specs.md` 第 64 节。
+
 ---
 
 ## 1. 文档职责与事实优先级
 
 - `AGENTS.md`：长期有效的工程规则、架构不变量、安全边界和开发行为约束。
-- `specs.md`：产品规范、系统设计、Phase scope 与验收标准。
+- `specs.md`：产品规范、系统设计、Phase scope 与验收标准；第 64 节为 v1.0 各 Phase，第 65 节为开发流程。
+- `docs/v1-roadmap.md`：v1.0 差距、Phase 顺序与已确认决策。
+- `docs/progress.md`：当前进度、已实现基线与真实验证结果。
 - 代码、测试、配置：已经实现的真实行为。
 - upstream 源码/文档：pi-web、pi-agent 等外部依赖的协议和路径事实。
 
@@ -94,7 +100,7 @@
 
 ## 3. 核心抽象与架构不变量
 
-MVP：
+核心模型：
 
 ```text
 User
@@ -160,6 +166,13 @@ Pi/pi-web 的实际状态路径必须根据**当前 pinned version**源码和文
 
 Container stop/start、Worker restart 后，Workspace 文件和 Pi Session 必须可恢复。
 
+平台不实现备份、快照或跨 Worker 恢复；备份由外部工具针对挂载点完成。平台只保证全部持久状态位于
+`WORKER_MANAGED_ROOT` 与 PostgreSQL，并保证数据恢复到原 Worker 原路径后 reconciliation 能接管。
+
+v1.0 出口策略（Phase 14 实现，**实现前尚未生效**，不要假设已有）：Workspace 默认允许公网、拒绝内网
+（RFC1918 与 Worker 宿主机地址），内网按管理员白名单放行，管理员可按环境追加拒绝网段；平台管理地址
+永远不可放行。Tailscale / Clash 只存在于开发环境，默认规则不针对它们。详见 `specs.md` 第 44 节。
+
 ---
 
 ## 5. Worker 与 Control Plane 边界
@@ -191,7 +204,7 @@ Worker 只能修改带正确 managed label 的本系统 Container，不得因为
 
 Control Plane 发送业务命令，Worker 自己翻译为 Docker Engine API 操作；不要发送 `exec: "docker run ..."` 一类任意 shell 命令。
 
-MVP 跨主机数据通道固定采用：
+跨主机数据通道固定采用：
 
 ```text
 Browser
@@ -201,19 +214,19 @@ Browser
   -> pi-web
 ```
 
-Worker Gateway 只应暴露给 Control Plane 可达的受保护网络，不作为用户入口。MVP 不实现基于 Worker persistent WebSocket 的通用 HTTP/WebSocket byte tunnel。
+Worker Gateway 只应暴露给 Control Plane 可达的受保护网络，不作为用户入口。v1.0 不实现基于 Worker persistent WebSocket 的通用 HTTP/WebSocket byte tunnel。
 
 ---
 
 ## 6. 调度与生命周期不变量
 
-Phase 边界必须保持清晰：
+Phase 边界必须保持清晰：只做当前 Phase 的范围，不要为了完成当前 Phase 提前实现后续 Phase 的能力。
 
-- Phase 3/4：如果系统中只有一个 eligible Worker，可直接将首次启动的 Workspace 自动绑定到该 Worker；这只是最小可运行绑定逻辑，不算完整 Scheduler。
-- Phase 5：再实现多 Worker 的 capacity / capability / architecture / runtime compatibility 筛选与负载评分。
-- 不要为了完成 Phase 3/4 提前实现 Phase 5 的完整调度策略。
+调度已实现 capacity / capability / architecture / runtime compatibility 筛选、负载评分，以及 admin
+暂停调度（`workers.schedulable`，cordon）。`schedulable=false` 只排除新的首次 placement；`enabled=false`
+是吊销 Worker，两者不得混用。
 
-MVP 使用 sticky placement：
+使用 sticky placement：
 
 > Workspace 一旦分配到 Worker，默认保持固定。
 
@@ -221,7 +234,7 @@ Worker Offline：
 
 - Workspace -> `WORKER_OFFLINE`
 - 不自动在其他 Worker 创建副本
-- MVP 不做 Live Migration / Distributed Filesystem / State Replication
+- v1.0 不做 Live Migration / Distributed Filesystem / State Replication
 
 Workspace state 与 Pi Session state 必须分离。
 
@@ -250,7 +263,7 @@ Workspace 操作语义必须明确区分：
 user | admin
 ```
 
-Phase 9–12 在既有本地认证基础上补齐用户生命周期与企业身份认证，但不得把外部 IdP 侵入 Worker、Workspace 或 pi-web。
+Phase 9–12（已完成）在本地认证基础上补齐了用户生命周期与企业身份认证；外部 IdP 不得侵入 Worker、Workspace 或 pi-web。
 
 平台身份模型保持：
 
@@ -289,7 +302,7 @@ Authorization / Workspace ownership
 - 获取 Worker Docker 信息
 - 指定任意 container id / host path
 
-Phase 9–12 仍不引入复杂组织模型或细粒度 RBAC。具体数据模型、API、Phase scope 与验收以 `specs.md` 为准。
+v1.0 仍不引入复杂组织模型或细粒度 RBAC。具体数据模型、API、Phase scope 与验收以 `specs.md` 为准。
 
 ---
 
@@ -334,6 +347,9 @@ Runtime Image 是产品组成部分，不是普通依赖。
 linux/amd64
 linux/arm64
 ```
+
+v1.0 的主开发与验证架构是 `linux/arm64`（当前全部开发与 Worker 设备均为 ARM64，没有 x86_64 设备）。
+AMD64 保持可构建，只在 CI 原生 runner 或真实 AMD64 Worker 取得证据后才宣称支持。
 
 capability 必须以实际测试为准。某架构不可用就上报 `false`，不要通过文档假装支持。
 
@@ -387,6 +403,16 @@ Workspace Container
 
 不要为了“让测试绿”而降低原本应保证的安全或语义要求。
 
+v1.0 Phase 开发流程（详见 `specs.md` 第 65 节）：
+
+- 开工前先扩写 `specs.md` 第 64 节对应小节并由负责人确认；未扩写的小节不能当作详细设计直接编码。
+- 在 `phase-NN-<name>` 分支开发；master 始终是已验收状态。
+- 安全相关判断做变异检查：临时去掉关键判断，确认测试会失败，再恢复。
+- migration 与集成测试使用独立测试库（例如 `agent_runtime_test`），不要在开发库上跑测试。注意开发环境
+  的 Control Plane 以 `tsx watch` 运行并在启动时自动执行 migration，修改代码会触发它对开发库迁移。
+- Phase 完成时输出变更总结，并附逐步可执行的**人工验收步骤**：前置条件、操作、预期结果，以及失败时
+  需要收集的信息。负责人人工验收通过后才合入并开始下一个 Phase。
+
 ---
 
 ## 11. Git 安全规则
@@ -405,10 +431,21 @@ git add -A
 
 ---
 
-## 12. MVP / 当前扩展阶段明确不做
+## 12. v1.0 范围
 
-当前阶段不要自行扩展到：
+v1.0 纳入范围（按 Phase 顺序，详见 `docs/v1-roadmap.md`）：
 
+- Phase 13：工程基线（CI、结构化日志、按领域拆分代码）
+- Phase 14：Workspace 网络出口控制（默认允许公网、拒绝内网，内网白名单）
+- Phase 15：磁盘配额与登录防护
+- Phase 16：模型网关与凭据托管（采用现成组件，平台只做集成）
+- Phase 17：可观测性（指标、告警、实际用量）
+- Phase 18：空闲回收、Runtime 镜像升级与回滚、Worker 吊销一致性
+- Phase 19：生产部署与 v1.0 发布
+
+v1.0 明确不做，不要自行扩展：
+
+- 平台内备份、快照、跨 Worker 恢复
 - Multi-Agent / Agent Team / Supervisor / Workflow DAG
 - Kubernetes / Docker Swarm
 - Workspace 热迁移
@@ -418,14 +455,15 @@ git add -A
 - LDAP 全量目录同步 / SCIM provisioning
 - 自研 MFA / OTP / FIDO / 短信认证
 - Workspace sharing / group policy
-- 计费
+- 计费（模型网关只做计量）
 - VM / microVM / gVisor / Kata
-- 完整零信任网络隔离
+- 域名级出口策略、完整零信任网络隔离
+- 非交互任务 API、定时任务、按用户/部门配额、Workspace 模板
+- Control Plane 多实例高可用
 - Plugin Marketplace
 - 自研 Pi Agent Loop
 - 自研 pi-web 替代品
-
-企业身份认证只做 `specs.md` Phase 9–12 明确列出的 Local User Management、OIDC、受限 OAuth2 compatibility、Provisioning / Identity Binding 与 Auth Audit / Hardening。
+- 自研模型网关
 
 研究重点仍是 **Agent Runtime Infrastructure**，不是通用 IAM 产品，也不是 Multi-Agent。
 
@@ -433,7 +471,7 @@ git add -A
 
 ## 13. Artifact 边界
 
-MVP 必须证明 Agent 能在 `/workspace` 生成一个真实成果，并由用户通过 pi-web 的现有文件能力安全查看/下载。
+平台必须保证 Agent 能在 `/workspace` 生成一个真实成果，并由用户通过 pi-web 的现有文件能力安全查看/下载。
 
 平台级 Artifact registry / Artifact 页面不是核心主链；只有 `specs.md` 对后续 Phase 明确要求时再实现。
 
@@ -456,6 +494,7 @@ MVP 必须证明 Agent 能在 `/workspace` 生成一个真实成果，并由用�
 - filesystem / process / resource isolation
 - authenticated reverse proxy
 - no remote Docker socket exposure
+- default-deny internal network egress（Phase 14 完成并实际验证后）
 - application authorization
 - OIDC-based enterprise authentication（完成对应 Phase 并实际验证后）
 
@@ -468,7 +507,7 @@ MVP 必须证明 Agent 能在 `/workspace` 生成一个真实成果，并由用�
 - production-ready arbitrary-code execution cloud
 - 完整 IAM / Zero Trust Identity Platform
 
-MVP 面向可信企业内部用户之间的隔离需求。
+v1.0 仍面向可信企业内部用户之间的隔离需求。
 
 ---
 
@@ -490,7 +529,16 @@ MVP 面向可信企业内部用户之间的隔离需求。
 - iptables / nftables / 防火墙
 - 外部模型 API、npm/pypi/crates.io 可达性
 
-同一问题连续尝试 3 种明显不同的修复方案仍无进展时，应暂停继续试错，整理证据并请求人类协助，向人类报告：
+开发与验证环境事实（排查时先考虑这些因素）：
+
+- 设备是低功耗 ARM64 SBC / 边缘设备（Radxa Q8B、Jetson AGX 等），没有 x86_64 设备。
+- 设备上可能运行 Clash Verge（TUN 模式或系统代理模式）：TUN 会创建 `Meta` 一类接口并使用
+  `198.18.0.0/15` fake-ip，可能接管 DNS 与出站路由；系统代理模式会影响读取代理环境变量的进程。
+- 设备通过 Tailscale 组成虚拟局域网（`100.64.0.0/10` 地址、`fd7a:` IPv6、MagicDNS `100.100.100.100`），
+  Control Plane 与 Worker 之间可能经 Tailscale 通信。
+- 设备可能有公网 IPv6 地址。
+
+同一问题尝试 2～3 种明显不同的方法仍无进展时，应暂停继续试错，整理证据并请求人类协助，向人类报告：
 
 1. 当前现象；
 2. 已验证正常的部分；

@@ -1,6 +1,6 @@
 # Phase 8 Demo And Acceptance Runbook
 
-本手册用于比赛演示和 Phase 8 人工验收。它建立在已经验收的 Phase 0～7 基线上，不替代生产
+本手册用于主链演示和 Phase 8 人工验收，也是 v1.0 各 Phase 的主链回归检查顺序。它建立在已经验收的 Phase 0～7 基线上，不替代生产
 TLS、防火墙、身份源或运维验收。
 
 ## What The Automated E2E Proves
@@ -40,7 +40,7 @@ socket、资源限制与 legacy Runtime 回归，并在结束时删除随机测�
    capability、主机 CPU/Memory 和 authoritative assignment/max 均符合预期。
 5. 确认浏览器可解析 `WORKSPACE_BASE_URL` 的 wildcard hostname；多主机环境再确认 Control Plane
    能访问每个预注册 Worker Gateway，而最终用户不能绕过 Control Plane 直接访问它。
-6. 比赛演示期间不要启用 auto-stop；本项目当前默认不做 auto-stop。
+6. 演示期间不要启用空闲回收；v0.x 没有该功能，v1.0 Phase 18 起可配置且默认关闭。
 
 ## Recommended Demo Path
 

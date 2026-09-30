@@ -48,7 +48,7 @@ pnpm test:e2e:runtime
 ```
 
 `test:e2e` 是无需外部模型的确定性平台主链；`test:e2e:runtime` 使用本机真实 Docker image，经
-pi-web bash tool 生成 Artifact，并验证 Files、Stop/Start、reconciliation 和持久化。比赛演示与
+pi-web bash tool 生成 Artifact，并验证 Files、Stop/Start、reconciliation 和持久化。演示与
 人工验收步骤见 [Phase 8 Demo Runbook](docs/demo-runbook.md)。
 
 `verify-image.sh` 接受 `amd64` 或 `arm64`，会检查本地镜像架构，并在 non-root、无 network、

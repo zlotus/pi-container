@@ -8,7 +8,8 @@
 ## Source Of Truth
 
 - [AGENTS.md](../AGENTS.md)：长期架构不变量、安全边界和开发规则。
-- [specs.md](../specs.md)：产品设计、Phase scope 和验收标准。
+- [specs.md](../specs.md)：产品设计、Phase scope 和验收标准；第 64 节为 v1.0 各 Phase。
+- [v1-roadmap.md](v1-roadmap.md)：v1.0 差距、Phase 顺序与已确认决策。
 - 代码、测试和配置：已经实现的真实行为。
 - 当前 pinned upstream：pi-web/Pi 的协议、启动参数和状态路径事实。
 
@@ -19,7 +20,9 @@
 - Control Plane 不解析或重写 Pi RPC；交互能力优先复用 pi-web。
 - Workspace Container 不使用 privileged、host network 或 Docker socket，并以普通用户运行。
 - Canonical Workspace 与 Pi state 位于 Worker 管理的持久目录。
-- MVP 使用 sticky placement，不承诺热迁移、分布式文件系统或 VM 级隔离。
+- 使用 sticky placement，不承诺热迁移、分布式文件系统或 VM 级隔离。
+- 平台不做备份、快照或跨 Worker 恢复；备份由外部工具针对 `WORKER_MANAGED_ROOT` 与 PostgreSQL 完成。
+- 主开发与验证架构为 ARM64；开发网络含 Tailscale 与 Clash Verge（仅开发环境存在），排查网络问题时先考虑它们。
 
 ## Terminology
 

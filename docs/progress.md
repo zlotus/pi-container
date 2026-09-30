@@ -171,19 +171,21 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
 - Artifact 不新增平台 registry/download endpoint。Agent 在 canonical `/workspace` 生成成果，用户继续
   使用 pi-web Files 查看或下载；平台不复制文件或重新实现 Files UI。
 - 根级 `test:e2e` 串行覆盖 Control Plane/两级 Gateway 主链；`test:e2e:runtime` 使用真实 Docker、
-  pi-web Session/bash tool/Files 验证成果生成与 Stop/Start/reconciliation persistence。完整比赛步骤与
+  pi-web Session/bash tool/Files 验证成果生成与 Stop/Start/reconciliation persistence。完整演示步骤与
   人工验收清单在 `docs/demo-runbook.md`。
 
 ## In Progress
 
-v0.x 封版前 Portal UI / IA cleanup 与小范围 follow-up 已完成：普通用户 Activity 已恢复，页面说明、
-空状态和 tooltip 已收敛为面向最终用户的功能文案。
+v0.x 已以 `v0.13.0` 封版：Portal UI 两轮调整（中文化、交互与审计着色；Worker 暂停调度、全局 Workspace
+视图、审计筛选/分页/导出、用户搜索、对话框与错误码中文化）均已人工验收。v1.0 路线图已确认，见
+[v1-roadmap.md](v1-roadmap.md)，按 Phase 13–19 逐个开发、逐个验收。
 
 ## Next
 
-1. 在部署入口确认所有 Portal 路径都配置 SPA fallback，并回归刷新、前进/后退与登录态恢复。
-2. 做一次目标浏览器的五个页面视觉检查，确认窄屏没有明显不可用布局。
-3. 保持封版边界，不在本次 cleanup 中加入筛选、搜索、分页、Dashboard 或新的平台能力。
+1. `v1-roadmap.md` 已确认（决策 D1–D6）；`AGENTS.md` 与 `specs.md` 已按 v1 计划修订。
+2. Phase 13（工程基线）开工设计：扩写 `specs.md` 第 64 节 Phase 13 小节，经负责人确认后在
+   `phase-13-engineering-baseline` 分支实现。
+3. 生产部署入口的 SPA fallback、刷新/前进后退与登录态恢复回归，并入 Phase 19 验收。
 
 ## Risks And Blockers
 
@@ -212,7 +214,7 @@ v0.x 封版前 Portal UI / IA cleanup 与小范围 follow-up 已完成：普通�
 - Audit migration 不回填 Phase 0～7 的历史事件，只从 migration 生效后记录；当前没有 retention/export
   policy。Platform Audit 是基础设施轨迹，不是合规审计产品，也不复制 Pi 内部历史。
 - 自动 E2E 不带真实模型凭据。它已通过真实 pi-web bash tool 与 Files 验证 Runtime/Artifact 主链，
-  但目标模型 Prompt streaming、Terminal 交互、比赛浏览器视觉和真实多主机网络仍需人工验收。
+  但目标模型 Prompt streaming、Terminal 交互、目标浏览器视觉和真实多主机网络仍需人工验收。
 
 ## Verification
 
@@ -296,7 +298,7 @@ v0.x 封版前 Portal UI / IA cleanup 与小范围 follow-up 已完成：普通�
 - 2026-09-16：以生产 Web build、临时只读 mock API 和 Runtime image 内的 Playwright/Chromium 完成
   当时版本的 1440px dashboard visual smoke；Worker table、capability chips、Workspace cards、
   安全/Artifact panel 与 Audit timeline 正常渲染。安全/Artifact panel 后续已移除；该历史检查不替代
-  目标比赛浏览器上的人工交互验收。
+  目标浏览器上的人工交互验收。
 
 - 2026-09-15：用户确认 Phase 7 人工验收通过、功能通过；本次仅授权小范围 post-acceptance cleanup。
 - 2026-09-15：cleanup 通过 `pnpm lint`、`pnpm typecheck`、`pnpm test`（77 passed，10 个

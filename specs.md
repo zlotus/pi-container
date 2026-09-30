@@ -2,11 +2,22 @@
 
 # 面向企业私有环境的容器化安全隔离智能体任务执行平台
 
-**Prototype Product & Technical Specification**
+**Product & Technical Specification**
 
-版本：`0.2 MVP`
-状态：原型设计稿；Phase 0–8 为既有主链，Phase 9–12 为用户管理与企业认证增量规划
+版本：`1.0 规划`
+状态：Phase 0–12 与 v0.13 Portal 调整已实现并验收（tag `v0.13.0`）；v1.0 按 Phase 13–19 推进，
+见第 64 节与 `docs/v1-roadmap.md`
 核心依赖：`pi-web + pi-agent + Docker`
+
+## 阅读指引
+
+- 第 1–54 节是长期有效的产品与架构规范；其中凡与 v1.0 计划相关的内容已按 v1 改写，并标注对应 Phase。
+  **标注为“Phase NN 实现”的能力在该 Phase 完成前尚未存在**，不要按已实现处理。
+- 第 55、56、61、62 节是 v0.x 的开发与验收历史，保留作为回归基线，不再代表待办范围。
+- 第 64 节是 v1.0 各 Phase 的范围与验收；第 65 节是 Phase 开发流程。
+- 文中“MVP”指 v0.x 确立的基线设计（如 Host routing、sticky placement、本地持久存储、不引入 Redis）。
+  除非本文已标注 v1 变更或第 64 节另有规定，这些约束在 v1.0 继续有效。
+- 如本文件内部仍有表述冲突，以第 64、65 节和 `docs/v1-roadmap.md` 为准，并在发现时修正本文件。
 
 ---
 
@@ -365,7 +376,7 @@ Host
 
 ---
 
-## 9.2 多机比赛 Demo
+## 9.2 多机部署
 
 推荐：
 
@@ -397,6 +408,11 @@ Host 2
 ```
 
 也可以证明跨主机执行能力。
+
+当前开发与验证设备均为低功耗 ARM64 主机（如 Radxa Q8B、Jetson AGX）。开发设备之间可能通过
+Tailscale（`100.64.0.0/10` 地址）组成虚拟局域网，并可能运行 Clash Verge（TUN 或系统代理模式）；这些只
+存在于开发环境，生产目标环境是通用企业内网，平台设计不依赖也不针对它们。开发中排查网络问题时需考虑
+这些因素，见 `AGENTS.md` 第 15 节。
 
 ---
 
@@ -993,6 +1009,9 @@ linux/amd64
 linux/arm64
 ```
 
+v1.0 的主验证架构是 `linux/arm64`（当前全部开发与 Worker 设备均为 ARM64）。`linux/amd64` 保持可构建，
+但只有在 CI 原生 runner 或真实 AMD64 Worker 上取得验证证据后才宣称支持。
+
 建议用 Docker Buildx：
 
 ```text
@@ -1036,9 +1055,9 @@ managed bind mount
 “managed Docker network”不能是所有租户共享且可互访的普通 bridge。每个 Workspace
 必须使用独立的 user-defined bridge（或经过等价隔离验证的实现），不得加入 Worker/
 Control Plane management network，也不得直接解析或连接其他 Workspace Container。
-在保留默认 outbound Internet 的同时，宿主机发布的 pi-web 端口必须只绑定
-`127.0.0.1`，并测试 Workspace A 无法连接 Workspace B 的 pi-web、宿主机 loopback
-upstream 或 Worker Gateway 管理入口。
+宿主机发布的 pi-web 端口必须只绑定 `127.0.0.1`，并测试 Workspace A 无法连接 Workspace B 的 pi-web、
+宿主机 loopback upstream 或 Worker Gateway 管理入口。出站访问遵循第 44 节：v1.0 默认允许公网、
+拒绝内网（Phase 14 实现）。
 
 ---
 
@@ -1057,7 +1076,7 @@ MVP 不需要在 Runtime 内提供通用 sudo。
 
 常用依赖预装进 Image。
 
-如比赛以后要做：
+如未来要做：
 
 > sudo / apt approval
 
@@ -1116,7 +1135,17 @@ MVP 使用 local persistent storage：
 - Worker 离线时 Workspace 不可访问
 - 不能热迁移
 
-这在 MVP 可接受。
+这在 v1.0 仍然接受。
+
+**平台不提供备份、快照或跨 Worker 恢复功能**（v1 决策 D5）。备份由虚拟化平台、操作系统或专用备份
+软件针对挂载点完成。平台的责任是：
+
+- 全部持久状态只位于两处：Worker 的 `WORKER_MANAGED_ROOT`（默认 `/var/lib/agent-runtime`）与
+  Control Plane 的 PostgreSQL；
+- 在部署文档中说明需要备份的路径、一致性注意事项（运行中备份可能拿到写入中途的文件，建议先停止
+  Workspace 或使用文件系统快照）与恢复语义；
+- 保证把数据恢复到**原 Worker 的原路径**后，Worker reconciliation 能正常接管；跨 Worker 恢复不在
+  平台范围内。
 
 ---
 
@@ -1760,7 +1789,7 @@ Control Plane 身份，并在 Worker 侧再次核对 Workspace assignment 与 ma
 
 MVP 不实现“在 Worker persistent WebSocket 上复用任意 HTTP/WebSocket byte tunnel”。该方案可在后续为了 NAT/防火墙部署便利再演进。
 
-Worker Gateway 的监听地址、TLS/认证方式必须配置化，并在真实多主机环境中验证。比赛/开发环境可使用受保护内网，但不得让最终用户绕过 Control Plane 直接访问。
+Worker Gateway 的监听地址、TLS/认证方式必须配置化，并在真实多主机环境中验证。开发环境可使用受保护内网，但不得让最终用户绕过 Control Plane 直接访问。
 
 ---
 
@@ -1854,28 +1883,22 @@ Pi Session continuity 交由 pi-web/Pi。
 
 # 41. Idle Policy
 
-MVP 可简单：
+v0.x 行为：永不自动停止（`PI_WEB_IDLE_TIMEOUT_MS=0`）。
 
-```text
-never auto-stop
-```
+v1.0（Phase 18 实现）：可配置的空闲回收，**默认关闭**，由管理员启用并设置时长 N。
 
-或：
+Control Plane 不理解 Pi 协议（`AGENTS.md` 第 5 节），且浏览器断开后 Agent 可能仍在执行长任务（第 40 节要求此时
+不得停止）。因此只有同时满足以下全部条件并持续 N 时，才判定 Workspace 空闲：
 
-```text
-idle N hours -> stop container
-```
+1. 无经过 Gateway 的活跃 HTTP 流或 WebSocket 连接；
+2. 最近 N 内没有经过 Gateway 的请求（需要新增访问时间记录；现有 `last_activity_at` 只在生命周期操作时
+   更新，不能直接使用）；
+3. 容器 CPU 在整个窗口内持续低于阈值，由 Worker 采样上报，用于避免停掉 Agent 或用户进程仍在运行的
+   Workspace。
 
-但不要删数据。
-
-比赛 Demo 建议关闭 auto-stop，避免干扰。
-
-未来：
-
-- cost control
-- resource reclaim
-
-再加复杂策略。
+判定空闲后只执行 `stop`：保留全部持久数据与 Pi Session，记录 Audit，用户可随时再次启动。**不得删除
+任何数据。** capacity 按 sticky assignment 计数（STOPPED 也占用），空闲回收释放的是内存与 CPU，
+不释放调度名额。
 
 ---
 
@@ -1915,58 +1938,69 @@ symlink escape
 
 # 43. Secret
 
-管理员可能配置：
+平台自身的存储与日志约束（始终有效）：
 
-- model API key
-- internal API key
-
-MVP：
-
-- 不进 browser localStorage
+- secret 不进 browser localStorage
 - 不写 `/workspace`
 - 不打 log
 - 不进入 Artifact
-- Runtime 按需注入
 
-这里约束的是平台自身的存储与日志行为，不代表可以向有 shell 权限的 Agent 隐藏已经
-注入 Runtime 的 secret。Agent 进程原则上能够读取自身环境和 Pi credential store；
-因此 MVP 只面向已声明的可信内部用户边界，不能宣称 secret 对 Workspace 内代码不可见。
-用户通过 pi-web 配置的模型凭据可能由 Pi 持久化到 `/agent/pi`，该目录必须按 Workspace
-隔离、不得进入 Artifact，并以当前 pinned Pi 的实际格式为准。
+这里约束的是平台自身的存储与日志行为，不代表可以向有 shell 权限的 Agent 隐藏已经注入 Runtime 的
+secret。Agent 进程原则上能够读取自身环境和 Pi credential store；因此不能宣称注入 Runtime 的 secret
+对 Workspace 内代码不可见。
 
-OIDC/OAuth2 的 `client_secret`、authorization code、access token、refresh token、ID token 原文属于 Control Plane authentication secret，**不得注入 Runtime**。
+OIDC/OAuth2 的 `client_secret`、authorization code、access token、refresh token、ID token 原文属于
+Control Plane authentication secret，**不得注入 Runtime**。
 
-未来再做 per-user Secret。
+## 43.1 模型凭据（v1.0，Phase 16 实现）
+
+v0.x：用户在 pi-web 中自行配置模型凭据，由 Pi 持久化到各自的 `/agent/pi`。
+
+v1.0：采用现成的模型网关组件（LiteLLM Proxy、New API / One API 一类，Phase 16 开工时选型）托管真实
+上游 key：
+
+- 真实上游 key 只存在于模型网关，不进入 Runtime、Control Plane 普通日志或 Portal；
+- 平台为每个用户/Workspace 通过网关管理 API 签发可撤销的虚拟 key，注入 Runtime；由于 Agent 能读到它，
+  虚拟 key 必须只具备推理权限，并支持按 key 计量与限额；
+- 用户禁用、session 撤销或 Workspace 删除时，对应虚拟 key 失效；
+- 网关管理接口只对 Control Plane 开放，Workspace 只能访问其推理接口；
+- 注入方式以当前 pinned Pi 对自定义 provider / base URL 的实际支持为准，不猜配置格式。
+
+用户仍可在 pi-web 中自行配置其他 provider 的凭据；这部分不受平台托管，平台也不读取。
 
 ---
 
 # 44. Network
 
-MVP 默认允许 outbound Internet：
+v0.x：Workspace 默认允许任意出站访问，只实现了 Workspace 之间、以及 Workspace 到宿主机 loopback
+upstream / Worker Gateway 的隔离。
 
-因为 Agent 可能需要：
+v1.0（Phase 14 实现）：**默认允许公网、拒绝内网，内网按管理员白名单放行。**
 
-- Git clone
-- package install
-- model API
-- Playwright
-- download
-
-但文档必须写清楚：
-
-> 当前只实现 Container / filesystem / process 基础隔离，尚未实现完整 egress policy。
-
-“允许 outbound Internet”不等于允许访问平台 management plane 或其他 Workspace。
-即使完整域名/IP egress ACL 延后，MVP 仍必须保持第 25、37 节的租户网络隔离和
-Worker Gateway 强认证；Runtime 不得获得 control/gateway credential。
-
-未来可加：
+默认拒绝的目标采用通用内网定义：
 
 ```text
-open
-restricted
-offline
+10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16   RFC1918
+Worker 宿主机自身的全部地址
 ```
+
+管理员可按部署环境追加拒绝网段（例如云 metadata `169.254.0.0/16`、CGNAT `100.64.0.0/10`），默认不包含。
+
+规则：
+
+- 白名单只能放行上述内网范围中的具体网段或主机端口，由管理员配置并记录 Audit。
+- Control Plane、PostgreSQL、Worker Gateway、Docker API、模型网关管理接口等平台管理地址**永远不能
+  被放行**：先匹配拒绝，再匹配白名单。模型网关的推理接口按第 43.1 节单独放行。
+- 规则由 Worker 为受管 Workspace bridge 下发，并在 reconciliation 中校验；规则缺失或无法确认时
+  fail-closed，不启动 Workspace。
+- Workspace 级模式预留 `open`（默认）与 `offline`；域名级策略放到 v1.x。
+- Workspace 网络保持不启用 IPv6；如将来启用，必须按等价的 `fc00::/7` 下发 IPv6 规则。
+
+开发环境说明：Clash Verge 与 Tailscale 只存在于开发设备，生产目标环境没有，默认规则不针对它们。
+Clash TUN 模式下容器流量可能经 Clash 代为连接，出口拦截的验收应在关闭 TUN 或确认容器流量不经
+Clash 的条件下进行。
+
+这仍然是基础的出口控制，不是完整的零信任网络隔离。
 
 ---
 
@@ -2248,7 +2282,7 @@ pi-agent
 
 ---
 
-# 53. MVP UI
+# 53. Portal UI
 
 平台自己的 UI 不要和 pi-web 重复。
 
@@ -2381,7 +2415,11 @@ Portal -> Open Workspace -> pi-web
 
 ---
 
-# 55. 原型开发阶段
+# 55. v0.x 开发阶段（已完成）
+
+本节记录 Phase 0–12 的范围与验收，全部已实现并通过验收（`v0.12.0`；v0.13 的 Portal 调整见
+`docs/progress.md`）。它们是 v1.0 的回归基线：后续 Phase 不得破坏这里的验收结果。v1.0 的新增范围见
+第 64 节。
 
 ## Phase 0：Repository Bootstrap
 
@@ -2598,7 +2636,7 @@ Base CLI / build tools
 
 ---
 
-## Phase 8：比赛展示增强
+## Phase 8：演示增强
 
 本阶段完成：
 
@@ -2612,7 +2650,7 @@ Base CLI / build tools
 - E2E 分为确定性平台主链与真实 Docker Runtime 两层：前者覆盖 login、ownership、placement、
   session exchange、HTTP/SSE/WebSocket、Stop/Start sticky；后者通过真实 pi-web bash tool 在
   `/workspace` 生成成果，并验证 Files、持久化、reconciliation、安全与网络隔离。
-- polished README 与比赛 runbook：明确 preflight、演示路径、验收清单、cleanup 和自动化边界。
+- polished README 与演示 runbook：明确 preflight、演示路径、验收清单、cleanup 和自动化边界。
 
 Phase 8 验收：
 
@@ -2945,17 +2983,17 @@ Audit 原则：
 
 ---
 
-# 56. 比赛 Demo
+# 56. 演示路径（v0.x）
 
-推荐完整演示：
+v0.x 的完整演示路径，也可作为主链回归的人工检查顺序。可执行的步骤以 `docs/demo-runbook.md` 为准。
 
 ## Step 1
 
 打开 Admin：
 
 ```text
-worker-amd64-01 ONLINE
-worker-arm64-01 ONLINE
+worker-a ONLINE
+worker-b ONLINE
 ```
 
 ## Step 2
@@ -2971,7 +3009,7 @@ dev-workspace
 Scheduler：
 
 ```text
--> worker-amd64-01
+-> worker-a
 ```
 
 ## Step 4
@@ -3048,7 +3086,7 @@ Stop Workspace。
 
 文件与 Pi Session 恢复。
 
-Phase 9–12 完成后可在不替换上述主 Demo 的情况下补充一个很短的企业认证展示：
+企业认证展示：
 
 ```text
 Local Admin
@@ -3065,9 +3103,7 @@ Local Admin
 
 # 57. 与 Dify 类系统的区别
 
-答辩时不要攻击其他产品。
-
-可以客观表达：
+对外介绍时客观表达差异，不贬低其他产品：
 
 传统 Web AI 平台更偏：
 
@@ -3133,7 +3169,7 @@ Auth audit
 
 # 59. 安全边界
 
-MVP 面向：
+v1.0 仍面向：
 
 > 企业内部可信用户 + 相互隔离需求。
 
@@ -3159,40 +3195,22 @@ OIDC / OAuth2 提供身份认证入口，但不等于：
 
 # 60. 后续方向
 
-Phase 9–12 已纳入当前规划：
+v0.x 阶段列出的后续方向已重新分配：
 
-- User Management
-- Generic OIDC
-- Provisioning / Identity Binding
-- 可选 OAuth2 + UserInfo compatibility
-- Authentication Audit / Hardening
-
-这些完成后再考虑：
-
-- Human-in-the-loop approval
-- egress ACL
-- Workspace snapshot
-- Workspace migration
-- NAS / object storage
-- Worker drain
-- Kubernetes backend
-- gVisor
-- Kata
-- microVM
-- LDAP directory sync
-- SCIM
-- complex RBAC / organization hierarchy
-- per-user Secret
-- GPU Worker
-- quota
-- scheduled task
-- MCP management
-- central model gateway
-- Audit export
+- 进入 v1.0（第 64 节）：egress ACL（Phase 14）、磁盘配额（Phase 15）、central model gateway 与模型
+  凭据托管（Phase 16）、可观测性（Phase 17）、空闲回收与 Runtime 镜像升级（Phase 18）、Audit export
+  （v0.13 已在 Portal 端实现）、Worker 暂停调度（v0.13 已实现，即 cordon；不含迁移式 drain）。
+- 明确不做：平台内 Workspace snapshot / 备份 / 跨 Worker 恢复（由外部备份软件负责，见第 28 节）、计费。
+- v1.x 或更后再评估：Human-in-the-loop approval、scheduled task、非交互任务 API、按用户/部门配额、
+  Workspace 模板、Workspace migration、NAS / object storage、gVisor / Kata / microVM、Kubernetes
+  backend、GPU Worker、LDAP directory sync、SCIM、complex RBAC / organization hierarchy、MCP management、
+  Control Plane 多实例。
 
 ---
 
-# 61. MVP Acceptance Checklist
+# 61. v0.x Acceptance Checklist（已通过）
+
+以下为 v0.x 已通过的验收清单，是 v1.0 各 Phase 的回归基线。v1.0 的验收见第 64 节各 Phase。
 
 - [ ] 两个用户可以独立登录。
 - [ ] User A 不能访问 User B Workspace。
@@ -3258,11 +3276,9 @@ Phase 9–12 已纳入当前规划：
 
 ---
 
-# 62. 第一阶段真正要跑通的最小主链
+# 62. 最小主链
 
-不要被完整清单带偏。
-
-第一轮编码真正只需要跑通：
+v0.x 首先跑通并始终要保持的主链：
 
 ```text
 User Login
@@ -3344,3 +3360,90 @@ Worker、Docker Runtime、pi-web、pi-agent 不认识 OIDC/OAuth2。
 > 把成熟的 CLI Agent + Web Wrapper 变成一个可以被企业多用户安全共享的分布式 Agent Runtime Platform。
 
 不应通过重写 pi-web 或把平台扩成通用 IAM 来制造不必要的工作量。
+
+---
+
+# 64. v1.0 Phases
+
+总体目标、差距与决策见 `docs/v1-roadmap.md`。每个 Phase 开工时，把本节对应小节扩写为完整设计
+（范围、非目标、API/数据模型变化、验收清单、测试计划、待决问题），经负责人确认后再实现。
+未扩写的小节只代表已确认的方向，不能当作详细设计直接编码。
+
+## Phase 13：工程基线
+
+状态：待开工设计。
+
+- CI 在 push/PR 上运行 typecheck、lint、单元测试、`test:e2e` 与带 PostgreSQL 的集成测试；
+  runtime-toolchain 在 master push 与定时任务上运行；AMD64 只以原生 runner 证据为准。
+- Control Plane 与 Worker 结构化日志、request ID、凭据 redaction。
+- 按领域拆分 `apps/control-plane/src/app.ts` 与 `packages/database/src/phaseN.ts`；纯重构。
+- 测试夹具归位（`mock_weaver.py`）。
+- 验收要点：CI 全绿；抽查日志无凭据；重构前后 API 与 Portal 行为无差异。
+
+## Phase 14：Workspace 网络出口控制
+
+状态：待开工设计。方向见第 44 节。
+
+- 验收要点：从容器内实测访问 RFC1918 地址、Worker 宿主机地址、Worker Gateway、Control Plane、
+  PostgreSQL 全部失败；公网与白名单目标成功；Worker 重启与 reconciliation 后规则
+  自动恢复；规则缺失时 Workspace 不启动。
+
+## Phase 15：资源与认证防护
+
+状态：待开工设计。
+
+- 每 Workspace 磁盘硬上限（机制按 ARM64 设备实际文件系统确定），可写层与 `/tmp` 受限，Portal 显示用量。
+- 本地登录与 SSO 回调按账户和来源 IP 限速，连续失败临时锁定并记 Audit；Local Admin break-glass 不能
+  被锁死。
+- 验收要点：写满配额只影响该 Workspace；暴力登录被限速并可审计；break-glass 可用。
+- 完成后开始小范围内部试点。
+
+## Phase 16：模型网关与凭据托管
+
+状态：待开工设计。方向见第 43.1 节。
+
+- 验收要点：Runtime 内看不到真实上游 key；调用按用户计量可查；禁用用户或删除 Workspace 后虚拟 key
+  立即失效；Workspace 无法访问网关管理接口。
+
+## Phase 17：可观测性
+
+状态：待开工设计。
+
+- Prometheus 指标（Workspace 状态、Worker 心跳、Gateway 请求/延迟/错误、命令超时、容器 CPU/内存/磁盘）、
+  Portal 实际用量、示例告警与面板。
+- 验收要点：制造 Worker 离线与磁盘接近上限时告警触发；Portal 数字与 `docker stats` 一致。
+
+## Phase 18：生命周期运维
+
+状态：待开工设计。
+
+- 空闲回收（第 41 节，默认关闭）。
+- Runtime 镜像升级与回滚：停止状态下重建容器、保留持久目录。
+- 修复 `enabled=false` 时 Workspace 未置为 `WORKER_OFFLINE` 的不一致，提供 `worker:disable` 运维命令。
+- 验收要点：空闲 Workspace 按规则停止且数据完整、有计算活动的不被停止；升级后 Pi Session 与文件完整；
+  回滚可用。
+
+## Phase 19：生产部署与 v1.0 发布
+
+状态：待开工设计。
+
+- 生产镜像或 systemd unit、部署模板（ARM64 优先）、TLS/wildcard 与反向代理文档（含 SPA fallback 与
+  WebSocket 超时）、升级与回滚流程、外部备份说明（第 28 节）。
+- 验收要点：按文档在全新设备上从零部署成功；从 v0.13 升级到 v1.0 数据完整；完整回归通过。
+
+---
+
+# 65. Phase 开发流程
+
+适用于 Phase 13 起的全部开发：
+
+1. **开工设计**：扩写第 64 节对应小节，核对 pinned upstream，列出待决问题；负责人确认后再编码。
+2. **分支**：在 `phase-NN-<name>` 分支开发；master 始终是已验收状态。
+3. **自动验证**：新增能力必须有测试；安全相关判断做变异检查；migration 在真实 PostgreSQL 的独立测试库
+   上验证，不使用开发库。
+4. **文档同步**：本文件、`docs/progress.md`、README 与相关 runbook 随代码更新。
+5. **交付说明**：Phase 完成时输出变更总结，并附逐步可执行的**人工验收步骤**：前置条件、操作步骤、预期
+   结果，以及失败时需要收集的信息（日志位置、命令输出）。
+6. **人工验收**：负责人在真实环境按步骤验证；环境级问题按 `AGENTS.md` 第 15 节协同排查。
+7. **合入与标记**：验收通过后合入 master，打 `v1.0.0-alpha.N` tag；Phase 19 完成后依次打
+   `v1.0.0-rc.1`、`v1.0.0`。
