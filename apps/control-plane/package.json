@@ -19,6 +19,7 @@
     "@agent-runtime/auth": "workspace:*",
     "@agent-runtime/database": "workspace:*",
     "@agent-runtime/gateway": "workspace:*",
+    "@agent-runtime/logging": "workspace:*",
     "@agent-runtime/protocol": "workspace:*",
     "@fastify/websocket": "11.3.0",
     "fastify": "5.12.3",

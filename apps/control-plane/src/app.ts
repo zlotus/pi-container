@@ -1,5 +1,6 @@
+import { createJsonLogger, newRequestId } from "@agent-runtime/logging";
 import websocket from "@fastify/websocket";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 
 import {
   type ControlPlaneDependencies,
@@ -21,7 +22,25 @@ export type { ControlPlaneDependencies } from "./context.js";
 export function buildControlPlane(
   dependencies: ControlPlaneDependencies,
 ): FastifyInstance {
-  const app = Fastify({ logger: false });
+  const log: FastifyBaseLogger =
+    dependencies.log ??
+    createJsonLogger("control-plane", { LOG_LEVEL: "silent", LOG_FORMAT: "json" });
+  const app = Fastify({
+    loggerInstance: log,
+    disableRequestLogging: true,
+    requestIdLogLabel: "requestId",
+    genReqId: () => newRequestId(),
+  });
+  if (dependencies.log !== undefined) {
+    // One whitelisted line per request; serializers keep only the route template.
+    app.addHook("onResponse", async (request, reply) => {
+      const probe = request.routeOptions.url === "/health" || request.routeOptions.url === "/ready";
+      request.log[probe ? "debug" : "info"](
+        { req: request, res: reply, durationMs: Math.round(reply.elapsedTime) },
+        "request completed",
+      );
+    });
+  }
   const workerChannel = new WorkerChannel(dependencies.workerCommandTimeoutMs);
   void app.register(websocket, {
     options: { maxPayload: 8 * 1024 * 1024, perMessageDeflate: false },
@@ -35,9 +54,10 @@ export function buildControlPlane(
       channel: workerChannel,
       now: context.now,
       onHelloAccepted: (workerId) => {
-        void runtime.reconcileWorkerWorkspaces(workerId).catch(() => {
+        void runtime.reconcileWorkerWorkspaces(workerId).catch((error: unknown) => {
           // The Workspace stays WORKER_OFFLINE when reconciliation cannot be
           // completed. A later Worker reconnect can safely try again.
+          dependencies.log?.warn({ err: error, workerId }, "worker reconciliation failed");
         });
       },
     });

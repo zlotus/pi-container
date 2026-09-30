@@ -9,6 +9,13 @@ import {
   stripPlatformCookies,
   workspaceHost,
 } from "@agent-runtime/gateway";
+import {
+  type Logger,
+  observeWorkspaceHttp,
+  observeWorkspaceUpgrade,
+  REQUEST_ID_HEADER,
+  requestIdFrom,
+} from "@agent-runtime/logging";
 import { WorkerTokenSchema, WorkspaceIdSchema } from "@agent-runtime/protocol";
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
@@ -21,6 +28,7 @@ export interface WorkerGatewayDependencies {
   workspaceBaseUrl: string;
   resolveWorkspaceTarget: (workspaceId: string) => Promise<URL>;
   tls?: Pick<HttpsServerOptions, "cert" | "key">;
+  log?: Logger;
 }
 
 function bearerToken(request: IncomingMessage): string | null {
@@ -54,6 +62,7 @@ function forwardedHeaders(
     origin:
       request.headers.origin === undefined ? undefined : target.origin,
     "x-platform-workspace-id": undefined,
+    [REQUEST_ID_HEADER]: undefined,
   });
 }
 
@@ -98,6 +107,13 @@ async function handleHttp(
   response: ServerResponse,
   dependencies: WorkerGatewayDependencies,
 ): Promise<void> {
+  const requestId = requestIdFrom(request.headers);
+  if (dependencies.log !== undefined) {
+    observeWorkspaceHttp(dependencies.log, request, response, {
+      requestId,
+      workspaceId: requestedWorkspace(request),
+    });
+  }
   if (request.method === "CONNECT") {
     sendJsonError(response, 400, "INVALID_REQUEST", "CONNECT is not supported");
     return;
@@ -105,7 +121,11 @@ async function handleHttp(
   let authorized;
   try {
     authorized = await authorizeTarget(request, dependencies);
-  } catch {
+  } catch (error) {
+    dependencies.log?.warn(
+      { err: error, requestId, workspaceId: requestedWorkspace(request) },
+      "workspace runtime target unavailable",
+    );
     sendJsonError(
       response,
       503,
@@ -134,14 +154,27 @@ async function handleUpgrade(
   head: Buffer,
   dependencies: WorkerGatewayDependencies,
 ): Promise<void> {
+  const requestId = requestIdFrom(request.headers);
+  const observed = dependencies.log === undefined
+    ? undefined
+    : observeWorkspaceUpgrade(dependencies.log, request, socket, {
+        requestId,
+        workspaceId: requestedWorkspace(request),
+      });
   let authorized;
   try {
     authorized = await authorizeTarget(request, dependencies);
-  } catch {
+  } catch (error) {
+    dependencies.log?.warn(
+      { err: error, requestId, workspaceId: requestedWorkspace(request) },
+      "workspace runtime target unavailable",
+    );
+    observed?.rejected(503);
     rejectUpgrade(socket, 503, "Workspace Runtime is unavailable");
     return;
   }
   if (authorized === null) {
+    observed?.rejected(401);
     rejectUpgrade(socket, 401, "Gateway authentication failed");
     return;
   }
@@ -151,6 +184,10 @@ async function handleUpgrade(
       request,
       authorized.target,
     ),
+    onConnected: () => {
+      observed?.connected();
+      return undefined;
+    },
   });
 }
 

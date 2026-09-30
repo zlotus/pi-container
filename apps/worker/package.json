@@ -15,6 +15,7 @@
   "dependencies": {
     "@agent-runtime/auth": "workspace:*",
     "@agent-runtime/gateway": "workspace:*",
+    "@agent-runtime/logging": "workspace:*",
     "@agent-runtime/protocol": "workspace:*",
     "dockerode": "5.0.1",
     "ws": "8.21.3",

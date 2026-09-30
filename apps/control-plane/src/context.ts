@@ -10,6 +10,7 @@ import type {
   Repository,
 } from "@agent-runtime/database";
 import { parseWorkspaceBaseUrl } from "@agent-runtime/gateway";
+import type { Logger } from "@agent-runtime/logging";
 import type {
   WorkerRecoveryIssue,
   WorkspaceResources,
@@ -86,6 +87,8 @@ export interface ControlPlaneDependencies {
     issue: WorkerRecoveryIssue & { workerId: string },
   ) => void;
   now?: () => Date;
+  /** Structured logger; request logging is disabled when omitted (unit tests). */
+  log?: Logger;
 }
 
 export interface AuthContext {
@@ -180,6 +183,7 @@ export function createRouteContext(dependencies: ControlPlaneDependencies) {
         .send(errorBody("UNAUTHENTICATED", "Authentication is required"));
       return null;
     }
+    request.log = request.log.child({ userId: session.user.id });
     return { rawToken, session };
   }
 

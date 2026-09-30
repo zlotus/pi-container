@@ -1,5 +1,4 @@
 import type { DatabaseClient } from "./index.js";
-import { mapWorkspace, type WorkspaceRecord, type WorkspaceRow } from "./records.js";
 
 export function createWorkspaceLifecycleRepository(database: DatabaseClient) {
   return {
