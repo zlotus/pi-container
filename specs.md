@@ -3598,7 +3598,7 @@ table inet agent_runtime {
 建议方案（见 14.11 Q1）：
 
 - **Worker 进程获得 ambient `CAP_NET_ADMIN`**，自身管理 `inet agent_runtime` 表：通过
-  `execFile("/usr/sbin/nft", ["-j", "-f", "-"])` 以 JSON 从 stdin 提交一个原子事务（固定 argv、无
+  `spawn("/usr/sbin/nft", ["-j", "-f", <私有临时文件>])` 提交一个 JSON 原子事务（nft 1.1 之前不接受管道输入；固定 argv、无
   shell、所有元素先经 Zod 校验与规范化），用 `nft -j list table inet agent_runtime` 读回校验。docker 组
   本身已等价于 root，增加 `CAP_NET_ADMIN` 不扩大 Worker 的实际权限面。
   - 生产（Phase 19 的 systemd unit）：`AmbientCapabilities=CAP_NET_ADMIN`、

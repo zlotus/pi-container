@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { EGRESS_TABLE_FAMILY, EGRESS_TABLE_NAME } from "./ruleset.js";
 
@@ -35,15 +38,21 @@ export class ExecNftClient implements NftClient {
   ) {}
 
   async apply(transaction: unknown): Promise<void> {
-    const result = await this.#run(["-j", "-f", "-"], JSON.stringify(transaction));
-    if (result.code !== 0) throw this.#error("apply the egress rules", result);
+    // nft before 1.1 rejects `-f -` from a pipe ("Not a regular file"), so the
+    // transaction goes through a private temporary file instead.
+    const directory = await mkdtemp(join(tmpdir(), "agent-runtime-nft-"));
+    try {
+      const path = join(directory, "transaction.json");
+      await writeFile(path, JSON.stringify(transaction), { encoding: "utf8", mode: 0o600 });
+      const result = await this.#run(["-j", "-f", path]);
+      if (result.code !== 0) throw this.#error("apply the egress rules", result);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 
   async listTable(): Promise<unknown> {
-    const result = await this.#run(
-      ["-j", "list", "table", EGRESS_TABLE_FAMILY, EGRESS_TABLE_NAME],
-      null,
-    );
+    const result = await this.#run(["-j", "list", "table", EGRESS_TABLE_FAMILY, EGRESS_TABLE_NAME]);
     if (result.code !== 0) {
       if (/No such file or directory/.test(result.stderr)) return null;
       throw this.#error("list the egress rules", result);
@@ -67,10 +76,10 @@ export class ExecNftClient implements NftClient {
     );
   }
 
-  #run(args: readonly string[], input: string | null): Promise<CommandResult> {
+  #run(args: readonly string[]): Promise<CommandResult> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.nftPath, args, {
-        stdio: ["pipe", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", "pipe"],
         timeout: this.timeoutMs,
         env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" },
       });
@@ -86,8 +95,6 @@ export class ExecNftClient implements NftClient {
         reject(new NftCommandError(`nft could not be executed: ${error.message}`, false)),
       );
       child.on("close", (code) => resolve({ code, stdout, stderr }));
-      child.stdin.on("error", () => undefined);
-      child.stdin.end(input ?? undefined);
     });
   }
 }
