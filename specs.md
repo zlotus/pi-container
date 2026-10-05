@@ -3371,7 +3371,7 @@ Worker、Docker Runtime、pi-web、pi-agent 不认识 OIDC/OAuth2。
 
 ## Phase 13：工程基线
 
-状态：**实现完成，待人工验收**。分支：`phase-13-engineering-baseline`。
+状态：**已验收（2026-10-05）**，经 PR #1 合入 master，tag `v1.0.0-alpha.1`。
 
 目标：为后续 Phase 建立可靠的自动验证、可排障的日志和可读的代码结构。**不改变任何对外行为**：API、
 数据库 schema、Worker protocol、Portal 行为与 v0.13.0 一致。
@@ -3500,6 +3500,8 @@ Worker、Docker Runtime、pi-web、pi-agent 不认识 OIDC/OAuth2。
 
 - 空闲回收（第 41 节，默认关闭）。
 - Runtime 镜像升级与回滚：停止状态下重建容器、保留持久目录。
+- 以 pi-web 0.9.0 → 0.10.x、Pi 0.85.1 → 1.0.x 作为首次真实升级（含 default-cwd patch 重写与 MCP、
+  project-trust 行为验证），见 `docs/v1-roadmap.md` 决策 D7。
 - 修复 `enabled=false` 时 Workspace 未置为 `WORKER_OFFLINE` 的不一致，提供 `worker:disable` 运维命令。
 - 验收要点：空闲 Workspace 按规则停止且数据完整、有计算活动的不被停止；升级后 Pi Session 与文件完整；
   回滚可用。

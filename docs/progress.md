@@ -17,7 +17,7 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
 
 ## Current Baseline
 
-- Phase 13（待验收）：Control Plane 路由按领域拆分到 `apps/control-plane/src/routes/`（`app.ts` 只做组装），
+- Phase 13（已验收，`v1.0.0-alpha.1`）：Control Plane 路由按领域拆分到 `apps/control-plane/src/routes/`（`app.ts` 只做组装），
   repository 由 `packages/database/src/repository.ts` 的单一 `createRepository` 按领域模块组合，移除 7 个
   已无调用方的旧方法；新增 `packages/logging` 结构化日志（凭据脱敏、request ID 贯穿两级 Gateway）；
   新增 ARM64 CI 质量门（含 PostgreSQL 集成测试）与每周 runtime-toolchain 原生验证。
@@ -187,12 +187,16 @@ v0.x 已以 `v0.13.0` 封版：Portal UI 两轮调整（中文化、交互与审
 
 ## Next
 
-1. Phase 13（工程基线）已在 `phase-13-engineering-baseline` 分支实现，待 CI 首次运行与负责人人工验收；
-   验收通过后合入 master 并打 `v1.0.0-alpha.1`。
-2. Phase 14（网络出口控制）开工设计。
+1. Phase 13（工程基线）已验收（含 CI 双架构、日志脱敏、Portal 回归、Worker 对账与 OAuth2 回归），经 PR #1
+   合入 master，tag `v1.0.0-alpha.1`。
+2. Phase 14（网络出口控制）开工设计：扩写 `specs.md` 第 64 节 Phase 14 小节，先在目标 ARM64 设备上确认
+   Docker / iptables / nftables 环境。
 3. 生产部署入口的 SPA fallback、刷新/前进后退与登录态恢复回归，并入 Phase 19 验收。
 
 ## Risks And Blockers
+
+- Runtime 仍 pin 在 pi-web 0.9.0 / Pi 0.85.1，内置模型目录不含较新的模型（例如 MiMo-V2.6）。升级放在
+  Phase 18（决策 D7）；在此之前可在 Workspace 的 `/agent/pi/models.json` 中自行追加模型定义。
 
 - Phase 5 的两台真实 Worker placement、浏览器 data path、Prompt/Terminal、sticky/offline/reconnect
   与 bind-mount persistence 已由人工验收确认；自动测试仍不能替代目标生产网络、安全和运维验收。
