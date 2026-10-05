@@ -1,0 +1,25 @@
+# Loads the Workspace egress rules before Docker starts, so containers that Docker
+# restarts after a reboot (restart policy unless-stopped) are filtered from the first
+# packet, before the Worker is running. See docs/egress-runbook.md.
+#
+# Install (root):
+#   install -D -m 0644 deploy/egress/agent-runtime-egress.nft /etc/agent-runtime/egress-base.nft
+#   install -m 0644 deploy/egress/agent-runtime-egress.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now agent-runtime-egress.service
+# Adjust the ruleset.json path if WORKER_MANAGED_ROOT is not /var/lib/agent-runtime.
+
+[Unit]
+Description=Agent Runtime Workspace egress rules
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target docker.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The Worker's last verified ruleset (with the whitelist); the base rules otherwise.
+ExecStart=/bin/sh -c '/usr/sbin/nft -j -f /var/lib/agent-runtime/egress/ruleset.json || /usr/sbin/nft -f /etc/agent-runtime/egress-base.nft'
+
+[Install]
+WantedBy=multi-user.target docker.service
