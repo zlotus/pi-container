@@ -1975,7 +1975,8 @@ v1.0：采用现成的模型网关组件（LiteLLM Proxy、New API / One API 一
 v0.x：Workspace 默认允许任意出站访问，只实现了 Workspace 之间、以及 Workspace 到宿主机 loopback
 upstream / Worker Gateway 的隔离。
 
-v1.0（Phase 14 实现）：**默认允许公网、拒绝内网，内网按管理员白名单放行。**
+v1.0（Phase 14 实现，详细设计见第 64 节 Phase 14，运维见 `docs/egress-runbook.md`）：**默认允许公网、
+拒绝内网，内网按管理员白名单放行。**
 
 默认拒绝的目标采用通用内网定义：
 
@@ -3463,7 +3464,7 @@ Worker、Docker Runtime、pi-web、pi-agent 不认识 OIDC/OAuth2。
 
 ## Phase 14：Workspace 网络出口控制
 
-状态：**设计已确认，开发中**（2026-10-05 负责人确认 14.11 全部按建议执行），分支 `phase-14-egress`。方向见第 44 节与 `docs/v1-roadmap.md` 决策 D3。
+状态：**已实现，待人工验收**（2026-10-05 负责人确认 14.11 全部按建议执行），分支 `phase-14-egress`；运维说明见 `docs/egress-runbook.md`。方向见第 44 节与 `docs/v1-roadmap.md` 决策 D3。
 
 目标：Workspace 默认可以访问公网，但不能访问内网与 Worker 宿主机；内网目标只能由管理员按网段/端口
 放行；平台管理地址永远不可放行；规则缺失或无法确认时 fail-closed。
@@ -3602,8 +3603,9 @@ table inet agent_runtime {
   本身已等价于 root，增加 `CAP_NET_ADMIN` 不扩大 Worker 的实际权限面。
   - 生产（Phase 19 的 systemd unit）：`AmbientCapabilities=CAP_NET_ADMIN`、
     `CapabilityBoundingSet=CAP_NET_ADMIN`。
-  - 开发：`sudo setpriv --reuid=$(id -u) --regid=$(id -g) --init-groups --inh-caps=+net_admin
-    --ambient-caps=+net_admin -- pnpm dev:worker`，不对 node 二进制做 `setcap`。
+  - 开发：`tools/dev/run-worker-with-egress.sh <env 文件>`，即 `sudo setpriv --reuid --regid --init-groups
+    --inh-caps=+net_admin --ambient-caps=+net_admin` 后以原用户运行 `pnpm dev:worker`；不对 node 二进制做
+    `setcap`。
 - **启动顺序**：新增 root oneshot unit `agent-runtime-egress.service`（`Before=docker.service`，
   `WantedBy=multi-user.target`）。它先加载 Worker 最近一次成功应用后原子写入的快照
   `${WORKER_MANAGED_ROOT}/egress/ruleset.json`；快照缺失或加载失败时加载随仓库发布的基础规则
@@ -3686,7 +3688,13 @@ Admin API（admin role、CSRF、Origin 校验与现有 admin 路由一致）：
 - 不提供修改，修改 = 删除 + 新建，便于审计。
 
 Audit：`egress.rule_created`、`egress.rule_deleted`，details 含 action、network、protocol、端口、
-description、新 revision 与 request ID。
+description、新 revision 与 request ID；Worker 上报的状态翻转记 `worker.egress_enforced` /
+`worker.egress_unenforced`。Worker 上报 `enforced=false` 时，其 `RUNNING` 的 Workspace 在同一事务内置为
+`ERROR`（Worker 已按 Q3 停止它们）。Audit 新增类别 `egress`。
+
+错误码：`EGRESS_ALLOW_OUTSIDE_DENY`、`EGRESS_ALLOW_OVERLAPS_PROTECTED`、`EGRESS_RULE_LIMIT`、
+`EGRESS_RULE_EXISTS`（409），`EGRESS_RULE_IN_USE`（删除被依赖的 deny，409），`EGRESS_RULE_NOT_FOUND`
+（404）。删除时只做依赖检查，不因 protected 配置的后续变化而拒绝删除。
 
 Portal：
 
@@ -3707,10 +3715,11 @@ Control Plane 对 v1 hello 返回明确的版本错误，见 14.11 Q5）：
   number | null }`。
 - 新命令 `worker.egress.apply`：`{ revision, allow: [{ network, protocol?, portMin?, portMax? }],
   denyExtra: [network], protected: [network] }`，数组上限 1000，元素用共享 Zod schema 校验 CIDR。
-  Worker 合并本地 protected 后原子应用，成功返回 `{ revision }`；revision 小于已应用值时忽略并返回当前值。
+  Worker 合并本地 protected 后原子应用，成功返回 `{ egress: { enforced, revision } }`；revision 小于已应用值时
+  忽略并返回当前状态；应用失败返回 `EGRESS_APPLY_FAILED`（retryable），并继续执行之前的规则。
 - Control Plane 在 Worker 每次 authenticated hello 之后、`worker.reconcile` 之前下发当前策略；规则变化
   时向所有在线 Worker 下发。离线 Worker 保留上一次快照（可能比当前策略更宽或更严），重连后立即更新。
-- 新错误码 `EGRESS_UNENFORCED`。
+- 新错误码 `EGRESS_UNENFORCED`、`EGRESS_NETWORK_LEGACY`、`EGRESS_APPLY_FAILED`。
 
 ### 14.8 开发环境：Clash 与 Tailscale
 
@@ -3758,22 +3767,27 @@ Clash Verge 与 Tailscale 是负责人开发设备上的工具，与业务无关
   `enforced=false` 或 revision 落后的 Worker、hello 后先 apply 再 reconcile。
 - migration 在 `agent_runtime_test` 上验证。
 
-特权集成测试（新增 `pnpm test:egress`，需要 root 或 `CAP_NET_ADMIN` + Docker；在 CI ARM64 runner 上用
-`sudo` 运行，本地按 runbook 运行）：
+真实内核测试（`pnpm test:egress`）：在非特权 user + network namespace（`unshare --user
+--map-root-user --net`）中运行，不需要 root、不需要 Docker、不改动宿主机；CI 在 ARM64 runner 上安装
+`nftables` 并放开 AppArmor 的 userns 限制后运行。
 
-- 用 network namespace + veth 模拟内网主机（如 `10.99.0.2`、`192.168.250.2`）与“公网”主机
-  （`203.0.113.2`，TEST-NET-3，不在拒绝范围），各自运行 HTTP 监听；在 `arw-` bridge 上启动受管容器。
-- 断言：宿主机网关地址与宿主机其他地址的监听不可达；内网主机不可达；“公网”主机可达；`allow_svc`
-  只放行指定端口；protected 优先于 allow；IPv6 被丢弃；经 `127.0.0.1` 发布端口访问 pi-web 正常（reply
-  方向）；删除白名单后已建立连接被切断；拒绝全部内网时容器内 DNS 解析仍正常（确认 dockerd 在宿主机
-  命名空间转发）。
-- 删除平台表后：校验得到 `enforced=false`、start 被拒绝；周期校验恢复后可启动。
-- **变异检查**：去掉 prerouting 的 `fib daddr type local` 规则、把 protected 放到 allow 之后、去掉
-  `iifname` 前缀判断中的任一项，测试必须失败。
+- 用 network namespace + veth 模拟“容器”（挂在 `arw-` bridge 上）、非 Workspace bridge 上的对照容器、
+  内网主机 `10.99.0.2` 与“公网”主机 `203.0.113.2`（TEST-NET-3），全部是直连路由，因此不受开发设备上
+  Clash TUN 与 Tailscale 影响。
+- 断言：宿主机全部地址（bridge 网关、其他接口、“公网”侧地址、IPv6）不可达；内网主机不可达；“公网”主机
+  可达；非 Workspace bridge 不受影响；宿主机到容器的入站连接（pi-web 路径）正常；`allow_svc` 只放行指定
+  端口；protected 优先于 allow；管理员追加的拒绝网段生效；删除白名单后已建立连接被切断；删除平台表后
+  `ensure` 恢复规则；随仓库发布的基础规则文件与 Worker 快照都能由 `nft` 加载，并与 Worker 的校验一致。
+- 真实 Docker 集成测试（`pnpm test:e2e:runtime`）覆盖 `arw-` bridge 命名与停止状态下的存量网络迁移。
+- start 门禁、Gateway 门禁、规则丢失时停止运行中的 Workspace 由 Worker 单元测试覆盖。
+- 容器 DNS 在拒绝全部内网时仍可用（dockerd 在宿主机命名空间转发）依赖真实 Docker，放在人工验收中确认。
+- **变异检查**（已执行）：去掉 prerouting 的 `fib daddr type local` 规则、去掉 protected 规则、改错
+  `iifname` 前缀，真实内核测试分别失败；去掉 Worker start 门禁、Gateway 门禁、Control Plane start 门禁、
+  调度器的出口条件，对应单元测试分别失败。
 
 ### 14.10 验收
 
-自动验收：上述测试全部通过，CI 绿（含特权集成测试）。
+自动验收：上述测试全部通过，CI 绿（含真实内核出口测试）。
 
 人工验收（详细步骤随交付说明给出），至少覆盖：
 

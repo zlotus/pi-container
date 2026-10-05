@@ -170,7 +170,7 @@ Container stop/start、Worker restart 后，Workspace 文件和 Pi Session 必�
 平台不实现备份、快照或跨 Worker 恢复；备份由外部工具针对挂载点完成。平台只保证全部持久状态位于
 `WORKER_MANAGED_ROOT` 与 PostgreSQL，并保证数据恢复到原 Worker 原路径后 reconciliation 能接管。
 
-v1.0 出口策略（Phase 14 实现，**实现前尚未生效**，不要假设已有）：Workspace 默认允许公网、拒绝内网
+v1.0 出口策略（Phase 14 已实现，**人工验收通过前不要对外宣称**；运维见 `docs/egress-runbook.md`）：Workspace 默认允许公网、拒绝内网
 （RFC1918 与 Worker 宿主机地址），内网按管理员白名单放行，管理员可按环境追加拒绝网段；平台管理地址
 永远不可放行。Tailscale / Clash 只存在于开发环境，默认规则不针对它们。详见 `specs.md` 第 44 节。
 
