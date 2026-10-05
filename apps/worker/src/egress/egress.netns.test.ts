@@ -26,6 +26,8 @@ const BASE_RULESET = new URL("../../../../deploy/egress/agent-runtime-egress.nft
 const NFT = process.env.TEST_EGRESS_NFT_PATH ?? "/usr/sbin/nft";
 
 const children: ChildProcess[] = [];
+/** Controller warnings, so a failed expectation shows why the rules were not enforced. */
+const warnings: string[] = [];
 
 function run(command: string, args: readonly string[]): string {
   return execFileSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -152,7 +154,12 @@ describe.skipIf(!enabled)("egress rules on a real kernel", { timeout: 30_000 }, 
       nft,
       stateDirectory: join(stateRoot, "egress"),
       resolveLocalProtected: async () => [],
-      log: { info: () => undefined, warn: () => undefined },
+      log: {
+        info: () => undefined,
+        warn: (fields: object, message?: string) => {
+          warnings.push(`${message ?? ""} ${JSON.stringify(fields)}`);
+        },
+      },
     });
   });
 
@@ -168,7 +175,8 @@ describe.skipIf(!enabled)("egress rules on a real kernel", { timeout: 30_000 }, 
   });
 
   it("enforces the base rules: public allowed, internal and Worker host denied", async () => {
-    await expect(controller.initialize()).resolves.toEqual({ enforced: true, revision: null });
+    const status = await controller.initialize();
+    expect(status, warnings.join("\n")).toEqual({ enforced: true, revision: null });
 
     expect(greeting(container, "203.0.113.2", 80)).toBe("public");
     expect(greeting(container, "10.99.0.2", 80)).toBeNull();
