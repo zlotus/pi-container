@@ -11,7 +11,7 @@ Phase 14（`specs.md` 第 64 节 Phase 14）的运维说明：Workspace 默认�
 | 组件 | 位置 | 作用 |
 |---|---|---|
 | 平台独占的 nftables 表 | `table inet agent_runtime` | 只匹配 `arw-*` Workspace bridge 的入口流量；不修改 Docker、Tailscale 等其他表 |
-| Worker egress controller | `apps/worker/src/egress/` | 以 `nft -j -f -` 原子替换整张表，读回校验，随心跳检查漂移并修复 |
+| Worker egress controller | `apps/worker/src/egress/` | 以 `nft -j -f <临时文件>` 原子替换整张表，读回校验，随心跳检查漂移并修复 |
 | 开机加载 unit | `deploy/egress/agent-runtime-egress.service` | 在 `docker.service` 之前加载 Worker 最近一次校验通过的规则快照，失败时加载基础规则 |
 | 基础规则 | `deploy/egress/agent-runtime-egress.nft` | 拒绝宿主机、RFC1918 与全部 IPv6，无白名单 |
 | 规则快照 | `${WORKER_MANAGED_ROOT}/egress/{policy.json,ruleset.json}` | 最近一次应用的策略与完整 nft 事务（root 开机加载） |

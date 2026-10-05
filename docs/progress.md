@@ -20,7 +20,7 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
 - Phase 14（已实现，待人工验收，分支 `phase-14-egress`）：Workspace 出口控制。Worker 在平台独占的
   nftables 表 `inet agent_runtime` 中按 `arw-*` bridge 名过滤出站流量：拒绝 Worker 宿主机全部地址
   （`fib daddr type local`，DNAT 之前）、RFC1918、管理员追加网段与全部 IPv6，先拒绝平台保护地址再匹配
-  白名单。规则以 `nft -j -f -` 原子替换、读回校验、随心跳修复漂移；无法确认时 fail-closed（不启动、关闭
+  白名单。规则以 `nft -j -f <临时文件>` 原子替换、读回校验、随心跳修复漂移；无法确认时 fail-closed（不启动、关闭
   Gateway、停止运行中的 Workspace）。`agent-runtime-egress.service` 在 Docker 之前加载规则快照。Worker
   协议升到 v2（`worker.egress.apply`、hello/heartbeat 的 `egress`），migration `0010_egress_policy`，
   Admin API `/api/admin/egress`、Portal“网络出口”页与 Worker 出口状态列；存量 `br-<id>` 网络在停止状态下
