@@ -30,6 +30,8 @@ function candidate(
     maxWorkspaces: 4,
     assignedWorkspaces: 0,
     lastHeartbeatAt: NOW,
+    egressEnforced: true,
+    egressRevision: 3,
     ...overrides,
   };
 }
@@ -47,6 +49,7 @@ function selectionInput(
     candidates,
     connectedWorkerIds: candidates.map((worker) => worker.id),
     heartbeatCutoff: new Date(NOW.getTime() - 35_000),
+    egressRevision: 3,
     ...overrides,
   };
 }
@@ -168,5 +171,16 @@ describe("Phase 5 Worker selection", () => {
         }),
       ),
     ).toBeNull();
+  });
+
+  it("places only on Workers that enforce the current egress policy revision", () => {
+    const candidates = [
+      candidate({ id: "a-unenforced", egressEnforced: false }),
+      candidate({ id: "b-stale-revision", egressRevision: 2 }),
+      candidate({ id: "c-never-reported", egressRevision: null }),
+      candidate({ id: "d-current" }),
+    ];
+    expect(selectWorker(selectionInput(candidates))?.id).toBe("d-current");
+    expect(selectWorker(selectionInput(candidates.slice(0, 3)))).toBeNull();
   });
 });

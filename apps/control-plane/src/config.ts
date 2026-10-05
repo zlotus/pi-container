@@ -1,5 +1,9 @@
 import { parseWorkspaceBaseUrl } from "@agent-runtime/gateway";
-import { WorkerIdSchema, WorkerTokenSchema } from "@agent-runtime/protocol";
+import {
+  Ipv4CidrListConfigSchema,
+  WorkerIdSchema,
+  WorkerTokenSchema,
+} from "@agent-runtime/protocol";
 import { z } from "zod";
 
 function parseHttpOrigin(
@@ -190,6 +194,8 @@ export const ServerConfigSchema = z
     GATEWAY_PORT: z.coerce.number().int().min(1).max(65_535).default(3001),
     PORTAL_ORIGIN: PortalOriginSchema.default("http://127.0.0.1:5173"),
     PORTAL_ALLOWED_ORIGINS: PortalAllowedOriginsSchema,
+    /** Platform addresses no egress whitelist may open (specs.md Phase 14.3). */
+    PLATFORM_EGRESS_PROTECTED: Ipv4CidrListConfigSchema,
     AUTH_OIDC_ENABLED: z
       .enum(["true", "false"])
       .default("false")

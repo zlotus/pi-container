@@ -34,6 +34,15 @@ export {
   type PlatformAuditEvent,
 } from "./audit.js";
 export {
+  type CreateEgressRuleResult,
+  type DeleteEgressRuleResult,
+  type EgressAuditMetadata,
+  type EgressPolicyRecord,
+  type EgressPolicyValidator,
+  type EgressRuleAction,
+  type EgressRuleRecord,
+} from "./egress.js";
+export {
   type BindExternalIdentityResult,
   type CompleteExternalLoginResult,
   type UnbindExternalIdentityResult,

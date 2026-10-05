@@ -36,15 +36,25 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   const phase12UserId = randomUUID();
   const schedulingUserId = randomUUID();
   const auditFilterUserId = randomUUID();
+  const egressAdminId = randomUUID();
   const suffix = randomUUID();
   const workerId = `worker-${suffix}`;
   const phase3WorkerId = `runtime-${suffix}`;
   const phase6WorkerId = `recovery-${suffix}`;
+  const egressWorkerId = `egress-${suffix}`;
   const phase5WorkerIds = ["a", "b", "arch", "cap", "image", "last", "paused", "active"].map(
     (name) => `scheduler-${name}-${suffix}`,
   );
   const phase3RuntimeImage = `agent-runtime:integration-${suffix}`;
   let database!: DatabaseClient;
+
+  /** Workers in these tests report the live revision so the scheduler accepts them. */
+  async function currentEgressRevision(): Promise<number> {
+    const rows = await database<Array<{ revision: string }>>`
+      select revision::text from egress_policy_state
+    `;
+    return Number(rows[0]?.revision ?? 0);
+  }
 
   beforeAll(async () => {
     if (databaseUrl === undefined) throw new Error("TEST_DATABASE_URL is required");
@@ -54,6 +64,11 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   });
 
   afterAll(async () => {
+    await database`delete from egress_rules where created_by = ${egressAdminId}`;
+    await database`delete from workspaces where worker_id = ${egressWorkerId}`;
+    await database`delete from platform_audit_events where worker_id = ${egressWorkerId} or actor_user_id = ${egressAdminId}`;
+    await database`delete from workers where id = ${egressWorkerId}`;
+    await database`delete from users where id = ${egressAdminId}`;
     await database`delete from workspaces where user_id in (${userAId}, ${userBId}, ${phase3UserId}, ${phase5UserId}, ${phase6UserId}, ${phase9AdminId}, ${phase9UserId}, ${phase10UserId}, ${phase10OtherUserId}, ${phase11AdminId}, ${phase11LocalUserId}, ${phase11JitUserId}, ${phase11SameEmailUserId}, ${phase12AdminId}, ${phase12UserId}, ${schedulingUserId}, ${auditFilterUserId})`;
     await database`delete from workers where id = ${workerId} or id = ${phase3WorkerId} or id = ${phase6WorkerId} or id = any(${phase5WorkerIds})`;
     await database`
@@ -614,6 +629,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
           logicalCpuCount: 8,
           memoryBytes: 16 * 1024 ** 3,
         },
+        egress: { enforced: true, revision: await currentEgressRevision() },
         receivedAt: NOW,
       }),
     ).toBe(true);
@@ -671,6 +687,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
           logicalCpuCount: 8,
           memoryBytes: 16 * 1024 ** 3,
         },
+        egress: { enforced: true, revision: await currentEgressRevision() },
         receivedAt: NOW,
       }),
     ).toBe(true);
@@ -916,6 +933,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         logicalCpuCount: 8,
         memoryBytes: 16 * 1024 ** 3,
       },
+      egress: { enforced: true, revision: await currentEgressRevision() },
       receivedAt: NOW,
     });
     const workspace = await repository.createWorkspace({
@@ -1053,6 +1071,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
           logicalCpuCount: 8,
           memoryBytes: 16 * 1024 ** 3,
         },
+        egress: { enforced: true, revision: await currentEgressRevision() },
         receivedAt: NOW,
       });
     }
@@ -1228,6 +1247,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         maxWorkspaces: 4,
         allocatedWorkspaces: 0,
         systemResources: { logicalCpuCount: 8, memoryBytes: 16 * 1024 ** 3 },
+        egress: { enforced: true, revision: await currentEgressRevision() },
         receivedAt: NOW,
       });
     }
@@ -1384,5 +1404,131 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       userId: auditFilterUserId,
       ownerEmail: `audit-filter-${suffix}@example.test`,
     });
+  });
+
+  it("persists egress rules with revisions and audit, and Worker egress enforcement", async () => {
+    const repository = createRepository(database, selectWorker);
+    await repository.createUser({
+      id: egressAdminId,
+      email: `egress-admin-${suffix}@example.test`,
+      username: null,
+      passwordHash: await hashPassword("egress-admin-password"),
+      role: "admin",
+    });
+    const audit = {
+      actorUserId: egressAdminId,
+      requestId: randomUUID(),
+      ipAddress: "127.0.0.1",
+      userAgent: null,
+    };
+    const start = (await repository.getEgressPolicy()).revision;
+    const allow = {
+      action: "allow" as const,
+      network: "10.77.0.0/16",
+      protocol: "tcp" as const,
+      portMin: 443,
+      portMax: 443,
+      description: "integration",
+      audit,
+    };
+
+    const created = await repository.createEgressRule({ ...allow, validate: () => null });
+    expect(created).toMatchObject({
+      outcome: "CREATED",
+      revision: start + 1,
+      rule: { network: "10.77.0.0/16", protocol: "tcp", portMin: 443, portMax: 443 },
+    });
+    expect(await repository.createEgressRule({ ...allow, validate: () => null })).toEqual({
+      outcome: "DUPLICATE",
+    });
+    const seen: string[][] = [];
+    expect(
+      await repository.createEgressRule({
+        ...allow,
+        network: "10.78.0.0/16",
+        validate: (rules) => {
+          seen.push(rules.map((rule) => rule.network));
+          return "EGRESS_ALLOW_OUTSIDE_DENY";
+        },
+      }),
+    ).toEqual({ outcome: "REJECTED", code: "EGRESS_ALLOW_OUTSIDE_DENY" });
+    expect(seen[0]).toEqual(expect.arrayContaining(["10.77.0.0/16", "10.78.0.0/16"]));
+    expect((await repository.getEgressPolicy()).revision).toBe(start + 1);
+
+    // The schema rejects what the API rejects, even for direct writes.
+    await expect(database`
+      insert into egress_rules (id, action, network, protocol, created_by)
+      values (${randomUUID()}, 'deny', '10.79.0.0/16', 'tcp', ${egressAdminId})
+    `).rejects.toThrow();
+    await expect(database`
+      insert into egress_rules (id, action, network, created_by)
+      values (${randomUUID()}, 'allow', '::1/128', ${egressAdminId})
+    `).rejects.toThrow();
+
+    if (created.outcome !== "CREATED") throw new Error("rule was not created");
+    expect(
+      await repository.deleteEgressRule({ ruleId: created.rule.id, validate: () => null, audit }),
+    ).toEqual({ outcome: "DELETED", revision: start + 2 });
+    expect(
+      await repository.deleteEgressRule({ ruleId: created.rule.id, validate: () => null, audit }),
+    ).toEqual({ outcome: "NOT_FOUND" });
+    const ruleEvents = await database<Array<{ event_type: string; details: Record<string, unknown> }>>`
+      select event_type, details from platform_audit_events
+      where actor_user_id = ${egressAdminId} order by id asc
+    `;
+    expect(ruleEvents.map((event) => event.event_type)).toEqual([
+      "egress.rule_created",
+      "egress.rule_deleted",
+    ]);
+    expect(ruleEvents[0]?.details).toMatchObject({
+      network: "10.77.0.0/16",
+      revision: start + 1,
+      requestId: audit.requestId,
+    });
+
+    const credentialHash = hashOpaqueToken(`egress-${suffix}-credential-token`);
+    await repository.provisionWorkerWithGateway({
+      workerId: egressWorkerId,
+      credentialHash,
+      gatewayBaseUrl: "http://127.0.0.1:18080",
+    });
+    expect(
+      (await repository.listWorkers()).find((worker) => worker.id === egressWorkerId)?.egress,
+    ).toEqual({ enforced: false, revision: null, checkedAt: null });
+    const heartbeat = (enforced: boolean) =>
+      repository.recordWorkerHeartbeat({
+        credentialHash,
+        workerId: egressWorkerId,
+        allocatedWorkspaces: 1,
+        egress: { enforced, revision: start + 2 },
+        receivedAt: NOW,
+      });
+    expect(await heartbeat(true)).toBe(true);
+    const workspaceId = randomUUID();
+    await database`
+      insert into workspaces (id, user_id, name, worker_id, state, runtime_image)
+      values (${workspaceId}, ${egressAdminId}, 'egress-running', ${egressWorkerId}, 'RUNNING', 'img')
+    `;
+    expect(await heartbeat(false)).toBe(true);
+    expect(await heartbeat(false)).toBe(true);
+    expect(await heartbeat(true)).toBe(true);
+
+    const [workspace] = await database<Array<{ state: string }>>`
+      select state from workspaces where id = ${workspaceId}
+    `;
+    expect(workspace?.state).toBe("ERROR");
+    expect(
+      (await repository.listWorkers()).find((worker) => worker.id === egressWorkerId)?.egress,
+    ).toEqual({ enforced: true, revision: start + 2, checkedAt: NOW });
+    const workerEvents = await database<Array<{ event_type: string }>>`
+      select event_type from platform_audit_events
+      where worker_id = ${egressWorkerId} and event_type like 'worker.egress_%'
+      order by id asc
+    `;
+    expect(workerEvents.map((event) => event.event_type)).toEqual([
+      "worker.egress_enforced",
+      "worker.egress_unenforced",
+      "worker.egress_enforced",
+    ]);
   });
 });

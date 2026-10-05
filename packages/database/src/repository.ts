@@ -1,4 +1,5 @@
 import { createAuditRepository } from "./audit.js";
+import { createEgressRepository } from "./egress.js";
 import { createIdentityRepository } from "./identities.js";
 import type { DatabaseClient } from "./index.js";
 import { createRecoveryRepository } from "./recovery.js";
@@ -22,6 +23,7 @@ export function createRepository(database: DatabaseClient, selectWorker: WorkerS
     ...createRecoveryRepository(database),
     ...createAuditRepository(database),
     ...createIdentityRepository(database),
+    ...createEgressRepository(database),
   };
 }
 

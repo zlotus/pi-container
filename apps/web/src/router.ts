@@ -6,6 +6,7 @@ export type PortalRoute =
   | "admin-users"
   | "admin-workspaces"
   | "admin-workers"
+  | "admin-egress"
   | "admin-audit"
   | "not-found";
 
@@ -15,6 +16,7 @@ export const ROUTE_PATHS: Record<Exclude<PortalRoute, "not-found">, string> = {
   "admin-users": "/admin/users",
   "admin-workspaces": "/admin/workspaces",
   "admin-workers": "/admin/workers",
+  "admin-egress": "/admin/egress",
   "admin-audit": "/admin/audit",
 };
 

@@ -1,4 +1,8 @@
-import { WorkerIdSchema, WorkerTokenSchema } from "@agent-runtime/protocol";
+import {
+  Ipv4CidrListConfigSchema,
+  WorkerIdSchema,
+  WorkerTokenSchema,
+} from "@agent-runtime/protocol";
 import { parseWorkspaceBaseUrl } from "@agent-runtime/gateway";
 import { z } from "zod";
 
@@ -82,6 +86,8 @@ export const WorkerConfigSchema = z
     WORKSPACE_PIDS_LIMIT: z.coerce.number().int().positive().default(512),
     WORKSPACE_UID: z.coerce.number().int().positive().default(1_000),
     WORKSPACE_GID: z.coerce.number().int().positive().default(1_000),
+    WORKER_EGRESS_PROTECTED: Ipv4CidrListConfigSchema,
+    WORKER_EGRESS_NFT_PATH: AbsolutePathSchema.default("/usr/sbin/nft"),
     WORKSPACE_START_TIMEOUT_MS: z.coerce
       .number()
       .int()

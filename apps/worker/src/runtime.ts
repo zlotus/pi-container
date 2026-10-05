@@ -25,12 +25,30 @@ import Docker from "dockerode";
 import { z } from "zod";
 
 import type { WorkerConfig } from "./config.js";
+import { workspaceBridgeName } from "./egress/ruleset.js";
 
 const APP_LABEL = "agent-runtime-platform";
 const MANAGED_BY_LABEL = "worker";
 const PI_WEB_PORT = "30141/tcp";
 const PI_WEB_DEFAULT_CWD_ENV = "PI_WEB_DEFAULT_CWD=/workspace";
 const RESOURCE_NAME_PREFIX = "agent-runtime-";
+const BRIDGE_NAME_OPTION = "com.docker.network.bridge.name";
+
+/** The Worker's egress rule state as seen by the Runtime (specs.md Phase 14.5). */
+export interface EgressGate {
+  /** Last verified state, for hot paths such as the Gateway. */
+  isEnforced(): boolean;
+  /** Reads the live rules back, repairing drift, before a container may start. */
+  ensure(): Promise<{ enforced: boolean }>;
+}
+
+/** Used when no gate is wired in: nothing may start without verified egress rules. */
+const UNENFORCED_EGRESS: EgressGate = {
+  isEnforced: () => false,
+  ensure: async () => ({ enforced: false }),
+};
+
+type NetworkGeneration = "current" | "legacy";
 
 const MetadataSchema = z
   .object({
@@ -70,7 +88,9 @@ export class WorkspaceRuntimeError extends Error {
       | "RUNTIME_CONFIGURATION_MISMATCH"
       | "RUNTIME_START_FAILED"
       | "RUNTIME_NOT_READY"
-      | "RUNTIME_ENGINE_ERROR",
+      | "RUNTIME_ENGINE_ERROR"
+      | "EGRESS_UNENFORCED"
+      | "EGRESS_NETWORK_LEGACY",
     message: string,
     readonly retryable = false,
   ) {
@@ -123,6 +143,7 @@ export class DockerWorkspaceRuntime {
   readonly #workspaceResources: WorkspaceResources;
   readonly #workspaceBaseUrl: ReturnType<typeof parseWorkspaceBaseUrl>;
   readonly #readinessProbe: (port: string) => Promise<boolean>;
+  readonly #egress: EgressGate;
   #initialized = false;
 
   constructor(
@@ -138,8 +159,10 @@ export class DockerWorkspaceRuntime {
         return false;
       }
     },
+    egress: EgressGate = UNENFORCED_EGRESS,
   ) {
     this.#docker = docker;
+    this.#egress = egress;
     this.#managedRoot = resolve(config.WORKER_MANAGED_ROOT);
     this.#workspacesRoot = join(this.#managedRoot, "workspaces");
     this.#runtimeUser = `${config.WORKSPACE_UID}:${config.WORKSPACE_GID}`;
@@ -166,7 +189,7 @@ export class DockerWorkspaceRuntime {
     this.#assertResources(resources);
     const paths = await this.#ensureWorkspacePaths(workspaceId);
     const networkName = this.#networkName(workspaceId);
-    await this.#ensureNetwork(workspaceId, networkName);
+    await this.#ensureNetwork(workspaceId, networkName, paths);
     const existing = await this.#findNamedContainer(workspaceId);
     const created = existing === null;
     if (existing === null) {
@@ -244,7 +267,9 @@ export class DockerWorkspaceRuntime {
       this.#networkName(workspaceId),
     );
     this.#verifyLegacyCompatibleDefaultCwd(inspection);
+    await this.#ensureNetwork(workspaceId, this.#networkName(workspaceId), paths);
     if (!inspection.State.Running) {
+      await this.#assertEgressEnforced();
       try {
         await container.start();
       } catch (error) {
@@ -587,6 +612,13 @@ export class DockerWorkspaceRuntime {
         true,
       );
     }
+    if (!this.#egress.isEnforced()) {
+      throw new WorkspaceRuntimeError(
+        "EGRESS_UNENFORCED",
+        "Workspace egress rules are not enforced on this Worker",
+        true,
+      );
+    }
     const bindings = inspection.NetworkSettings.Ports[PI_WEB_PORT];
     const binding = bindings?.length === 1 ? bindings[0] : undefined;
     if (
@@ -743,13 +775,67 @@ export class DockerWorkspaceRuntime {
     }
   }
 
-  async #ensureNetwork(workspaceId: string, name: string): Promise<void> {
+  /**
+   * Creates the Workspace network, or migrates a pre-Phase-14 network (Docker's default
+   * `br-<id>` bridge name, which the egress rules do not match) to the `arw-` bridge name.
+   * A legacy network is only replaced while its container is stopped.
+   */
+  async #ensureNetwork(
+    workspaceId: string,
+    name: string,
+    paths: ManagedWorkspacePaths,
+  ): Promise<void> {
     const existing = await this.#findNamedNetwork(workspaceId);
     if (existing !== null) {
       const inspection = await existing.inspect();
-      this.#verifyManagedNetwork(inspection, workspaceId, name);
+      const generation = this.#verifyManagedNetwork(inspection, workspaceId, name);
+      if (generation === "current") return;
+
+      const container = await this.#findNamedContainer(workspaceId);
+      if (container !== null) {
+        const containerInspection = await container.inspect();
+        this.#verifyManagedContainerIdentity(containerInspection, workspaceId, paths, name);
+        if (containerInspection.State.Running) {
+          throw new WorkspaceRuntimeError(
+            "EGRESS_NETWORK_LEGACY",
+            "Workspace must be stopped before its network can be migrated",
+          );
+        }
+        if (containerInspection.NetworkSettings.Networks?.[name] !== undefined) {
+          try {
+            await existing.disconnect({ Container: containerInspection.Id, Force: true });
+          } catch (error) {
+            throw this.#engineError(error, "detach the legacy Workspace network");
+          }
+        }
+      }
+      try {
+        await existing.remove();
+      } catch (error) {
+        throw this.#engineError(error, "remove the legacy Workspace network");
+      }
+      await this.#createNetwork(workspaceId, name);
+      if (container !== null) {
+        const created = await this.#findNamedNetwork(workspaceId);
+        if (created === null) {
+          throw new WorkspaceRuntimeError(
+            "UNMANAGED_NETWORK_CONFLICT",
+            "Migrated Workspace network is missing",
+          );
+        }
+        try {
+          const containerInspection = await container.inspect();
+          await created.connect({ Container: containerInspection.Id });
+        } catch (error) {
+          throw this.#engineError(error, "attach the migrated Workspace network");
+        }
+      }
       return;
     }
+    await this.#createNetwork(workspaceId, name);
+  }
+
+  async #createNetwork(workspaceId: string, name: string): Promise<void> {
     try {
       await this.#docker.createNetwork({
         Name: name,
@@ -757,15 +843,74 @@ export class DockerWorkspaceRuntime {
         Driver: "bridge",
         Internal: false,
         Attachable: false,
+        EnableIPv6: false,
         Labels: managedLabels(this.#workerId, workspaceId),
         Options: {
           "com.docker.network.bridge.enable_icc": "false",
           "com.docker.network.bridge.host_binding_ipv4": "127.0.0.1",
+          [BRIDGE_NAME_OPTION]: workspaceBridgeName(workspaceId),
         },
       });
     } catch (error) {
       throw this.#engineError(error, "create the isolated Workspace network");
     }
+  }
+
+  async #assertEgressEnforced(): Promise<void> {
+    let enforced: boolean;
+    try {
+      enforced = (await this.#egress.ensure()).enforced;
+    } catch {
+      enforced = false;
+    }
+    if (!enforced) {
+      throw new WorkspaceRuntimeError(
+        "EGRESS_UNENFORCED",
+        "Workspace egress rules are not enforced on this Worker",
+      );
+    }
+  }
+
+  /**
+   * Fail-closed response to lost egress rules (specs.md Phase 14.11 Q3): stops every
+   * running container of this Worker. Data and Pi Sessions stay in the managed root.
+   */
+  async stopRunningWorkspaces(): Promise<string[]> {
+    let containers: Docker.ContainerInfo[];
+    try {
+      containers = await this.#docker.listContainers({
+        filters: {
+          label: [
+            `app=${APP_LABEL}`,
+            `managed_by=${MANAGED_BY_LABEL}`,
+            `worker_id=${this.#workerId}`,
+          ],
+          status: ["running", "restarting"],
+        },
+      });
+    } catch (error) {
+      throw this.#engineError(error, "list running Workspace containers");
+    }
+    const stopped: string[] = [];
+    for (const info of containers) {
+      const workspaceId = WorkspaceIdSchema.safeParse(info.Labels.workspace_id);
+      if (
+        !workspaceId.success ||
+        !info.Names.includes(`/${this.#containerName(workspaceId.data)}`) ||
+        !labelsMatch(info.Labels, managedLabels(this.#workerId, workspaceId.data))
+      ) {
+        continue;
+      }
+      try {
+        await this.#docker.getContainer(info.Id).stop({ t: 15 });
+      } catch (error) {
+        if (dockerStatus(error) !== 304) {
+          throw this.#engineError(error, "stop a Workspace container");
+        }
+      }
+      stopped.push(workspaceId.data);
+    }
+    return stopped;
   }
 
   async #findNamedContainer(workspaceId: string) {
@@ -872,7 +1017,7 @@ export class DockerWorkspaceRuntime {
         "Managed Workspace network is missing",
       );
     }
-    this.#verifyManagedNetwork(
+    const generation = this.#verifyManagedNetwork(
       await network.inspect(),
       assignment.workspaceId,
       networkName,
@@ -885,6 +1030,25 @@ export class DockerWorkspaceRuntime {
       networkName,
     );
     this.#verifyLegacyRuntimeConfiguration(inspection, this.#workspaceResources);
+    if (inspection.State.Running && (generation === "legacy" || !this.#egress.isEnforced())) {
+      // Fail closed: a Workspace outside the egress rules must not keep running.
+      try {
+        await container.stop({ t: 15 });
+      } catch (error) {
+        if (dockerStatus(error) !== 304) {
+          throw this.#engineError(error, "stop a Workspace outside the egress rules");
+        }
+      }
+      throw generation === "legacy"
+        ? new WorkspaceRuntimeError(
+            "EGRESS_NETWORK_LEGACY",
+            "Workspace ran on a network without egress rules and was stopped",
+          )
+        : new WorkspaceRuntimeError(
+            "EGRESS_UNENFORCED",
+            "Workspace egress rules are not enforced; the Workspace was stopped",
+          );
+    }
     if (inspection.State.Restarting || inspection.State.Paused || inspection.State.Dead) {
       throw new WorkspaceRuntimeError(
         "RUNTIME_NOT_READY",
@@ -922,19 +1086,23 @@ export class DockerWorkspaceRuntime {
     );
   }
 
+  /** Returns "legacy" for a managed network created before the `arw-` bridge name. */
   #verifyManagedNetwork(
     inspection: Docker.NetworkInspectInfo,
     workspaceId: string,
     name: string,
-  ): void {
+  ): NetworkGeneration {
+    const bridgeName = inspection.Options?.[BRIDGE_NAME_OPTION];
     if (
       inspection.Name !== name ||
       inspection.Driver !== "bridge" ||
       inspection.Internal ||
       inspection.Attachable ||
+      inspection.EnableIPv6 ||
       inspection.Options?.["com.docker.network.bridge.enable_icc"] !== "false" ||
       inspection.Options?.["com.docker.network.bridge.host_binding_ipv4"] !==
         "127.0.0.1" ||
+      (bridgeName !== undefined && bridgeName !== workspaceBridgeName(workspaceId)) ||
       !labelsMatch(inspection.Labels, managedLabels(this.#workerId, workspaceId))
     ) {
       throw new WorkspaceRuntimeError(
@@ -942,6 +1110,7 @@ export class DockerWorkspaceRuntime {
         "Workspace network conflicts with an unmanaged Docker network",
       );
     }
+    return bridgeName === undefined ? "legacy" : "current";
   }
 
   #resourceWorkspaceId(

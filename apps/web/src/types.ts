@@ -46,6 +46,34 @@ export interface Worker {
     memoryBytes: number | null;
   };
   lastHeartbeatAt: string | null;
+  /** Whether the Worker verifiably enforces the egress policy, and which revision. */
+  egress: { enforced: boolean; revision: number | null; checkedAt: string | null };
+}
+
+export interface EgressRule {
+  id: string;
+  action: "allow" | "deny";
+  network: string;
+  protocol: "tcp" | "udp" | null;
+  portMin: number | null;
+  portMax: number | null;
+  description: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface EgressPolicyResponse {
+  revision: number;
+  defaultDeny: string[];
+  protected: string[];
+  rules: EgressRule[];
+  workers: Array<{
+    id: string;
+    enabled: boolean;
+    enforced: boolean;
+    revision: number | null;
+    checkedAt: string | null;
+  }>;
 }
 
 export interface AuditEvent {

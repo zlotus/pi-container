@@ -29,6 +29,8 @@ export interface WorkerScheduleCandidate {
   maxWorkspaces: number | null;
   assignedWorkspaces: number;
   lastHeartbeatAt: Date | null;
+  egressEnforced: boolean;
+  egressRevision: number | null;
 }
 
 export interface WorkerPlacementRecord extends WorkerRecord {
@@ -40,6 +42,8 @@ export interface WorkerSelectionInput {
   candidates: WorkerScheduleCandidate[];
   connectedWorkerIds: readonly string[];
   heartbeatCutoff: Date;
+  /** Current egress policy revision; only Workers enforcing it are eligible. */
+  egressRevision: number;
 }
 
 export type WorkerSelector = (
@@ -88,6 +92,8 @@ interface CandidateRow {
   max_workspaces: number | null;
   assigned_workspaces: number;
   last_heartbeat_at: Date | null;
+  egress_enforced: boolean;
+  egress_revision: string | null;
 }
 
 function mapWorkspace(row: SchedulingWorkspaceRow): WorkspaceRecord {
@@ -117,6 +123,8 @@ function mapCandidate(row: CandidateRow): WorkerScheduleCandidate {
     maxWorkspaces: row.max_workspaces,
     assignedWorkspaces: row.assigned_workspaces,
     lastHeartbeatAt: row.last_heartbeat_at,
+    egressEnforced: row.egress_enforced,
+    egressRevision: row.egress_revision === null ? null : Number(row.egress_revision),
   };
 }
 
@@ -223,6 +231,9 @@ export function createSchedulingRepository(
         let workerId = workspace.worker_id;
         const sticky = workerId !== null;
         if (workerId === null) {
+          const policy = await transaction<Array<{ revision: string }>>`
+            select revision::text from egress_policy_state where id
+          `;
           const rows = await transaction<CandidateRow[]>`
             select
               workers.id,
@@ -235,7 +246,9 @@ export function createSchedulingRepository(
               workers.capabilities,
               workers.max_workspaces,
               count(assigned.id)::integer as assigned_workspaces,
-              workers.last_heartbeat_at
+              workers.last_heartbeat_at,
+              workers.egress_enforced,
+              workers.egress_revision::text as egress_revision
             from workers
             left join workspaces assigned on assigned.worker_id = workers.id
             group by workers.id
@@ -250,6 +263,7 @@ export function createSchedulingRepository(
             candidates: rows.map(mapCandidate),
             connectedWorkerIds: input.connectedWorkerIds,
             heartbeatCutoff: input.heartbeatCutoff,
+            egressRevision: Number(policy[0]?.revision ?? 0),
           });
           if (selected === null) return { outcome: "NO_ELIGIBLE_WORKER" };
           workerId = selected.id;

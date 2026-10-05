@@ -128,6 +128,7 @@ export function registerWorkerControlChannel(
                 maxWorkspaces: message.payload.maxWorkspaces,
                 allocatedWorkspaces: message.payload.allocatedWorkspaces,
                 systemResources: message.payload.systemResources,
+                egress: message.payload.egress,
                 receivedAt: dependencies.now(),
               });
               if (!recorded) {
@@ -154,6 +155,7 @@ export function registerWorkerControlChannel(
                 credentialHash: identity.credentialHash,
                 workerId: identity.workerId,
                 allocatedWorkspaces: message.payload.allocatedWorkspaces,
+                egress: message.payload.egress,
                 receivedAt: dependencies.now(),
               });
               if (!recorded) closeForPolicy();

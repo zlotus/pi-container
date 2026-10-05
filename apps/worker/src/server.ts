@@ -1,18 +1,31 @@
 import { readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 
 import { createLogger, LoggingConfigSchema } from "@agent-runtime/logging";
 
 import { loadWorkerConfig } from "./config.js";
 import { DockerRuntimeCapabilityProbe } from "./capabilities.js";
 import { WorkerDaemon } from "./daemon.js";
+import { EgressController, localProtectedResolver } from "./egress/controller.js";
+import { logEgressEnvironment } from "./egress/environment.js";
+import { ExecNftClient } from "./egress/nft.js";
 import { buildWorkerGateway } from "./gateway.js";
 import { DockerWorkspaceRuntime } from "./runtime.js";
 
 const config = loadWorkerConfig(process.env);
 const log = await createLogger("worker", LoggingConfigSchema.parse(process.env));
-const runtime = new DockerWorkspaceRuntime(config);
+const egress = new EgressController({
+  nft: new ExecNftClient(config.WORKER_EGRESS_NFT_PATH),
+  stateDirectory: join(resolve(config.WORKER_MANAGED_ROOT), "egress"),
+  resolveLocalProtected: localProtectedResolver(
+    config.CONTROL_PLANE_URL,
+    config.WORKER_EGRESS_PROTECTED,
+  ),
+  log,
+});
+const runtime = new DockerWorkspaceRuntime(config, undefined, undefined, egress);
 const capabilityProbe = new DockerRuntimeCapabilityProbe(config);
-const daemon = new WorkerDaemon(config, runtime, capabilityProbe, log);
+const daemon = new WorkerDaemon(config, runtime, capabilityProbe, egress, log);
 const tls =
   config.WORKER_GATEWAY_TLS_CERT_PATH === undefined ||
   config.WORKER_GATEWAY_TLS_KEY_PATH === undefined
@@ -54,4 +67,8 @@ await new Promise<void>((resolve, reject) => {
     resolve();
   });
 });
+await logEgressEnvironment(log);
+await egress.initialize();
+// Running Workspaces must not outlive unverifiable egress rules (fail closed).
+await daemon.checkEgress();
 daemon.start();

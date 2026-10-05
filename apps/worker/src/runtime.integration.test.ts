@@ -16,10 +16,19 @@ import type { WorkerConfig } from "./config.js";
 import { DockerRuntimeCapabilityProbe } from "./capabilities.js";
 import { currentArchitecture } from "./daemon.js";
 import { buildWorkerGateway } from "./gateway.js";
-import { DockerWorkspaceRuntime } from "./runtime.js";
+import { workspaceBridgeName } from "./egress/ruleset.js";
+import { DockerWorkspaceRuntime, type EgressGate } from "./runtime.js";
 
 const runDockerIntegration = process.env.TEST_DOCKER_RUNTIME === "1";
 const describeWithDocker = runDockerIntegration ? describe : describe.skip;
+
+// This suite runs without CAP_NET_ADMIN and does not install egress rules; the egress
+// gate is satisfied here so the Docker behaviour can be tested. Real enforcement is
+// covered by src/egress/egress.netns.test.ts and the Phase 14 manual acceptance.
+const ASSUMED_ENFORCED: EgressGate = {
+  isEnforced: () => true,
+  ensure: async () => ({ enforced: true }),
+};
 
 describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
   const runtimeImage =
@@ -59,7 +68,7 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
       WORKSPACE_START_TIMEOUT_MS: "60000",
     });
     docker = new Docker({ socketPath: config.DOCKER_SOCKET_PATH });
-    runtime = new DockerWorkspaceRuntime(config, docker);
+    runtime = new DockerWorkspaceRuntime(config, docker, undefined, ASSUMED_ENFORCED);
   });
 
   it("passes the full Runtime toolchain and browser smoke tests", async () => {
@@ -167,6 +176,11 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
     expect(inspection.Config.Env).toContain("PI_WEB_DEFAULT_CWD=/workspace");
     expect(inspection.HostConfig.Privileged).toBe(false);
     expect(inspection.HostConfig.NetworkMode).toBe(networkName);
+    const network = await docker.getNetwork(networkName).inspect();
+    expect(network.Options?.["com.docker.network.bridge.name"]).toBe(
+      workspaceBridgeName(workspaceId),
+    );
+    expect(network.EnableIPv6).toBe(false);
     expect(inspection.HostConfig.CapDrop).toContain("ALL");
     expect(inspection.HostConfig.SecurityOpt).toContain(
       "no-new-privileges:true",
@@ -296,7 +310,7 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
     expect((await runtime.stop(workspaceId)).state).toBe("STOPPED");
     expect((await runtime.start(workspaceId)).state).toBe("RUNNING");
     await docker.getContainer(containerName).restart({ t: 5 });
-    runtime = new DockerWorkspaceRuntime(config, docker);
+    runtime = new DockerWorkspaceRuntime(config, docker, undefined, ASSUMED_ENFORCED);
     const recovery = await runtime.reconcile([
       {
         workspaceId,
@@ -465,6 +479,8 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
     const upgradedRuntime = new DockerWorkspaceRuntime(
       { ...config, RUNTIME_IMAGE: "agent-runtime:future-toolchain" },
       docker,
+      undefined,
+      ASSUMED_ENFORCED,
     );
     await expect(upgradedRuntime.inspect(upgradedWorkspaceId)).resolves.toMatchObject({
       state: "STOPPED",
@@ -515,6 +531,52 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
     await runtime.delete(workspaceA);
     await runtime.delete(workspaceB);
   }, 120_000);
+
+  it("migrates a stopped Workspace from a legacy br- network to the arw- bridge", async () => {
+    const migratedId = randomUUID();
+    const name = `agent-runtime-${migratedId}`;
+    try {
+      await runtime.ensure(migratedId, runtimeImage, resources);
+      await writeFile(
+        join(managedRoot, "workspaces", migratedId, "workspace", "kept.txt"),
+        "kept",
+        "utf8",
+      );
+      // Recreate the pre-Phase-14 network: same identity, Docker's default bridge name.
+      const current = await docker.getNetwork(name).inspect();
+      const container = await docker.getContainer(name).inspect();
+      await docker.getNetwork(name).disconnect({ Container: container.Id, Force: true });
+      await docker.getNetwork(name).remove();
+      const legacy = await docker.createNetwork({
+        Name: name,
+        Driver: "bridge",
+        Labels: current.Labels,
+        Options: {
+          "com.docker.network.bridge.enable_icc": "false",
+          "com.docker.network.bridge.host_binding_ipv4": "127.0.0.1",
+        },
+      });
+      await legacy.connect({ Container: container.Id });
+      const legacyId = (await legacy.inspect()).Id;
+
+      await expect(runtime.ensure(migratedId, runtimeImage, resources)).resolves.toMatchObject({
+        state: "STOPPED",
+      });
+      const migrated = await docker.getNetwork(name).inspect();
+      expect(migrated.Id).not.toBe(legacyId);
+      expect(migrated.Options?.["com.docker.network.bridge.name"]).toBe(
+        workspaceBridgeName(migratedId),
+      );
+      await expect(runtime.start(migratedId)).resolves.toMatchObject({ state: "RUNNING" });
+      const running = await docker.getContainer(name).inspect();
+      expect(Object.keys(running.NetworkSettings.Networks)).toEqual([name]);
+      await expect(
+        readFile(join(managedRoot, "workspaces", migratedId, "workspace", "kept.txt"), "utf8"),
+      ).resolves.toBe("kept");
+    } finally {
+      await runtime.delete(migratedId).catch(() => undefined);
+    }
+  });
 });
 
 function requestWorkerGateway(

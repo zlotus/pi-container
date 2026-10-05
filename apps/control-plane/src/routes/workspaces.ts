@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { workspaceOrigin } from "@agent-runtime/gateway";
+import { WORKER_PROTOCOL_VERSION } from "@agent-runtime/protocol";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 
@@ -30,6 +31,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
   } = context;
   const {
     workerChannel,
+    applyWorkerEgress,
     dispatchRuntimeCommand,
     markRuntimeFailure,
     sendDispatchFailure,
@@ -171,6 +173,19 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
     if (workerId === null) {
       throw new Error("Scheduler returned a Workspace without a Worker");
     }
+    if (workerChannel.isConnected(workerId) && !(await applyWorkerEgress(workerId))) {
+      // Fail closed: never start a Workspace on a Worker that cannot prove it enforces
+      // the current egress policy (specs.md Phase 14.6).
+      const unenforced: Extract<DispatchResult, { ok: false }> = {
+        ok: false,
+        workerOffline: false,
+        statusCode: 503,
+        code: "EGRESS_UNENFORCED",
+        message: "Worker egress rules are not enforced",
+      };
+      await markRuntimeFailure(workspace.id, workerId, unenforced);
+      return sendDispatchFailure(reply, unenforced);
+    }
     if (!workerChannel.isConnected(workerId)) {
       const unavailable: Extract<DispatchResult, { ok: false }> = {
         ok: false,
@@ -184,7 +199,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
     }
 
     const ensured = await dispatchRuntimeCommand(workerId, {
-      version: 1,
+      version: WORKER_PROTOCOL_VERSION,
       type: "workspace.ensure",
       requestId: randomUUID(),
       payload: {
@@ -207,7 +222,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
       return sendDispatchFailure(reply, invalidEnsure);
     }
     const started = await dispatchRuntimeCommand(workerId, {
-      version: 1,
+      version: WORKER_PROTOCOL_VERSION,
       type: "workspace.start",
       requestId: randomUUID(),
       payload: { workspaceId: workspace.id },
@@ -290,7 +305,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
         .send(errorBody("WORKSPACE_CHANGED", "Workspace is not running"));
     }
     const stopped = await dispatchRuntimeCommand(workerId, {
-      version: 1,
+      version: WORKER_PROTOCOL_VERSION,
       type: "workspace.stop",
       requestId: randomUUID(),
       payload: { workspaceId: workspace.id },
@@ -422,7 +437,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
           .send(errorBody("WORKSPACE_CHANGED", "Workspace state changed; retry"));
       }
       const deleted = await dispatchRuntimeCommand(workspace.workerId, {
-        version: 1,
+        version: WORKER_PROTOCOL_VERSION,
         type: "workspace.delete",
         requestId: randomUUID(),
         payload: { workspaceId: workspace.id },

@@ -10,6 +10,7 @@ import {
   AdminUsersPage,
   runConfirmedAdminUserUpdate,
 } from "./pages/AdminUsersPage.js";
+import { AdminEgressPage } from "./pages/AdminEgressPage.js";
 import { AdminWorkersPage } from "./pages/AdminWorkersPage.js";
 import { AdminWorkspacesPage } from "./pages/AdminWorkspacesPage.js";
 import { UserActivityPage } from "./pages/UserActivityPage.js";
@@ -87,6 +88,8 @@ export function PortalRouteContent({
       return <AdminWorkspacesPage />;
     case "admin-workers":
       return <AdminWorkersPage session={session} />;
+    case "admin-egress":
+      return <AdminEgressPage session={session} />;
     case "admin-audit":
       return <AdminAuditPage />;
     case "not-found":
