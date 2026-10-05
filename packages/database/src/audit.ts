@@ -1,6 +1,5 @@
 import type { DatabaseClient } from "./index.js";
-import { createPhase6Repository } from "./phase6.js";
-import type { WorkerSelector } from "./phase5.js";
+import type { AuthenticationAuditMetadata } from "./records.js";
 
 export interface PlatformAuditEvent {
   id: string;
@@ -58,13 +57,18 @@ function mapAuditEvent(row: PlatformAuditEventRow): PlatformAuditEvent {
   };
 }
 
-export function createPhase8Repository(
-  database: DatabaseClient,
-  selectWorker: WorkerSelector,
-) {
-  return {
-    ...createPhase6Repository(database, selectWorker),
+export type AuthenticationFailureCategory =
+  | "invalid_request"
+  | "invalid_credentials"
+  | "provider_unavailable"
+  | "transaction_invalid"
+  | "protocol_validation_failed"
+  | "identity_not_bound"
+  | "provisioning_not_allowed"
+  | "user_disabled";
 
+export function createAuditRepository(database: DatabaseClient) {
+  return {
     async recordWorkspaceOpened(input: {
       actorUserId: string;
       ownerUserId: string;
@@ -135,7 +139,18 @@ export function createPhase8Repository(
           `;
       return rows.map(mapAuditEvent);
     },
+
+    async recordAuthenticationFailure(input: {
+      category: AuthenticationFailureCategory;
+      audit: AuthenticationAuditMetadata;
+    }): Promise<void> {
+      await database`
+        insert into platform_audit_events (event_type, details)
+        values (
+          'auth.login_failed',
+          ${database.json({ ...input.audit, category: input.category })}
+        )
+      `;
+    },
   };
 }
-
-export type Phase8Repository = ReturnType<typeof createPhase8Repository>;

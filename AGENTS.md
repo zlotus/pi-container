@@ -22,7 +22,8 @@
 
 > 不是给大模型挂几个工具，而是给智能体提供一台隔离的计算机。
 
-当前状态：v0.x（Phase 0–12 与 v0.13 Portal 调整）已实现并验收，tag `v0.13.0`。现在进入 v1.0 产品化，
+当前状态：v0.x（Phase 0–12 与 v0.13 Portal 调整）已实现并验收，tag `v0.13.0`；v1.0 的 Phase 13 已验收，
+tag `v1.0.0-alpha.1`。现在进入 v1.0 产品化，
 按 Phase 13–19 逐个开发、逐个验收，目标是可交给企业内部团队长期使用。范围与顺序见
 `docs/v1-roadmap.md`，各 Phase 详细规范见 `specs.md` 第 64 节。
 
@@ -402,6 +403,11 @@ Workspace Container
 - OIDC state / nonce / issuer / audience / redirect validation（进入对应 Phase 后）
 
 不要为了“让测试绿”而降低原本应保证的安全或语义要求。
+
+日志规则：使用 `@agent-runtime/logging` 的结构化 logger，只记录白名单字段。永不记录 Cookie、
+Authorization、CSRF token、请求/响应 body、query string、password、token、Worker credential、
+exchange code 或 Workspace 内完整路径；Portal API 记录路由模板，Workspace 流量只记录路径第一段。
+新增日志字段时同步扩展脱敏测试。
 
 v1.0 Phase 开发流程（详见 `specs.md` 第 65 节）：
 

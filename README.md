@@ -17,7 +17,7 @@ architecture 猜测。Portal 使用 `/`、`/activity` 与三个 `/admin/*` 页�
 User、Worker 与 Platform Audit，admin 另有只读的 `/admin/workspaces` 全平台 Workspace 列表；普通用户
 显示 Workspace / 活动，admin 显示 Workspace / 用户 / 全部 Workspace / Worker / 审计。Artifact 继续复用 pi-web
 的 `/workspace` Files 查看/下载，不复制文件或 Pi
-message/tool stream。仓库记录的 ARM64 工程验证已通过，AMD64 native 自动验证记录仍待补齐。
+message/tool stream。ARM64 与 AMD64 均有原生验证记录（ARM64 为主开发架构，AMD64 由 CI 原生 runner 提供），见 capability matrix。
 HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其
 Chat、Terminal 或 streaming 实现。
 
@@ -277,6 +277,26 @@ Worker 每次建立 control channel 时，都会先对 `RUNTIME_IMAGE` 启动一
 Worker 才发送 hello；各能力组的失败会如实上报 `false`。超时可通过
 `RUNTIME_CAPABILITY_PROBE_TIMEOUT_MS` 调整，默认 120 秒。新部署的 Control Plane 和 Worker 默认
 使用 `agent-runtime:phase7-toolchain` / `phase-7`；已有私有环境文件中的显式旧值不会被自动改写。
+
+## Logs
+
+Control Plane 与 Worker 都向 stdout 输出 JSON 结构化日志，由部署环境（systemd/journald、容器运行时等）
+收集。两个进程都读取：
+
+```bash
+LOG_LEVEL=info     # fatal | error | warn | info | debug | trace | silent
+LOG_FORMAT=json    # 开发时可设为 pretty（需要已安装开发依赖）
+```
+
+常用字段：`service`、`requestId`（UUID）、`userId`（已认证请求）、`workspaceId`、`workerId`、
+`statusCode`、`durationMs`。Portal API 每个请求一行 `request completed`，只记录路由模板（如
+`/api/workspaces/:id/start`）；Workspace 流量每个请求一行 `workspace request`，WebSocket 记录
+connected / closed，只记录路径第一段（如 `/api`）。Control Plane 的 Workspace Gateway 生成 request ID
+并转发给 Worker Gateway，因此可以用同一个 `requestId` 在两边的日志中串起一次 Workspace 访问。
+
+以下内容永不进入日志：Cookie / Set-Cookie、Authorization、CSRF token、请求与响应 body、query string
+（包括 OIDC/OAuth2 callback 的 `code`、`state`）、password、各类 token 与 Worker credential、session
+exchange code、Workspace 内的完整路径。
 
 ## Real multi-host development and acceptance
 

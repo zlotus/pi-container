@@ -5,7 +5,6 @@ import type {
 } from "@agent-runtime/protocol";
 
 import type { DatabaseClient } from "./index.js";
-import { createPhase1Repository } from "./phase1.js";
 
 export type WorkerStatus = "REGISTERED" | "ONLINE" | "OFFLINE" | "DISABLED";
 
@@ -79,20 +78,13 @@ function mapWorker(row: WorkerRow): WorkerRecord {
   };
 }
 
-export function createPhase2Repository(database: DatabaseClient) {
+export interface WorkerGatewayRoute {
+  workerId: string;
+  gatewayBaseUrl: string;
+}
+
+export function createWorkerRepository(database: DatabaseClient) {
   return {
-    ...createPhase1Repository(database),
-
-    async provisionWorker(input: {
-      workerId: string;
-      credentialHash: string;
-    }): Promise<void> {
-      await database`
-        insert into workers (id, credential_hash)
-        values (${input.workerId}, ${input.credentialHash})
-      `;
-    },
-
     async rotateWorkerCredential(input: {
       workerId: string;
       credentialHash: string;
@@ -186,18 +178,6 @@ export function createPhase2Repository(database: DatabaseClient) {
       return rows.length === 1;
     },
 
-    async markWorkersOffline(cutoff: Date): Promise<number> {
-      const rows = await database<{ id: string }[]>`
-        update workers
-        set status = 'OFFLINE', updated_at = now()
-        where enabled
-          and status = 'ONLINE'
-          and (last_heartbeat_at is null or last_heartbeat_at <= ${cutoff})
-        returning id
-      `;
-      return rows.length;
-    },
-
     async listWorkers(): Promise<WorkerRecord[]> {
       const rows = await database<WorkerRow[]>`
         select
@@ -210,7 +190,77 @@ export function createPhase2Repository(database: DatabaseClient) {
       `;
       return rows.map(mapWorker);
     },
+
+    async markWorkersOffline(cutoff: Date): Promise<number> {
+      return database.begin(async (transaction) => {
+        const offlineWorkers = await transaction<{ id: string }[]>`
+          update workers
+          set status = 'OFFLINE', updated_at = now()
+          where enabled
+            and status = 'ONLINE'
+            and (last_heartbeat_at is null or last_heartbeat_at <= ${cutoff})
+          returning id
+        `;
+        for (const worker of offlineWorkers) {
+          await transaction`
+            update workspaces
+            set state = 'WORKER_OFFLINE', updated_at = now()
+            where worker_id = ${worker.id}
+              and state in ('STARTING', 'RUNNING', 'STOPPING', 'STOPPED', 'ERROR')
+          `;
+        }
+        return offlineWorkers.length;
+      });
+    },
+
+    async provisionWorkerWithGateway(input: {
+      workerId: string;
+      credentialHash: string;
+      gatewayBaseUrl: string;
+    }): Promise<void> {
+      await database`
+        insert into workers (id, credential_hash, gateway_base_url)
+        values (
+          ${input.workerId},
+          ${input.credentialHash},
+          ${input.gatewayBaseUrl}
+        )
+      `;
+    },
+
+    async configureWorkerGateway(input: {
+      workerId: string;
+      gatewayBaseUrl: string;
+    }): Promise<boolean> {
+      const rows = await database<{ id: string }[]>`
+        update workers
+        set gateway_base_url = ${input.gatewayBaseUrl}, updated_at = now()
+        where id = ${input.workerId}
+        returning id
+      `;
+      return rows.length === 1;
+    },
+
+    async findWorkerGatewayRoute(input: {
+      workerId: string;
+      heartbeatCutoff: Date;
+    }): Promise<WorkerGatewayRoute | null> {
+      const rows = await database<
+        Array<{ id: string; gateway_base_url: string }>
+      >`
+        select id, gateway_base_url
+        from workers
+        where id = ${input.workerId}
+          and enabled
+          and status = 'ONLINE'
+          and last_heartbeat_at > ${input.heartbeatCutoff}
+          and gateway_base_url is not null
+        limit 1
+      `;
+      const row = rows[0];
+      return row === undefined
+        ? null
+        : { workerId: row.id, gatewayBaseUrl: row.gateway_base_url };
+    },
   };
 }
-
-export type Phase2Repository = ReturnType<typeof createPhase2Repository>;

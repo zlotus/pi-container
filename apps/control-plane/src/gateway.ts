@@ -1,6 +1,6 @@
 import { hashOpaqueToken } from "@agent-runtime/auth";
 import type {
-  Phase4Repository,
+  Repository,
   WorkspaceRecord,
 } from "@agent-runtime/database";
 import {
@@ -15,6 +15,13 @@ import {
   workspaceIdFromHost,
   workspaceOrigin,
 } from "@agent-runtime/gateway";
+import {
+  type Logger,
+  newRequestId,
+  observeWorkspaceHttp,
+  observeWorkspaceUpgrade,
+  REQUEST_ID_HEADER,
+} from "@agent-runtime/logging";
 import { WorkerIdSchema, WorkerTokenSchema } from "@agent-runtime/protocol";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
@@ -28,7 +35,7 @@ import type { SessionConnectionRegistry } from "./session-connections.js";
 const ExchangeBodySchema = z.object({ code: z.string().min(32).max(256) }).strict();
 
 export type WorkspaceGatewayStore = Pick<
-  Phase4Repository,
+  Repository,
   "findActiveSession" | "findOwnedWorkspace" | "findWorkerGatewayRoute"
 >;
 
@@ -44,6 +51,7 @@ export interface WorkspaceGatewayDependencies {
   workerGatewayTokens: Readonly<Record<string, string>>;
   sessionConnections?: SessionConnectionRegistry;
   now?: () => Date;
+  log?: Logger;
 }
 
 interface AuthorizedWorkspace {
@@ -209,6 +217,7 @@ function workerRequestHeaders(
   request: IncomingMessage,
   authorized: AuthorizedWorkspace,
   publicOrigin: string,
+  requestId: string,
 ) {
   const host = new URL(publicOrigin).host;
   const cookie = stripPlatformCookies(request.headers.cookie);
@@ -219,6 +228,8 @@ function workerRequestHeaders(
     "x-forwarded-host": host,
     "x-forwarded-proto": new URL(publicOrigin).protocol.slice(0, -1),
     "x-platform-workspace-id": authorized.workspace.id,
+    // Always overwrites any Browser-supplied value; the Worker only logs it.
+    [REQUEST_ID_HEADER]: requestId,
   });
 }
 
@@ -341,8 +352,13 @@ export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies
     WorkerTokenSchema.parse(token);
   }
   const server = createServer((request, response) => {
+    // The Workspace Gateway is the entry point, so it never trusts an incoming request ID.
+    const requestId = newRequestId();
+    const workspaceId = workspaceIdFromHost(request.headers.host, base);
+    if (dependencies.log !== undefined) {
+      observeWorkspaceHttp(dependencies.log, request, response, { requestId, workspaceId });
+    }
     void (async () => {
-      const workspaceId = workspaceIdFromHost(request.headers.host, base);
       if (workspaceId === null) {
         sendJsonError(response, 404, "WORKSPACE_NOT_FOUND", "Workspace was not found");
         return;
@@ -363,24 +379,31 @@ export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies
       const publicOrigin = workspaceOrigin(workspaceId, base);
       proxyHttpRequest(request, response, {
         target: authorized.workerGatewayBaseUrl,
-        requestHeaders: workerRequestHeaders(request, authorized, publicOrigin),
+        requestHeaders: workerRequestHeaders(request, authorized, publicOrigin, requestId),
         publicOrigin,
         onConnected: (disconnect) =>
           trackSessionConnection(dependencies, authorized, disconnect),
       });
-    })().catch(() => {
+    })().catch((error: unknown) => {
+      dependencies.log?.error({ err: error, requestId, workspaceId }, "workspace gateway request failed");
       sendJsonError(response, 503, "GATEWAY_UNAVAILABLE", "Workspace Gateway is unavailable");
     });
   });
   server.on("upgrade", (request, socket, head) => {
+    const requestId = newRequestId();
+    const workspaceId = workspaceIdFromHost(request.headers.host, base);
+    const observed = dependencies.log === undefined
+      ? undefined
+      : observeWorkspaceUpgrade(dependencies.log, request, socket, { requestId, workspaceId });
     void (async () => {
-      const workspaceId = workspaceIdFromHost(request.headers.host, base);
       if (workspaceId === null) {
+        observed?.rejected(404);
         rejectUpgrade(socket, 404, "Workspace was not found");
         return;
       }
       const expectedOrigin = workspaceOrigin(workspaceId, base);
       if (request.headers.origin !== expectedOrigin) {
+        observed?.rejected(403);
         rejectUpgrade(socket, 403, "WebSocket Origin is not allowed");
         return;
       }
@@ -390,16 +413,21 @@ export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies
         dependencies,
       );
       if (authorized === null) {
+        observed?.rejected(404);
         rejectUpgrade(socket, 404, "Workspace was not found or is unavailable");
         return;
       }
       proxyWebSocketUpgrade(request, socket, head, {
         target: authorized.workerGatewayBaseUrl,
-        requestHeaders: workerRequestHeaders(request, authorized, expectedOrigin),
-        onConnected: (disconnect) =>
-          trackSessionConnection(dependencies, authorized, disconnect),
+        requestHeaders: workerRequestHeaders(request, authorized, expectedOrigin, requestId),
+        onConnected: (disconnect) => {
+          observed?.connected();
+          return trackSessionConnection(dependencies, authorized, disconnect);
+        },
       });
-    })().catch(() => {
+    })().catch((error: unknown) => {
+      dependencies.log?.error({ err: error, requestId, workspaceId }, "workspace gateway upgrade failed");
+      observed?.rejected(503);
       rejectUpgrade(socket, 503, "Workspace Gateway is unavailable");
     });
   });

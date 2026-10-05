@@ -1,6 +1,6 @@
 # v1.0 Roadmap
 
-状态：已确认（2026-09-30）
+状态：已确认（2026-09-30）；Phase 13 已验收（2026-10-05，`v1.0.0-alpha.1`）
 基线：`v0.13.0`（`596e7f9`）
 
 本文定义 v0.13 之后到 v1.0 的差距、Phase 顺序、开发节奏和已确认决策。它只规定**范围、顺序和完成
@@ -54,7 +54,7 @@ v0.x 证明了主链可行：多用户、Workspace 隔离、多 Worker 调度、
 - Control Plane 与 Worker 启用结构化日志，统一 request ID，并对 Cookie、token、password、
   Authorization 头做 redaction。
 - 按领域拆分 `app.ts` 路由，repository 按领域重命名；纯重构，以现有测试全绿为准。
-- `mock_weaver.py` 移入测试夹具目录。
+- `mock_weaver.py` 移入 `tools/dev/`（开发用模拟 OAuth2 Provider，不进入部署产物）。
 - 修订 `AGENTS.md` / `specs.md` 中与 v1 冲突的描述（本次路线图确认时已完成主体）。
 
 ### Phase 14：Workspace 网络出口控制（G1，P0）
@@ -109,6 +109,9 @@ v0.x 证明了主链可行：多用户、Workspace 隔离、多 Worker 调度、
 - **空闲回收**（定义见第 4 节决策 D6）：默认关闭，管理员启用后按保守规则只停不删。
 - **Runtime 镜像升级**：Worker 可同时持有多个受支持镜像；Workspace 在停止状态下升级到新镜像（重建
   容器、保留持久目录），失败可回滚。
+- **首次真实升级演练**：pi-web 0.9.0 → 0.10.x、Pi 0.85.1 → 1.0.x（决策 D7）。需重写只适用于 0.9.0 的
+  default-cwd patch（0.10.0 的默认目录改为 `~/pi-cwd/<日期>`，且不再在该路由登记 Files 根目录），并在真实
+  容器中重新验证 Files、Terminal、Session 恢复、持久化，以及 Pi 1.0 新增的 MCP 与 project-trust 行为。
 - 修复 `enabled=false` 的 offline 不一致，提供 `worker:disable` 运维命令。
 
 ### Phase 19：生产部署与 v1.0 发布（G9）
@@ -131,6 +134,7 @@ v0.x 证明了主链可行：多用户、Workspace 隔离、多 Worker 调度、
 | D4 | 模型网关采用现成组件，平台只做集成。 |
 | D5 | **平台不提供备份功能**。备份由虚拟化平台、操作系统或专用备份软件针对挂载点完成；平台负责保持数据布局清晰、文档化，并保证在原路径恢复后 Worker reconciliation 能接管。 |
 | D6 | 空闲回收采用保守定义（见下），默认关闭。 |
+| D7 | pi-web / Pi 升级（含新模型目录）放在 Phase 18 与镜像升级机制一起做，不提前单独升级。在此之前，需要新模型时由用户在 `/agent/pi/models.json` 中按 Pi 0.85.1 的 Custom Models 机制追加模型定义。 |
 
 ### D6：空闲的定义
 

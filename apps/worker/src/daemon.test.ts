@@ -62,8 +62,8 @@ describe("worker daemon messages", () => {
         });
       });
       expect(log.warn).toHaveBeenCalledWith(
-        "Worker worker-01 could not verify the configured Runtime image",
-        error,
+        { workerId: "worker-01", err: error },
+        "could not verify the configured Runtime image",
       );
       expect(message).not.toHaveBeenCalled();
     } finally {

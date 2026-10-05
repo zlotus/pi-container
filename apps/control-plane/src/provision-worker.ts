@@ -1,12 +1,14 @@
 import { generateOpaqueToken, hashOpaqueToken } from "@agent-runtime/auth";
 import {
   createDatabaseClient,
-  createPhase4Repository,
+  createRepository,
   migrateDatabase,
 } from "@agent-runtime/database";
 import { parseHttpOrigin } from "@agent-runtime/gateway";
 import { WorkerIdSchema } from "@agent-runtime/protocol";
 import { z } from "zod";
+
+import { selectWorker } from "./scheduler.js";
 
 const InputSchema = z.object({
   DATABASE_URL: z.string().min(1),
@@ -25,7 +27,7 @@ const database = createDatabaseClient(input.DATABASE_URL);
 
 try {
   await migrateDatabase(database);
-  const repository = createPhase4Repository(database);
+  const repository = createRepository(database, selectWorker);
   if (input.action === "create") {
     if (input.WORKER_GATEWAY_BASE_URL === undefined) {
       throw new Error("WORKER_GATEWAY_BASE_URL is required when provisioning a Worker");

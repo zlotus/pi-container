@@ -10,6 +10,18 @@ on:
       - "runtime/**"
       - "package.json"
       - "pnpm-lock.yaml"
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/runtime-toolchain.yml"
+      - "apps/worker/**"
+      - "packages/protocol/**"
+      - "runtime/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+  schedule:
+    # Weekly native AMD64/ARM64 evidence even without Runtime changes.
+    - cron: "0 3 * * 1"
 
 permissions:
   contents: read
@@ -53,4 +65,6 @@ jobs:
         env:
           TEST_DOCKER_RUNTIME: "1"
           TEST_RUNTIME_IMAGE: agent-runtime:phase7-toolchain
-        run: pnpm --filter @agent-runtime/worker test
+        # Like a production Worker, the real-Docker tests must chown managed directories
+        # to the Runtime user (UID 1000), which the unprivileged runner user cannot do.
+        run: sudo -E env "PATH=$PATH" pnpm --filter @agent-runtime/worker test

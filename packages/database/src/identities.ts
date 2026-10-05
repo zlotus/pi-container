@@ -1,14 +1,21 @@
 import type { DatabaseClient } from "./index.js";
-import {
-  createPhase10Repository,
-  type UserIdentityRecord,
-} from "./phase10.js";
 import type {
   AuthenticationAuditMetadata,
   UserRole,
   UserStatus,
-} from "./phase1.js";
-import type { WorkerSelector } from "./phase5.js";
+} from "./records.js";
+
+export interface UserIdentityRecord {
+  id: string;
+  userId: string;
+  providerId: string;
+  providerSubject: string;
+  usernameSnapshot: string | null;
+  emailSnapshot: string | null;
+  displayNameSnapshot: string | null;
+  createdAt: Date;
+  lastLoginAt: Date | null;
+}
 
 export type BindExternalIdentityResult =
   | { outcome: "BOUND"; identity: UserIdentityRecord }
@@ -90,15 +97,8 @@ const IDENTITY_COLUMNS = `
   last_login_at
 `;
 
-export function createPhase11Repository(
-  database: DatabaseClient,
-  selectWorker: WorkerSelector,
-) {
-  const phase10 = createPhase10Repository(database, selectWorker);
-
+export function createIdentityRepository(database: DatabaseClient) {
   return {
-    ...phase10,
-
     async listUserIdentities(userId: string): Promise<UserIdentityRecord[] | null> {
       return database.begin(async (transaction) => {
         const users = await transaction<{ id: string }[]>`
@@ -396,5 +396,3 @@ export function createPhase11Repository(
     },
   };
 }
-
-export type Phase11Repository = ReturnType<typeof createPhase11Repository>;

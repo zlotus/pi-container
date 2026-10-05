@@ -25,81 +25,48 @@ export async function checkDatabase(client: DatabaseClient): Promise<void> {
 }
 
 export { migrateDatabase } from "./migrate.js";
+export { createRepository, type Repository } from "./repository.js";
 export {
-  createPhase1Repository,
+  AUDIT_EVENT_CATEGORIES,
+  type AuditEventCategory,
+  type AuditEventFilter,
+  type AuthenticationFailureCategory,
+  type PlatformAuditEvent,
+} from "./audit.js";
+export {
+  type BindExternalIdentityResult,
+  type CompleteExternalLoginResult,
+  type UnbindExternalIdentityResult,
+  type UserIdentityRecord,
+} from "./identities.js";
+export {
   type AuthenticatedSessionRecord,
   type AuthenticationAuditMetadata,
   type AuthenticationProtocol,
-  type Phase1Repository,
   type UserRecord,
   type UserRole,
   type UserStatus,
   type WorkspaceRecord,
-} from "./phase1.js";
+} from "./records.js";
+export { type WorkspaceRecoveryRecord } from "./recovery.js";
 export {
-  createPhase2Repository,
-  type Phase2Repository,
-  type WorkerIdentity,
-  type WorkerRecord,
-  type WorkerStatus,
-} from "./phase2.js";
-export {
-  createPhase3Repository,
-  type Phase3Repository,
-} from "./phase3.js";
-export {
-  createPhase4Repository,
-  type Phase4Repository,
-  type WorkerGatewayRoute,
-} from "./phase4.js";
-export {
-  createPhase5Repository,
-  type Phase5Repository,
   type ScheduleWorkspaceStartResult,
   type SetWorkerSchedulableResult,
-  type WorkerSchedulingAuditMetadata,
   type WorkerPlacementRecord,
   type WorkerScheduleCandidate,
+  type WorkerSchedulingAuditMetadata,
   type WorkerSelectionInput,
   type WorkerSelector,
   type WorkspaceSchedulingRequirements,
-} from "./phase5.js";
+} from "./scheduling.js";
 export {
-  createPhase6Repository,
-  type Phase6Repository,
-  type WorkspaceRecoveryRecord,
-} from "./phase6.js";
-export {
-  AUDIT_EVENT_CATEGORIES,
-  createPhase8Repository,
-  type AuditEventCategory,
-  type AuditEventFilter,
-  type Phase8Repository,
-  type PlatformAuditEvent,
-} from "./phase8.js";
-export {
-  createPhase9Repository,
   type AdminUserRecord,
-  type AdminWorkspaceRecord,
-  type Phase9Repository,
   type UpdateManagedUserResult,
-} from "./phase9.js";
+} from "./users.js";
 export {
-  createPhase10Repository,
-  type BindUserIdentityResult,
-  type CompleteOidcLoginResult,
-  type Phase10Repository,
-  type UserIdentityRecord,
-} from "./phase10.js";
-export {
-  createPhase11Repository,
-  type BindExternalIdentityResult,
-  type CompleteExternalLoginResult,
-  type Phase11Repository,
-  type UnbindExternalIdentityResult,
-} from "./phase11.js";
-export {
-  createPhase12Repository,
-  type AuthenticationFailureCategory,
-  type Phase12Repository,
-} from "./phase12.js";
+  type WorkerGatewayRoute,
+  type WorkerIdentity,
+  type WorkerRecord,
+  type WorkerStatus,
+} from "./workers.js";
+export { type AdminWorkspaceRecord } from "./workspaces.js";

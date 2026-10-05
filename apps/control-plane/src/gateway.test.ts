@@ -2,8 +2,10 @@ import { once } from "node:events";
 import { createServer, request as httpRequest } from "node:http";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { Writable } from "node:stream";
 
 import { hashOpaqueToken } from "@agent-runtime/auth";
+import { createJsonLogger } from "@agent-runtime/logging";
 import type {
   AuthenticatedSessionRecord,
   WorkspaceRecord,
@@ -773,5 +775,105 @@ describe("authenticated Workspace Gateway", () => {
 
     expect(sessionLookups).toBe(2);
     wss.close();
+  });
+});
+
+describe("Workspace Gateway logging", () => {
+  it("logs one whitelisted line per request and forwards its own request ID", async () => {
+    const lines: string[] = [];
+    const log = createJsonLogger(
+      "control-plane",
+      { LOG_LEVEL: "info", LOG_FORMAT: "json" },
+      new Writable({
+        write(chunk, _encoding, callback) {
+          lines.push(String(chunk));
+          callback();
+        },
+      }),
+    );
+    let forwardedRequestId: unknown;
+    const upstream = createServer((request, response) => {
+      forwardedRequestId = request.headers["x-platform-request-id"];
+      response.end("ok");
+    });
+    const upstreamPort = await listen(upstream);
+    const exchanges = new WorkspaceSessionExchange(60_000);
+    const active = new Map([[hashOpaqueToken(SESSION_A), session(USER_A_ID)]]);
+    const gateway = buildWorkspaceGateway({
+      store: {
+        async findActiveSession(tokenHash) {
+          return active.get(tokenHash) ?? null;
+        },
+        async findOwnedWorkspace(id, userId) {
+          return id === WORKSPACE_ID && userId === USER_A_ID ? workspace() : null;
+        },
+        async findWorkerGatewayRoute() {
+          return { workerId: WORKER_ID, gatewayBaseUrl: `http://127.0.0.1:${upstreamPort}` };
+        },
+      },
+      exchanges,
+      portalOrigin: "http://portal.test",
+      workspaceBaseUrl: "http://agent.test",
+      secureCookies: false,
+      sessionTtlMs: 60_000,
+      workerOfflineAfterMs: 35_000,
+      workerGatewayTokens: { [WORKER_ID]: GATEWAY_TOKEN },
+      now: () => NOW,
+      log,
+    });
+    const port = await listen(gateway);
+    const code = exchanges.issue({
+      rawSessionToken: SESSION_A,
+      userId: USER_A_ID,
+      workspaceId: WORKSPACE_ID,
+      now: NOW,
+    });
+    const body = new URLSearchParams({ code }).toString();
+    const exchanged = await request({
+      port,
+      method: "POST",
+      path: "/_platform/session",
+      headers: {
+        host: PUBLIC_HOST,
+        origin: "http://portal.test",
+        "content-type": "application/x-www-form-urlencoded",
+        "content-length": String(Buffer.byteLength(body)),
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+      },
+      body,
+    });
+    expect(exchanged.statusCode).toBe(200);
+    const spoofedRequestId = "00000000-0000-4000-8000-000000000000";
+    const proxied = await request({
+      port,
+      path: "/api/files/secret-report-name.pdf?token=query-secret-value",
+      headers: {
+        host: PUBLIC_HOST,
+        cookie: `platform-session=${SESSION_A}`,
+        "x-platform-request-id": spoofedRequestId,
+      },
+    });
+    expect(proxied.statusCode).toBe(200);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const output = lines.join("");
+    for (const secret of [SESSION_A, code, GATEWAY_TOKEN, "secret-report-name", "query-secret-value"]) {
+      expect(output).not.toContain(secret);
+    }
+    const records = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    const proxiedLog = records.find(
+      (record) => record.msg === "workspace request" && record.path === "/api",
+    );
+    expect(proxiedLog).toMatchObject({
+      workspaceId: WORKSPACE_ID,
+      method: "GET",
+      statusCode: 200,
+      completed: true,
+    });
+    expect(forwardedRequestId).toBe(proxiedLog?.requestId);
+    expect(forwardedRequestId).not.toBe(spoofedRequestId);
+    expect(records.some((record) => record.path === "/_platform")).toBe(true);
   });
 });

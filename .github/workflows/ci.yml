@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Quality gate (linux/arm64)
+    # ARM64 is the primary v1.0 verification architecture.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_DB: agent_runtime_test
+          POSTGRES_USER: agent_runtime
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agent_runtime -d agent_runtime_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Enables the real PostgreSQL integration tests; CI-only credentials.
+      TEST_DATABASE_URL: postgres://agent_runtime:ci-only-password@127.0.0.1:5432/agent_runtime_test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.20.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm test:e2e
+      - run: pnpm build:web
