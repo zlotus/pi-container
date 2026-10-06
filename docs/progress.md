@@ -17,7 +17,7 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
 
 ## Current Baseline
 
-- Phase 15（已实现，待人工验收，分支 `phase-15-resource-auth-guard`）：资源与认证防护。
+- Phase 15（已验收，`v1.0.0-alpha.3`）：资源与认证防护。
   **磁盘配额**：`WORKER_MANAGED_ROOT` 必须是以 `prjquota` 挂载的独立 XFS；每个 Workspace 一个 data project
   （`/workspace`、`/home/agent`、`/tmp`，默认 20 GiB，admin 可按 Workspace 即时调整）与一个 Pi 状态 project
   （2 GiB）。Worker 以 `CAP_SYS_ADMIN` 经固定 argv 调用 `xfs_quota`，创建/启动前设置并经 `statfs` 读回；无法确认

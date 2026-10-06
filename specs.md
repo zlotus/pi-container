@@ -3829,7 +3829,7 @@ Clash Verge 与 Tailscale 是负责人开发设备上的工具，与业务无关
 
 ## Phase 15：资源与认证防护
 
-状态：**已实现，待人工验收**（设计确认 2026-10-06），分支 `phase-15-resource-auth-guard`；运维见 `docs/storage-runbook.md` 与 `docs/authentication-runbook.md`。方向见 `docs/v1-roadmap.md` Phase 15（G2、G3）。
+状态：**已验收（2026-10-06）**，经 PR #3 合入 master，tag `v1.0.0-alpha.3`；运维见 `docs/storage-runbook.md` 与 `docs/authentication-runbook.md`。方向见 `docs/v1-roadmap.md` Phase 15（G2、G3）。
 
 目标：单个 Workspace 不能写满 Worker 磁盘、耗尽宿主机文件句柄或用日志撑满 Docker 目录；超限只影响该
 Workspace 自身；Portal 能看到已用/上限。本地登录与 SSO 入口能抵御暴力破解，失败与锁定可审计，Local Admin
