@@ -124,7 +124,8 @@ lsattr -pd /var/lib/agent-runtime/workspaces/<id>/workspace
 docker exec agent-runtime-<id> df -h /workspace /agent/pi
 ```
 
-- Workspace 写满：用户在 Terminal 删除文件即可恢复；或管理员在“全部 Workspace”页调高上限（立即生效，不需要
+- Workspace 写满：容器内写入报 “No space left on device”（XFS project quota 用 `ENOSPC`，不是
+  “Disk quota exceeded”），`df -h /workspace` 显示 100%。用户在 Terminal 删除文件即可恢复；或管理员在“全部 Workspace”页调高上限（立即生效，不需要
   重启）。上限调到低于当前用量时，写入会立即失败。
 - Portal 显示的用量由 Worker 每 60 秒采样一次，可能比 `df` 晚约一分钟。
 - inotify：实例数与监视数按宿主机 UID 计数，所有 Workspace 共用 UID 1000，本 Phase 不隔离。建议在 Worker
@@ -150,7 +151,7 @@ docker exec agent-runtime-<id> df -h /workspace /agent/pi
 
 ## 8. 真实内核测试
 
-`pnpm test:quota` 在 `TEST_XFS_ROOT` 指向的 `prjquota` XFS 挂载上验证：超额返回 `EDQUOT`、Pi project 独立、
+`pnpm test:quota` 在 `TEST_XFS_ROOT` 指向的 `prjquota` XFS 挂载上验证：超额写入失败（XFS project quota 报 `ENOSPC`）、Pi project 独立、
 inode 上限、继承、跨 project 的 rename/硬链接被拒、符号链接不被跟随、即时调整与释放、非挂载点判定为未生效。
 需要 root；CI 在 loop 设备上运行。本地可在开发 XFS 上建一个测试挂载：
 

@@ -3933,7 +3933,7 @@ ${WORKER_MANAGED_ROOT}/workspaces/<id>/
 ```
 
 - data 与 pi 分开：用户写满 `/workspace` 时，Pi Session 的 JSONL 追加、settings 写入仍然成功，用户仍能在
-  pi-web 中对话、用 Terminal 清理文件，避免 Pi Session 因 `EDQUOT` 写坏（Workspace state 与 Pi Session
+  pi-web 中对话、用 Terminal 清理文件，避免 Pi Session 因配额写满而写坏（Workspace state 与 Pi Session
   state 分离的不变量在磁盘层面的体现）。
 - 设置方式：对上述 4 个目录设置 project ID 与 `PROJINHERIT` 标志（其下新建的文件/目录自动继承），对 project
   设置 `bhard`（字节）与 `ihard`（inode）。`bsoft`/`isoft` 为 0（不使用软限制）。跨 project 的 `rename` 由
@@ -4035,8 +4035,8 @@ ${WORKER_MANAGED_ROOT}/workspaces/<id>/
   的 used/limit bytes 与 inodes，随下一次心跳上报（15.8）。
 - **存量 Workspace 的配额初始化**：元数据中没有 `quota` 的 Workspace（本 Phase 之前创建），在下一次
   ensure/start 时由 Worker 分配 project，对现有目录**递归**设置 project ID（存量文件计入新 project）并设置
-  上限。现有数据已超出上限时仍允许启动（实现时调整：拒绝启动会让用户无法登录清理），超出部分的写入返回
-  `EDQUOT`，用户删除文件或 admin 调高上限后恢复。
+  上限。现有数据已超出上限时仍允许启动（实现时调整：拒绝启动会让用户无法登录清理），超出部分的写入失败
+  （XFS project quota 报 `ENOSPC`，CI 真实内核测试确认），用户删除文件或 admin 调高上限后恢复。
 - **存量容器**（`Binds`、无 home/tmp 挂载、可写根的旧容器，15.12 Q6，方案 B）：
   - Worker **不自动迁移**。ensure/start 遇到旧格式容器时不启动，返回 `STORAGE_MIGRATION_REQUIRED`；
     inspect/stop/delete 照常可用。reconciliation 发现**运行中**的旧容器时按 14.11 Q4 处置（停止并置
@@ -4209,7 +4209,7 @@ API 与 Portal：
 1GiB 稀疏文件 → `mkfs.xfs` → loop 以 `prjquota` 挂载后运行；本地由负责人在开发 XFS 上以
 `run-worker-privileged.sh` 同样的能力运行。断言：
 
-- 写入超过 data 上限返回 `EDQUOT`，pi project 仍可写；inode 上限生效；新建子目录与文件继承 project；
+- 写入超过 data 上限失败（`ENOSPC`），pi project 仍可写；inode 上限生效；新建子目录与文件继承 project；
   跨 project `rename` 为 `EXDEV`、硬链接被拒绝；`statfs` 返回 project 上限与用量；调整上限即时生效；删除后
   用量归零、上限清零。
 - 状态检测：同一文件系统以无 `prjquota` 挂载、ext4、根文件系统子目录三种情况均判定 `enforced=false`。
@@ -4241,7 +4241,7 @@ API 与 Portal：
    执行 `migrate-legacy-workspace.sh <id>` 后启动成功，home 标记文件、`/workspace` 文件与 Pi Session 完整，
    `df -h /home/agent` 显示配额且已用量包含迁移的 home；`/tmp` 旧内容不存在。
 3. 将某 Workspace 上限调为 2GiB：在 Terminal 中 `df -h /workspace` 显示 2G；`fallocate`/`dd` 写超过上限得到
-   “Disk quota exceeded”；同一 Worker 上另一 Workspace 写入正常；写满状态下 pi-web 仍能对话、Session 继续保存，
+   “No space left on device”（XFS project quota 的 `ENOSPC`）；同一 Worker 上另一 Workspace 写入正常；写满状态下 pi-web 仍能对话、Session 继续保存，
    在 Terminal 删除文件后恢复；Portal 进度条与 `df` 一致（采样延迟 ≤ 70 秒）。
 4. `touch /usr/local/x`、`rustup target add …` 失败为只读；`ulimit -n` = 65536；`cargo build`（含依赖）、
    `pnpm install`、`uv pip install`、Playwright 截图正常；`docker inspect` 显示日志 `max-size`。

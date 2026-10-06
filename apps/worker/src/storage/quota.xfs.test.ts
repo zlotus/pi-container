@@ -13,6 +13,9 @@ const xfsRoot = process.env.TEST_XFS_ROOT;
 const describeWithXfs = xfsRoot === undefined ? describe.skip : describe;
 
 const MIB = 1024 ** 2;
+// XFS reports an exhausted project quota as ENOSPC ("No space left on device"),
+// unlike user/group quotas (EDQUOT); accept either so the test states the limit.
+const QUOTA_EXHAUSTED = ["ENOSPC", "EDQUOT"];
 
 async function writeBytes(path: string, bytes: number): Promise<void> {
   await writeFile(path, Buffer.alloc(bytes, 1));
@@ -87,11 +90,20 @@ describeWithXfs("XFS project quotas on a real kernel", () => {
 
     await writeBytes(join(directories.home, "a"), 6 * MIB);
     await writeBytes(join(directories.tmp, "b"), 6 * MIB);
-    expect(await errorCode(writeBytes(join(directories.workspace, "c"), 6 * MIB))).toBe("EDQUOT");
+    expect(QUOTA_EXHAUSTED).toContain(await errorCode(writeBytes(join(directories.workspace, "c"), 6 * MIB)));
     // A full data project leaves the Pi state writable.
     await writeBytes(join(directories.pi, "session.jsonl"), 1 * MIB);
     expect(await readFile(join(directories.pi, "session.jsonl"))).toHaveLength(MIB);
-    expect(await errorCode(writeBytes(join(directories.pi, "big"), 9 * MIB))).toBe("EDQUOT");
+    expect(QUOTA_EXHAUSTED).toContain(await errorCode(writeBytes(join(directories.pi, "big"), 9 * MIB)));
+    // Free the projects for the next tests.
+    for (const path of [
+      join(directories.home, "a"),
+      join(directories.tmp, "b"),
+      join(directories.workspace, "c"),
+      join(directories.pi, "big"),
+    ]) {
+      await rm(path, { force: true });
+    }
   });
 
   it("passes the project to new directories and refuses moves across projects", async () => {
@@ -114,7 +126,7 @@ describeWithXfs("XFS project quotas on a real kernel", () => {
     for (let index = 0; index < 150 && failure === undefined; index += 1) {
       failure = await errorCode(writeFile(join(many, String(index)), ""));
     }
-    expect(failure).toBe("EDQUOT");
+    expect(QUOTA_EXHAUSTED).toContain(failure);
     await rm(many, { recursive: true, force: true });
   });
 
