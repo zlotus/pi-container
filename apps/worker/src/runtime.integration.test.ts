@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -472,6 +472,16 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
       Config: { "max-size": "10m", "max-file": "3" },
     });
     expect(inspection.HostConfig.Binds ?? []).toEqual([]);
+
+    // A missing bind source (e.g. the quota filesystem is not mounted) fails the start
+    // instead of Docker creating an empty directory on the root filesystem.
+    await runtime.stop(limitsWorkspaceId);
+    const home = join(managedRoot, "workspaces", limitsWorkspaceId, "home");
+    await rename(home, `${home}.away`);
+    await expect(runtime.start(limitsWorkspaceId)).rejects.toThrow();
+    expect(existsSync(home)).toBe(false);
+    await rename(`${home}.away`, home);
+    await runtime.start(limitsWorkspaceId);
 
     // /tmp starts empty on the next Worker-initiated start.
     expect(await run("echo old > /tmp/left-over")).toBe(0);

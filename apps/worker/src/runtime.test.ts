@@ -1182,6 +1182,17 @@ describe("Docker Workspace Runtime disk quotas and container limits (Phase 15)",
     >({ code: "RUNTIME_NOT_READY" });
   });
 
+  it("closes the Gateway path while quotas are not enforced", async () => {
+    const { config, runtime, storage } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    await runtime.start(WORKSPACE_ID);
+    await expect(runtime.gatewayTarget(WORKSPACE_ID)).resolves.toBeInstanceOf(URL);
+    storage.enforced = false;
+    await expect(runtime.gatewayTarget(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "STORAGE_QUOTA_UNENFORCED" });
+  });
+
   it("changes a disk limit in place and samples usage only under enforced quotas", async () => {
     const { root, config, runtime, storage } = await fixture();
     const unprepared = "90b38efc-aa9a-4bc6-8eee-528b4e0c7c63";
