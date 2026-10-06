@@ -3829,7 +3829,7 @@ Clash Verge 与 Tailscale 是负责人开发设备上的工具，与业务无关
 
 ## Phase 15：资源与认证防护
 
-状态：**设计已确认（2026-10-06）**，在 `phase-15-resource-auth-guard` 分支开发。方向见 `docs/v1-roadmap.md` Phase 15（G2、G3）。
+状态：**已实现，待人工验收**（设计确认 2026-10-06），分支 `phase-15-resource-auth-guard`；运维见 `docs/storage-runbook.md` 与 `docs/authentication-runbook.md`。方向见 `docs/v1-roadmap.md` Phase 15（G2、G3）。
 
 目标：单个 Workspace 不能写满 Worker 磁盘、耗尽宿主机文件句柄或用日志撑满 Docker 目录；超限只影响该
 Workspace 自身；Portal 能看到已用/上限。本地登录与 SSO 入口能抵御暴力破解，失败与锁定可审计，Local Admin
@@ -3949,7 +3949,7 @@ ${WORKER_MANAGED_ROOT}/workspaces/<id>/
   `spawn("/usr/sbin/xfs_quota", ["-x", "-c", <命令>, <挂载点>])` 执行（无 shell；命令字符串只由校验后的
   整数 ID、整数字节数与 Worker 自身构造的受管路径拼成，路径先 `realpath` 并确认位于挂载点内、不是符号链接）。
   理由同 14.4：docker 组已等价于 root，不扩大 Worker 的实际权限面。生产 systemd unit 改为
-  `AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN`；开发脚本 `tools/dev/run-worker-with-egress.sh` 改名为
+  `AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN`；开发脚本 `tools/dev/run-worker-with-egress.sh` 已改名为
   `run-worker-privileged.sh` 并增加 `+sys_admin`（15.12 Q2）。
 - **删除**：`workspace.delete` 删除目录后，把两个 project 的上限清零（`limit -p bhard=0 ihard=0`），ID 可复用。
 - **超分**：所有 Workspace 上限之和可以超过文件系统容量（与当前按 assignment 计数的 capacity 一致，不预留
@@ -4035,7 +4035,8 @@ ${WORKER_MANAGED_ROOT}/workspaces/<id>/
   的 used/limit bytes 与 inodes，随下一次心跳上报（15.8）。
 - **存量 Workspace 的配额初始化**：元数据中没有 `quota` 的 Workspace（本 Phase 之前创建），在下一次
   ensure/start 时由 Worker 分配 project，对现有目录**递归**设置 project ID（存量文件计入新 project）并设置
-  上限；若现有数据已超出上限则返回 `STORAGE_LIMIT_EXCEEDED`，Workspace 保持 `STOPPED`，admin 调高上限后重试。
+  上限。现有数据已超出上限时仍允许启动（实现时调整：拒绝启动会让用户无法登录清理），超出部分的写入返回
+  `EDQUOT`，用户删除文件或 admin 调高上限后恢复。
 - **存量容器**（`Binds`、无 home/tmp 挂载、可写根的旧容器，15.12 Q6，方案 B）：
   - Worker **不自动迁移**。ensure/start 遇到旧格式容器时不启动，返回 `STORAGE_MIGRATION_REQUIRED`；
     inspect/stop/delete 照常可用。reconciliation 发现**运行中**的旧容器时按 14.11 Q4 处置（停止并置
@@ -4060,7 +4061,7 @@ migration `0011_storage_and_login_guard`（与 15.9 共用一个 migration）：
 
 ```text
 workspaces
-  + disk_limit_bytes     bigint not null          -- 创建时取 WORKSPACE_DISK_LIMIT_BYTES；存量行以当前默认值回填
+  + disk_limit_bytes     bigint not null          -- 创建时取 WORKSPACE_DISK_LIMIT_BYTES；存量行回填 20GiB（列默认值）
   + disk_used_bytes      bigint null              -- data project，Worker 上报
   + disk_used_inodes     bigint null
   + pi_used_bytes        bigint null              -- pi project
@@ -4102,7 +4103,7 @@ Portal：
   管理员”），以及采样时间；Pi 状态用量只在详情中显示。
 - Admin Workspaces 页面可调整上限；Admin Workers 页面增加“磁盘配额”状态列与“容量 / 已分配上限”。
 - 中文错误说明：`STORAGE_QUOTA_UNENFORCED`（“Worker 磁盘配额未生效，暂时无法启动”）、
-  `STORAGE_LIMIT_EXCEEDED`（“现有数据已超过磁盘上限，请联系管理员调高上限”）、`STORAGE_MIGRATION_REQUIRED`（“该 Workspace 需要管理员完成存储迁移后才能启动”）。
+  `STORAGE_MIGRATION_REQUIRED`（“该 Workspace 需要管理员完成存储迁移后才能启动”）。
 
 ### 15.8 Worker Protocol
 
@@ -4116,7 +4117,7 @@ Portal：
 - `workspace.ensure` payload 增加 `storage: { diskLimitBytes }`（整数，1GiB ≤ x ≤ 2^50）。
 - 新命令 `workspace.storage.set`：`{ workspaceId, diskLimitBytes }`，Worker 校验元数据与 label 后设置并读回，
   返回 `{ dataLimitBytes, dataUsedBytes }`；Workspace 目录不存在时返回 `WORKSPACE_NOT_FOUND`。
-- 新错误码：`STORAGE_QUOTA_UNENFORCED`、`STORAGE_LIMIT_EXCEEDED`、`STORAGE_MIGRATION_REQUIRED`、
+- 新错误码：`STORAGE_QUOTA_UNENFORCED`、`STORAGE_MIGRATION_REQUIRED`、
   `STORAGE_QUOTA_APPLY_FAILED`（retryable）。
 
 ### 15.9 登录防护
@@ -4134,7 +4135,7 @@ Portal：
 | 账户+IP | HMAC(规范化 login) + 客户端 IP | 本地登录失败 | 15 分钟内 5 次 → 锁 15 分钟 |
 | IP | 客户端 IP | 本地登录失败（含格式错误）+ SSO callback 失败 | 15 分钟内 20 次 → 锁 15 分钟 |
 | 账户 | HMAC(规范化 login) | 本地登录失败（全部来源） | 1 小时内 50 次 → 锁 1 小时，**来自 `AUTH_TRUSTED_NETWORKS` 的请求不受此项限制** |
-| SSO 发起 | 客户端 IP | `/auth/{oidc,oauth2}/login` 请求数 | 10 分钟内 30 次 → 429 直至窗口结束 |
+| SSO 发起 | 客户端 IP | `/auth/{oidc,oauth2}/login` 请求数 | 10 分钟内 30 次 → 锁 10 分钟 |
 
 - login 先做 trim + 小写规范化，再以 `SESSION_SECRET` 派生的独立 key 做 HMAC-SHA256；数据库**不保存明文
   login**（用户可能把密码误填进用户名栏）。不存在的 login 与存在的 login 走完全相同的计数和响应，不泄露
@@ -4148,7 +4149,7 @@ Portal：
   1. 攻击者从外部只能触发“账户+IP”与“IP”锁定，它们不影响管理员从其他地址登录；
   2. 分布式攻击触发的“账户”锁定对 `AUTH_TRUSTED_NETWORKS`（默认 `127.0.0.1/32,::1/128`，生产配置为管理网段）
      不生效，管理员从管理网络仍可用正确密码登录；
-  3. 新增 CLI `pnpm auth:unlock -- --login <login> | --ip <ip> | --all`，直接作用于数据库（能登录 Control
+  3. 新增 CLI `pnpm auth:unlock login <login> | ip <address> | all`，直接作用于数据库（能登录 Control
      Plane 宿主机即为 break-glass），记 Audit `auth.lock_cleared`（actor 为空、`details.source=cli`）。
 - **SSO**：IP 被锁定时 `/auth/*/login` 与 `/auth/*/callback` 返回 429，且 callback 不消费
   transaction；callback 失败计入 IP 计数；不对 SSO 做账户维度锁定（账户由 IdP 认证）。SSO 发起限速让单个来源
@@ -4163,7 +4164,7 @@ Portal：
 auth_throttle
   id            uuid primary key (server generated)
   scope         text not null check (scope in ('login_ip', 'ip', 'login', 'sso_start'))
-  key_hash      bytea not null                    -- HMAC(login) 或 HMAC(login)||ip 的摘要；ip 维度为 HMAC(ip)
+  key_hash      text not null                     -- 64 位十六进制 HMAC-SHA256：账户、账户|IP、IP 或 SSO 发起地址
   ip_address    inet null                         -- 仅 login_ip / ip / sso_start，供 admin 查看
   user_id       uuid null references users(id) on delete cascade   -- login 对应现有本地用户时填写，供 admin 查看
   window_start  timestamptz not null
@@ -4249,7 +4250,7 @@ API 与 Portal：
    设备（不同 IP）用正确密码可以登录；对不存在的账户同样输错 5 次，表现完全一致；Audit 有 `auth.login_locked`，
    其中无 login 明文。
 7. break-glass：用脚本从非可信地址对 Local Admin 触发账户维度锁定后，从可信网络（Control Plane 宿主机本地）
-   用正确密码登录成功；`pnpm auth:unlock -- --login <admin>` 与 Admin 页面“解除”均可解锁并记 Audit。
+   用正确密码登录成功；`pnpm auth:unlock login <admin>` 与 Admin 页面“解除”均可解锁并记 Audit。
 8. SSO：短时间内反复打开 `/auth/oidc/login` 超过阈值后返回 429；正常用户从其他 IP 的 OIDC 登录不受影响。
 9. 伪造 `X-Forwarded-For` 直接访问 Control Plane 端口：限速仍按真实对端地址计数。
 10. 重启 Worker 宿主机：XFS 先于 Docker 挂载，`unless-stopped` 拉起的容器配额生效；卸载 XFS 的情况下容器
