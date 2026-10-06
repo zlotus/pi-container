@@ -175,7 +175,6 @@ export class WorkspaceRuntimeError extends Error {
       | "EGRESS_NETWORK_LEGACY"
       | "STORAGE_QUOTA_UNENFORCED"
       | "STORAGE_QUOTA_APPLY_FAILED"
-      | "STORAGE_LIMIT_EXCEEDED"
       | "STORAGE_MIGRATION_REQUIRED",
     message: string,
     readonly retryable = false,

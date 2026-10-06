@@ -48,7 +48,6 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   AUTH_LOCK_NOT_FOUND: "该锁定不存在或已到期",
   STORAGE_QUOTA_UNENFORCED: "Worker 磁盘配额未生效，暂时无法启动",
   STORAGE_QUOTA_APPLY_FAILED: "Workspace 磁盘配额设置失败，请稍后重试",
-  STORAGE_LIMIT_EXCEEDED: "现有数据已超过磁盘上限，请联系管理员调高上限",
   STORAGE_MIGRATION_REQUIRED: "该 Workspace 创建于磁盘配额启用之前，需要管理员完成存储迁移后才能启动",
   DISK_LIMIT_OUT_OF_RANGE: "磁盘上限超出允许范围",
 };

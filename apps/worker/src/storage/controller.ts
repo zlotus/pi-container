@@ -31,8 +31,7 @@ export class StorageQuotaError extends Error {
   constructor(
     readonly code:
       | "STORAGE_QUOTA_UNENFORCED"
-      | "STORAGE_QUOTA_APPLY_FAILED"
-      | "STORAGE_LIMIT_EXCEEDED",
+      | "STORAGE_QUOTA_APPLY_FAILED",
     message: string,
     readonly retryable = false,
   ) {
