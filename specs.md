@@ -3829,13 +3829,470 @@ Clash Verge 与 Tailscale 是负责人开发设备上的工具，与业务无关
 
 ## Phase 15：资源与认证防护
 
-状态：待开工设计。
+状态：**设计已确认（2026-10-06）**，在 `phase-15-resource-auth-guard` 分支开发。方向见 `docs/v1-roadmap.md` Phase 15（G2、G3）。
 
-- 每 Workspace 磁盘硬上限（机制按 ARM64 设备实际文件系统确定），可写层与 `/tmp` 受限，Portal 显示用量。
-- 本地登录与 SSO 回调按账户和来源 IP 限速，连续失败临时锁定并记 Audit；Local Admin break-glass 不能
-  被锁死。
-- 验收要点：写满配额只影响该 Workspace；暴力登录被限速并可审计；break-glass 可用。
-- 完成后开始小范围内部试点。
+目标：单个 Workspace 不能写满 Worker 磁盘、耗尽宿主机文件句柄或用日志撑满 Docker 目录；超限只影响该
+Workspace 自身；Portal 能看到已用/上限。本地登录与 SSO 入口能抵御暴力破解，失败与锁定可审计，Local Admin
+break-glass 不会被外部攻击者锁死。无法确认配额生效时 fail-closed。
+
+### 15.1 开工环境核查（Q8B，2026-10-06，只读）
+
+磁盘与存储：
+
+| 项 | 结果 | 对设计的影响 |
+|---|---|---|
+| `WORKER_MANAGED_ROOT` | `/var/lib/agent-runtime` 位于根文件系统 `/dev/nvme0n1p3`（ext4，938G，已用 9%），挂载选项 `rw,relatime`，**无 `prjquota`/`usrquota`** | 当前无法做任何目录级配额 |
+| 根分区布局 | nvme 只有 `p1`（vfat 16M）、`p2`（ESP 1G）、`p3`（ext4 952.8G，根）三个分区，**无未分配空间、无 LVM** | 不能为数据目录新建分区或 LV；开发设备只能用 loop 镜像承载独立文件系统（15.3） |
+| ext4 project quota | 负责人 `dumpe2fs -h` 确认：features 中**没有 `project` 与 `quota`**，inode size 256；启用需要 `tune2fs` 且文件系统**未挂载**（根分区需离线维护） | 不在根分区上启用 |
+| 内核 | `CONFIG_QUOTA=y`、`CONFIG_QUOTACTL=y`、`CONFIG_XFS_FS=m`（`xfs.ko.zst` 存在）、`CONFIG_XFS_QUOTA=y`、`CONFIG_BLK_DEV_LOOP=m`、`CONFIG_TMPFS_QUOTA=y`、`CONFIG_DM_THIN_PROVISIONING=m` | XFS project quota 在本机内核可用 |
+| 用户态工具 | `xfsprogs`（`mkfs.xfs`、`xfs_quota`）与 `quota` **未安装**（apt 候选 xfsprogs 6.18.0-3）；`losetup`、`chattr/lsattr`、`tune2fs`、`mkfs.btrfs` 已有 | 开发设备需安装 xfsprogs |
+| Docker 存储 | Docker 29.8.1，`Driver: overlayfs`，`driver-type: io.containerd.snapshotter.v1`（**containerd image store**），data-root `/var/lib/docker`，快照位于 `/var/lib/containerd/…`，均在根 ext4 上；无 `daemon.json` | `--storage-opt size=` 依赖 overlay2 graph driver + XFS `pquota` 的 data-root，本机两项都不满足。负责人实测 `docker create --storage-opt size=1G …` **被接受且未报错**；底层 ext4 无 project quota，限制无从执行，推断为静默忽略——不能依赖它，也说明“参数被接受”不等于“限制生效” |
+| 容器日志 | log driver `json-file`，`LogConfig.Config` 为空（**无大小上限**），位于 `/var/lib/docker/containers/<id>/` | Workspace 的 stdout/stderr 可无限占用根分区 |
+| 宿主机 `/tmp` | tmpfs（`usrquota`），与容器无关 | — |
+| swap | zram 7.5G；Workspace `MemorySwap` = 8GiB（2×Memory） | tmpfs 页可被换出，tmpfs 不是“纯内存”上限 |
+
+运行中 Workspace（`ebd9d4cb…`）实测：
+
+| 项 | 结果 |
+|---|---|
+| 挂载 | 只有 `/workspace`、`/agent/pi` 两个 `Binds`（宿主机目录，无配额）；`/`、`/tmp` 都在容器可写层（overlay upper 位于 `/var/lib/containerd/…`）；`/dev/shm` 64M tmpfs |
+| 可写层大小 | `docker ps -s` = **1.34GB**：`/home/agent` 990M（其中 `.npm` 944M，另有用户安装到 `~/.claude/skills` 的内容）、`/tmp` 289M（用户 git clone 的仓库等） |
+| agent 用户在根文件系统中可写的位置 | `/home/agent`、`/tmp`、`/var/tmp`、`/run/lock`（`/var/lock`）、`/usr/local/rustup/**` 与 `/usr/local/cargo/bin`（上游 rust 镜像 `chmod a+w`）；`/usr/local/cargo` 本身为 root 755，**推断** `cargo` 无法创建 `registry/`（实现时验证） |
+| ulimit | `nofile` soft **1024** / hard 524288；`core` **unlimited**；`nproc` unlimited；`memlock` 8MiB；`HostConfig.Ulimits` 为空 |
+| 宿主机 | `kernel.core_pattern = core`（core 文件写到进程当前目录，即 `/workspace`）；`fs.inotify.max_user_instances=128`、`max_user_watches=65536`；容器 `agent` 的 UID 1000 与宿主机 `radxa` 相同，未启用 userns-remap |
+| 持久目录 | `/var/lib/agent-runtime/workspaces/<id>/{workspace,pi,metadata}`，属主 `radxa`，`0700` |
+
+登录与认证（代码，`master` @ `25829b9`）：
+
+- 本地登录 `POST /api/auth/login`（`routes/auth-local.ts`）：Origin 校验 → Zod 校验（失败记
+  `auth.login_failed`/`invalid_request`）→ `findUserByLogin` → 对不存在的用户也用固定假 hash 跑一次
+  scrypt（防用户枚举的时间差）→ 失败统一 401 `INVALID_CREDENTIALS` 并记 `auth.login_failed`/
+  `invalid_credentials`。**没有任何限速、计数或锁定**；每次请求都执行一次 scrypt（CPU 成本可被滥用）。
+- `auth.login_failed` 的 details 只有 protocol、provider、category、requestId、ipAddress、userAgent，
+  **不含 login 标识与 user id**（Phase 12 决定）。成功事件为 `auth.login_succeeded`，另有 `auth.logout`、
+  `auth.session_revoked`。
+- SSO：`GET /auth/oidc/login`、`/auth/oidc/callback`、`/auth/oauth2/login`、`/auth/oauth2/callback`
+  （`routes/auth-external.ts`）。失败分类 `provider_unavailable`、`transaction_invalid`、
+  `protocol_validation_failed`、`identity_not_bound`、`provisioning_not_allowed`、`user_disabled`。
+  transaction 存于进程内 `OidcTransactionStore`/`OAuth2TransactionStore`，上限 10 000 条、TTL 10 分钟，
+  满了以后 `/login` 返回 503——**任何人反复请求 `/auth/*/login` 即可在 10 分钟内耗尽容量，阻断正常 SSO 登录**。
+- 客户端 IP：`request.ip`，Fastify 未启用 `trustProxy`，即 TCP 对端地址。开发时 Portal 经 Vite proxy
+  （`127.0.0.1:5173 → 127.0.0.1:3000`）访问，所有请求的 IP 都是 `127.0.0.1`；Phase 19 的生产反向代理同理。
+  按 IP 限速前必须先解决“谁是真实客户端”。
+- break-glass：已有“最后一个 active Local Admin 不能被禁用/降级”（advisory lock）。CLI 有
+  `user:create`、`worker:*`，没有解锁类命令。
+
+### 15.2 范围与非目标
+
+范围：
+
+- **磁盘配额**：每个 Workspace 的全部可写持久数据（`/workspace`、`/home/agent`、`/tmp`、`/agent/pi`）
+  由 XFS project quota 硬限制字节数与 inode 数；容器根文件系统只读，可写层不再增长（15.3、15.4）。
+- 容器日志大小上限；`nofile`、`core` ulimit（15.5）。
+- Worker 校验配额生效，未生效时 fail-closed；存量容器在停止状态下迁移到新配置（15.6）。
+- Control Plane：每 Workspace 的磁盘上限（全局默认 + admin 按 Workspace 调整）、用量上报与 Portal 显示、
+  Audit（15.7）。Worker protocol v3（15.8）。
+- **登录防护**：可信代理下的客户端 IP 解析；本地登录按“账户+IP”、IP、账户三个维度计数并临时锁定；SSO
+  入口按 IP 限速；锁定事件记 Audit；admin 与 CLI 解锁；break-glass 不被锁死（15.9）。
+
+非目标（v1.0 不做）：
+
+- 用户自助选择磁盘规格、按用户/部门的总配额（路线图第 5 节）；按磁盘容量调度与超分控制（只显示，告警留给
+  Phase 17）。
+- 磁盘 I/O 带宽 / IOPS 限制（`blkio`/`io.max`）；网络带宽限制。
+- 平台内清理用户数据（超限时由用户自行删除，或 admin 调高上限）；配额软限制与宽限期。
+- 镜像层、Docker build cache、Worker 自身日志的容量管理（宿主机运维范畴）。
+- 每 Workspace 的 inotify 实例/监视数隔离：这些是**按宿主机 UID** 计数的全局 sysctl，所有 Workspace 共享
+  UID 1000，真正隔离需要 userns-remap（v1.x）。本 Phase 只在 runbook 中给出调高 sysctl 的建议（15.12 Q10）。
+- 通用 API 限速、DDoS 防护、WAF；密码复杂度策略、MFA、CAPTCHA；IdP 侧的暴力破解防护（由 IdP 负责）。
+- Workspace Host 的 exchange code 限速（60 秒、单次、256-bit 随机，不可暴力枚举）。
+
+### 15.3 磁盘配额机制
+
+**选定：独立的 XFS 文件系统承载 `WORKER_MANAGED_ROOT`，以 `prjquota` 挂载；每个 Workspace 分配 project
+ID，对目录树设置硬上限。** 平台持久状态仍全部位于 `WORKER_MANAGED_ROOT`（决策 D5 的备份边界不变）。
+
+- **生产**：`WORKER_MANAGED_ROOT` 使用独立磁盘、分区或 LV，`mkfs.xfs` 后以
+  `defaults,prjquota` 挂载（`/etc/fstab` 或 systemd mount unit）。部署文档（Phase 19）给出模板。
+- **开发设备（Q8B）**：nvme 无空闲空间，用根分区上的**稀疏镜像文件 + loop 设备**承载 XFS，例如
+  `/var/lib/agent-runtime.xfs`（稀疏 300G）挂载到 `/var/lib/agent-runtime`。只用本机 nvme，不涉及 `/mnt`
+  下的 NTFS 硬盘。由负责人按 runbook 用 sudo 执行（15.11 第 0 步），步骤包括迁移现有两个 Workspace 的数据。
+  loop 镜像会占用根分区的实际写入量，这在开发环境可以接受。
+- **v1.0 只支持 XFS**。ext4 project quota 使用相同的内核接口，但需要 `mkfs`/离线 `tune2fs` 启用特性，且
+  `xfs_quota` 对 ext4 的“foreign”模式未在本项目验证；在 CI 取得证据前不宣称支持（15.12 Q1）。
+
+**目录与 project 划分**（每个 Workspace 两个 project，15.12 Q4）：
+
+```text
+${WORKER_MANAGED_ROOT}/workspaces/<id>/
+  metadata/                 # Worker 私有，不计入配额，容器不可见
+  workspace/  -> /workspace     ┐
+  home/       -> /home/agent    ├ data project：上限 = 该 Workspace 的 diskLimitBytes（admin 可调）
+  tmp/        -> /tmp           ┘
+  pi/         -> /agent/pi      ─ pi project：上限 = Worker 配置 WORKSPACE_PI_STATE_LIMIT_BYTES（默认 2GiB）
+```
+
+- data 与 pi 分开：用户写满 `/workspace` 时，Pi Session 的 JSONL 追加、settings 写入仍然成功，用户仍能在
+  pi-web 中对话、用 Terminal 清理文件，避免 Pi Session 因 `EDQUOT` 写坏（Workspace state 与 Pi Session
+  state 分离的不变量在磁盘层面的体现）。
+- 设置方式：对上述 4 个目录设置 project ID 与 `PROJINHERIT` 标志（其下新建的文件/目录自动继承），对 project
+  设置 `bhard`（字节）与 `ihard`（inode）。`bsoft`/`isoft` 为 0（不使用软限制）。跨 project 的 `rename` 由
+  内核返回 `EXDEV`（`mv` 自动退化为复制，按目标 project 计费），硬链接跨 project 被拒绝——这正是期望的隔离。
+- **用量读取不需要特权**：对设置了 `PROJINHERIT` 的目录做 `statfs`，XFS 返回该 project 的上限与用量（Node
+  `fs.statfs`）。因此容器内 `df -h /workspace` 直接显示配额而不是整块盘，用户体验一致。
+- **project ID 分配**：Worker 在 `[WORKER_QUOTA_PROJECT_ID_MIN, +2^20)`（默认起点 `1000000`）内分配，
+  写入该 Workspace 的 `metadata/managed.json`（`quota: { dataProjectId, piProjectId }`，Worker 已有的受管
+  元数据文件）。分配在 Worker 进程内互斥，分配前扫描全部受管 Workspace 的元数据与 `xfs_quota` 报告中已使用
+  的 ID，避免碰撞。目录自身的 project 属性是事实来源，每次启动前读回校验（15.6）。
+- **特权**：设置 project 上限（`quotactl Q_XSETQLIM`）需要 `CAP_SYS_ADMIN`；读取 quota state 与 `statfs`
+  不需要。建议沿用 Phase 14 的方式：Worker 进程获得 ambient `CAP_SYS_ADMIN`，以固定 argv
+  `spawn("/usr/sbin/xfs_quota", ["-x", "-c", <命令>, <挂载点>])` 执行（无 shell；命令字符串只由校验后的
+  整数 ID、整数字节数与 Worker 自身构造的受管路径拼成，路径先 `realpath` 并确认位于挂载点内、不是符号链接）。
+  理由同 14.4：docker 组已等价于 root，不扩大 Worker 的实际权限面。生产 systemd unit 改为
+  `AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN`；开发脚本 `tools/dev/run-worker-with-egress.sh` 改名为
+  `run-worker-privileged.sh` 并增加 `+sys_admin`（15.12 Q2）。
+- **删除**：`workspace.delete` 删除目录后，把两个 project 的上限清零（`limit -p bhard=0 ihard=0`），ID 可复用。
+- **超分**：所有 Workspace 上限之和可以超过文件系统容量（与当前按 assignment 计数的 capacity 一致，不预留
+  空间）。Admin Workers 页面显示文件系统容量/已用与“已分配上限之和”，Phase 17 对文件系统剩余空间告警。
+
+被否决的方案：
+
+- **Docker `--storage-opt size=`**：只限制可写层；需要 overlay2 graph driver 且 data-root 位于 XFS
+  `pquota`。本机使用 containerd image store，data-root 在 ext4 上。要用它就得更改整台宿主机的 Docker
+  存储后端（禁用 containerd snapshotter、迁移 data-root、重新拉取全部镜像），并且仍然管不到 bind mount。
+- **Docker local volume 的 `size` 选项**：数据会落在 Docker data-root 之下，违反“全部持久状态位于
+  `WORKER_MANAGED_ROOT`”（D5 备份边界），且同样依赖 data-root 的文件系统。
+- **每 Workspace 一个 loop 镜像 / LV**：每个 Workspace 都要由 Worker 执行 `mount`（同样需要
+  `CAP_SYS_ADMIN`），宿主机重启后要在 Docker 之前挂好 N 个文件系统，扩容需要 `xfs_growfs`/`resize2fs`，
+  空间按镜像预占或稀疏后难以回收。project quota 在一个文件系统内完成同样的隔离，调整上限即时生效。
+- **在根 ext4 上启用 project quota**：需离线 `tune2fs`（根分区要从其他介质启动维护），且把平台数据与系统
+  盘绑在一起；生产也不推荐。
+- **定期 `du` 并在超限时停止 Workspace**：事后检测，两次采样之间仍可写满磁盘；大目录树 `du` 成本高。
+- **btrfs subvolume qgroup**：内核与 `mkfs.btrfs` 可用，但 qgroup 在大量小文件与快照下有已知的性能与
+  一致性问题，且 `statfs` 不反映 qgroup 上限；不作为 v1.0 机制。
+
+### 15.4 容器可写层与 `/tmp`
+
+**选定：容器根文件系统只读（`ReadonlyRootfs: true`），所有可写位置都来自受配额约束的目录或有上限的 tmpfs。**
+可写层因此不再增长（Docker 自身写入的 `/etc/hosts` 等由 Docker 以 bind 提供）。
+
+| 容器路径 | 来源 | 说明 |
+|---|---|---|
+| `/workspace` | bind `workspace/`（data project） | 不变 |
+| `/agent/pi` | bind `pi/`（pi project） | 不变 |
+| `/home/agent` | bind `home/`（data project） | **新增**。home 从此持久化（容器重建后仍在，为 Phase 18 镜像升级铺路）；新建时用镜像 `/etc/skel` 初始化（`.bashrc`、`.profile`） |
+| `/tmp` | bind `tmp/`（data project） | **新增**。由 Worker 在每次自己发起的启动（ensure 创建、start）前清空；Docker 在宿主机重启后自动拉起时不清空（15.12 Q3） |
+| `/var/tmp` | tmpfs `size=256m,mode=1777,nosuid,nodev` | 计入容器内存 cgroup |
+| `/run` | tmpfs `size=16m,mode=755,nosuid,nodev,noexec`（含 `/run/lock`） | 只读根下必须提供 |
+| `/dev/shm` | 现有 64M tmpfs | 不变（Chromium 使用） |
+
+- 挂载方式从 `HostConfig.Binds` 改为 `HostConfig.Mounts`（`Type: bind`）：`Binds` 在源目录缺失时由 Docker
+  以 root 自动创建，若 XFS 未挂载，容器会带着根分区上的空目录启动、写入不受配额约束；`Mounts` 在源缺失时
+  直接报错。这让“配额文件系统未挂载”在 Docker 层也是 fail-closed（宿主机重启、Worker 尚未运行时同样有效）。
+- 只读根带来的行为变化（写入 runbook 与 Portal 帮助）：
+  - `rustup toolchain/component/target add` 不再可用（上游镜像把 `/usr/local/rustup` 设为全局可写，此前
+    写入的是可写层，容器重建即丢失）。需要额外 Rust 组件时，在 Phase 18 的镜像升级中加入镜像。
+  - 容器环境增加 `CARGO_HOME=/home/agent/.cargo`，使 crate 下载与 `cargo install` 写入 home（受配额）；
+    `rustc`/`cargo` 仍经 `/usr/local/bin` 的符号链接找到。实现时在真实容器中验证 `cargo build`（含依赖）。
+  - `pip install --user`、`uv`、`pnpm`/npm 缓存、Playwright/fontconfig 缓存都在 home 下，不受影响；
+    `npm -g` 的前缀本来就是 root 所有，行为不变。
+- Runtime 镜像**不变**（不改 tag，不改 Dockerfile），全部变化由 Worker 的容器创建参数实现。
+- 定位：Workspace 仍是“一台隔离的计算机”，只读根并不收紧现有权限——agent 本就是非 root、无 sudo、
+  `cap-drop ALL`，此前在根文件系统中只能写 home、`/tmp` 等少数位置；本 Phase 让这些位置持久化（home）
+  并计入配额。系统级软件由 Runtime 镜像提供，按用户需求更新镜像（15.12 Q7）。
+
+被否决的方案（2026-10-06 与负责人讨论后确认）：
+
+- **可写根 + Docker `--storage-opt size`**：需要整台宿主机的 Docker 关闭 containerd image store、改用
+  overlay2 并把 data-root 迁到 XFS `pquota`，影响宿主机上全部镜像与其他容器；containerd 快照器的配额支持
+  未经验证；且可写层在容器重建（Phase 18 镜像升级）时丢失，根可写本身并不带来持久的“像主机”能力。
+- **给 agent root / sudo（userns-remap 或 Sysbox 一类系统容器运行时）**：改变 `normalUser = agent` 的
+  Runtime 不变量与安全模型，属于 v1.x 的独立设计，不在 Phase 15。home 持久化不妨碍将来采用。
+
+### 15.5 ulimit 与容器日志
+
+- `HostConfig.Ulimits`：`nofile` soft = hard = `WORKSPACE_NOFILE_LIMIT`（默认 65536）；`core` soft = hard = 0
+  （宿主机 `core_pattern=core` 会把 core 写到 `/workspace`，且 Chromium/Node 崩溃产生的 core 动辄 GB 级）。
+- **不设置 `nproc`**：`RLIMIT_NPROC` 按宿主机真实 UID 计数，UID 1000 的全部进程（所有 Workspace 加上宿主机
+  `radxa`）共享一个计数，设置后会相互影响。进程数继续由已有的 `PidsLimit`（cgroup pids）限制。
+- `HostConfig.LogConfig`：`{ Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } }`，单个
+  Workspace 的容器日志最多约 30MB。
+- 校验：`#verifyResourceConfiguration` 增加 Ulimits、LogConfig、ReadonlyRootfs、Tmpfs、Mounts 的比较。
+
+### 15.6 Worker 行为与 fail-closed
+
+- **存储状态**：Worker 维护 `storage = { enforced, fsType, totalBytes, freeBytes }`。`enforced=true` 的条件：
+  `WORKER_MANAGED_ROOT` 是一个挂载点（不是根文件系统的子目录）、`fsType=xfs`、mountinfo 含 `prjquota`、
+  `Q_XGETQSTAT` 显示 project quota **accounting 与 enforcement 均为 ON**、Worker 具备设置上限的能力（启动时
+  对保留的探针 project 设置并读回一次上限）。读取状态不需要特权。
+- **启动门禁**：`workspace.ensure`（将创建或启动容器时）与 `workspace.start` 在启动容器前同步执行：
+  `storage.enforced` 为真 → 读回 4 个目录的 project ID 与 `PROJINHERIT`、读回两个 project 的上限，与元数据
+  和请求的 `diskLimitBytes` 一致（不一致则重新设置并读回）→ 清空 `tmp/` → 启动。任一步失败返回
+  `STORAGE_QUOTA_UNENFORCED`，不启动。出口门禁（Phase 14）照常先于此执行。
+- **周期校验**：随心跳检查 `storage.enforced`；从真变为假（例如被卸载、以无 quota 选项重新挂载）时，按 Phase 14
+  Q3 的同一处置：停止运行中的受管 Workspace（数据保留），状态 `ERROR`（`STORAGE_QUOTA_UNENFORCED`），记日志。
+- **用量采样**：每 60 秒对每个受管 Workspace 的 `workspace/` 与 `pi/` 做 `statfs`，得到 data/pi 两个 project
+  的 used/limit bytes 与 inodes，随下一次心跳上报（15.8）。
+- **存量 Workspace 的配额初始化**：元数据中没有 `quota` 的 Workspace（本 Phase 之前创建），在下一次
+  ensure/start 时由 Worker 分配 project，对现有目录**递归**设置 project ID（存量文件计入新 project）并设置
+  上限；若现有数据已超出上限则返回 `STORAGE_LIMIT_EXCEEDED`，Workspace 保持 `STOPPED`，admin 调高上限后重试。
+- **存量容器**（`Binds`、无 home/tmp 挂载、可写根的旧容器，15.12 Q6，方案 B）：
+  - Worker **不自动迁移**。ensure/start 遇到旧格式容器时不启动，返回 `STORAGE_MIGRATION_REQUIRED`；
+    inspect/stop/delete 照常可用。reconciliation 发现**运行中**的旧容器时按 14.11 Q4 处置（停止并置
+    `ERROR`，错误码同上）。旧容器因此不会在无配额的状态下继续运行。
+  - 迁移由管理员执行一次性脚本 `tools/dev/migrate-legacy-workspace.sh <workspace-id>`（在 Worker 宿主机上，
+    以 Worker 运行用户执行）：
+    1. 确认容器带正确 managed label、属于本 Worker、已停止；
+    2. `docker cp <容器>:/home/agent/. <WORKER_MANAGED_ROOT>/workspaces/<id>/home/`（目标目录不存在时以
+       `0700` 创建，已存在且非空则中止，避免覆盖）；
+    3. 复制成功后删除旧容器（不删除网络与持久目录）；任一步失败则停止并保留旧容器。
+  - 之后用户正常启动：Worker 完成配额初始化（递归设置 project，home 的内容计入配额）并以新配置创建容器。
+  - 旧容器可写层中 `/tmp` 与其他位置（如 `/usr/local/rustup` 的新增内容）**不迁移**，runbook 要求迁移前提醒
+    用户自行保存。
+  - 理由：需要迁移的只有开发设备上的存量 Workspace（试点在 Phase 15 之后开始）；本 Phase 之后 home 已持久化，
+    Phase 18 重建容器无需复制可写层，自动迁移代码只会使用一次。
+- 没有 `CAP_SYS_ADMIN` 或文件系统不满足条件时，Worker 仍能启动、注册、上报（`enforced=false`），但不会启动
+  任何 Workspace；日志给出明确原因。**不提供关闭配额的开关**（15.12 Q2）。
+
+### 15.7 Control Plane：数据模型、API、Portal、Audit
+
+migration `0011_storage_and_login_guard`（与 15.9 共用一个 migration）：
+
+```text
+workspaces
+  + disk_limit_bytes     bigint not null          -- 创建时取 WORKSPACE_DISK_LIMIT_BYTES；存量行以当前默认值回填
+  + disk_used_bytes      bigint null              -- data project，Worker 上报
+  + disk_used_inodes     bigint null
+  + pi_used_bytes        bigint null              -- pi project
+  + pi_limit_bytes       bigint null              -- Worker 上报的实际值
+  + disk_usage_at        timestamptz null
+
+workers
+  + storage_enforced     boolean not null default false
+  + storage_fs_type      text null
+  + storage_total_bytes  bigint null
+  + storage_free_bytes   bigint null
+  + storage_checked_at   timestamptz null
+```
+
+配置（Control Plane）：`WORKSPACE_DISK_LIMIT_BYTES`（默认 20GiB）、`WORKSPACE_DISK_LIMIT_MAX_BYTES`
+（admin 可设的上限，默认 1TiB）。下限固定 1GiB。
+
+API：
+
+- `GET /api/workspaces`、`GET /api/workspaces/:id`、`GET /api/admin/workspaces`：增加
+  `disk: { limitBytes, usedBytes, usedInodes, piUsedBytes, piLimitBytes, sampledAt }`（未采样时为 null）。
+  只返回调用者有权看到的 Workspace，不暴露宿主路径、project ID 或 Worker 文件系统信息。
+- `PATCH /api/admin/workspaces/:id`：`{ diskLimitBytes }`（admin、Origin、CSRF；strict schema）。先写数据库并
+  记 Audit；Workspace 的 Worker 在线时立即下发 `workspace.storage.set`（无论运行与否，上限即时生效，无需
+  重启）；离线时在下次 ensure/start 前生效。允许设为低于当前用量（写入会立即失败，Portal 确认弹窗提示）。
+- `GET /api/admin/workers`：增加 `storage: { enforced, fsType, totalBytes, freeBytes, checkedAt,
+  allocatedLimitBytes }`（`allocatedLimitBytes` 为该 Worker 上全部 Workspace 的 `disk_limit_bytes` 之和）。
+
+Audit：`workspace.storage_limit_changed`（admin，details 含旧值、新值、request ID）、
+`worker.storage_enforced` / `worker.storage_unenforced`（状态翻转时）。
+Worker 上报 `enforced=false` 时，其 `RUNNING` 的 Workspace 在同一事务内置为 `ERROR`。
+
+调度：`storage.enforced=false` 的 Worker 不参与新的 placement；对已有 assignment 的 start 返回
+`STORAGE_QUOTA_UNENFORCED`，不改 sticky placement。
+
+Portal：
+
+- Workspace 卡片/列表显示“磁盘 已用 / 上限”进度条（≥ 90% 告警色，≥ 100% 显示“磁盘已满：请删除文件或联系
+  管理员”），以及采样时间；Pi 状态用量只在详情中显示。
+- Admin Workspaces 页面可调整上限；Admin Workers 页面增加“磁盘配额”状态列与“容量 / 已分配上限”。
+- 中文错误说明：`STORAGE_QUOTA_UNENFORCED`（“Worker 磁盘配额未生效，暂时无法启动”）、
+  `STORAGE_LIMIT_EXCEEDED`（“现有数据已超过磁盘上限，请联系管理员调高上限”）、`STORAGE_MIGRATION_REQUIRED`（“该 Workspace 需要管理员完成存储迁移后才能启动”）。
+
+### 15.8 Worker Protocol
+
+`WORKER_PROTOCOL_VERSION` 升到 `3`，与 v2 不兼容（Control Plane 与 Worker 同时升级，同 14.11 Q5）：
+
+- `worker.hello` / `worker.heartbeat` 增加 `storage: { enforced: boolean, fsType: string | null,
+  totalBytes: number | null, freeBytes: number | null }`；heartbeat 增加可选 `workspaceDisk:
+  [{ workspaceId, dataUsedBytes, dataLimitBytes, dataUsedInodes, piUsedBytes, piLimitBytes }]`（上限
+  10 000 项，只包含本 Worker 受管且元数据有效的 Workspace；Control Plane 只接受 assignment 属于该 Worker 的
+  条目，其余丢弃并记 `warn`）。
+- `workspace.ensure` payload 增加 `storage: { diskLimitBytes }`（整数，1GiB ≤ x ≤ 2^50）。
+- 新命令 `workspace.storage.set`：`{ workspaceId, diskLimitBytes }`，Worker 校验元数据与 label 后设置并读回，
+  返回 `{ dataLimitBytes, dataUsedBytes }`；Workspace 目录不存在时返回 `WORKSPACE_NOT_FOUND`。
+- 新错误码：`STORAGE_QUOTA_UNENFORCED`、`STORAGE_LIMIT_EXCEEDED`、`STORAGE_MIGRATION_REQUIRED`、
+  `STORAGE_QUOTA_APPLY_FAILED`（retryable）。
+
+### 15.9 登录防护
+
+**客户端 IP 解析**：新增 `AUTH_TRUSTED_PROXIES`（CIDR 列表，默认空）。TCP 对端地址在该列表内时，从
+`X-Forwarded-For` **自右向左**取第一个不在列表内的地址作为客户端 IP；否则使用 TCP 对端地址，忽略
+`X-Forwarded-For`（防伪造）。**不启用 Fastify `trustProxy`**：它会同时改变 `request.hostname`/`protocol`，
+影响 Host 严格校验的路径。新的解析结果同时用于现有 Audit 的 `ipAddress`。开发配置：Vite proxy 开启
+`xfwd`，`.env.example` 设置 `AUTH_TRUSTED_PROXIES=127.0.0.1/32,::1/128`。
+
+**计数与锁定**（存于 PostgreSQL，Control Plane 重启不清零）：
+
+| 维度 | 键 | 计数内容 | 默认阈值 → 锁定 |
+|---|---|---|---|
+| 账户+IP | HMAC(规范化 login) + 客户端 IP | 本地登录失败 | 15 分钟内 5 次 → 锁 15 分钟 |
+| IP | 客户端 IP | 本地登录失败（含格式错误）+ SSO callback 失败 | 15 分钟内 20 次 → 锁 15 分钟 |
+| 账户 | HMAC(规范化 login) | 本地登录失败（全部来源） | 1 小时内 50 次 → 锁 1 小时，**来自 `AUTH_TRUSTED_NETWORKS` 的请求不受此项限制** |
+| SSO 发起 | 客户端 IP | `/auth/{oidc,oauth2}/login` 请求数 | 10 分钟内 30 次 → 429 直至窗口结束 |
+
+- login 先做 trim + 小写规范化，再以 `SESSION_SECRET` 派生的独立 key 做 HMAC-SHA256；数据库**不保存明文
+  login**（用户可能把密码误填进用户名栏）。不存在的 login 与存在的 login 走完全相同的计数和响应，不泄露
+  账户是否存在。
+- 判定顺序：解析 IP → 一次查询三个键的锁定状态 → 任一锁定则直接返回 **429 `AUTH_RATE_LIMITED`** 与
+  `Retry-After`（**不执行 scrypt**，也不再计数）→ 否则校验密码 → 失败时用一条 upsert 语句原子地给三个计数
+  加一，越过阈值的一行同时写入 `locked_until`，并在同一事务内写 Audit `auth.login_locked`。
+- 成功登录只清零“账户+IP”计数；不清零 IP 与账户计数（避免攻击者借合法用户的一次成功重置计数）。
+- 响应体对三种锁定一致，不说明是哪个维度。Portal 显示“登录尝试过于频繁，请在 N 分钟后重试”。
+- **break-glass**：
+  1. 攻击者从外部只能触发“账户+IP”与“IP”锁定，它们不影响管理员从其他地址登录；
+  2. 分布式攻击触发的“账户”锁定对 `AUTH_TRUSTED_NETWORKS`（默认 `127.0.0.1/32,::1/128`，生产配置为管理网段）
+     不生效，管理员从管理网络仍可用正确密码登录；
+  3. 新增 CLI `pnpm auth:unlock -- --login <login> | --ip <ip> | --all`，直接作用于数据库（能登录 Control
+     Plane 宿主机即为 break-glass），记 Audit `auth.lock_cleared`（actor 为空、`details.source=cli`）。
+- **SSO**：IP 被锁定时 `/auth/*/login` 与 `/auth/*/callback` 返回 429，且 callback 不消费
+  transaction；callback 失败计入 IP 计数；不对 SSO 做账户维度锁定（账户由 IdP 认证）。SSO 发起限速让单个来源
+  无法再耗尽 10 000 条 transaction 容量。
+- **数据库故障**：读取或写入计数失败时登录返回 503，不跳过限速（fail-closed；数据库不可用时 session 也无法
+  创建，不额外降低可用性）。
+- **清理**：过期且未锁定的计数行由现有的周期任务删除。
+
+数据模型（同 `0011` migration）：
+
+```text
+auth_throttle
+  id            uuid primary key (server generated)
+  scope         text not null check (scope in ('login_ip', 'ip', 'login', 'sso_start'))
+  key_hash      bytea not null                    -- HMAC(login) 或 HMAC(login)||ip 的摘要；ip 维度为 HMAC(ip)
+  ip_address    inet null                         -- 仅 login_ip / ip / sso_start，供 admin 查看
+  user_id       uuid null references users(id) on delete cascade   -- login 对应现有本地用户时填写，供 admin 查看
+  window_start  timestamptz not null
+  failures      integer not null
+  locked_until  timestamptz null
+  unique (scope, key_hash)
+```
+
+API 与 Portal：
+
+- `GET /api/admin/auth/locks`：当前生效的锁定 `{ id, scope, ipAddress, user: { id, email } | null,
+  failures, lockedUntil }`；不返回 key hash。`DELETE /api/admin/auth/locks/:id` 解锁，记
+  `auth.lock_cleared`。admin 重置某用户密码时同时清除该用户的账户与账户+IP 锁定。
+- Admin Users 页面增加“登录锁定”区域与“解除”按钮；Login 页面处理 429。
+- Audit：`auth.login_locked`（details：scope、until、ipAddress、requestId；能对应到现有用户时
+  `owner_user_id` 为该用户，仅 admin 可见）、`auth.lock_cleared`（actor、scope、source）。被锁定期间的每次
+  拒绝**不**逐条写 Audit（避免攻击者刷写审计表），只写结构化日志（`info`，不含 login），Phase 17 再做计数指标。
+
+配置：`AUTH_TRUSTED_PROXIES`、`AUTH_TRUSTED_NETWORKS`，以及上表阈值的环境变量
+（`AUTH_LOCKOUT_*`，均有上下限校验）。
+
+### 15.10 测试计划
+
+单元 / 组件测试（CI 常规任务）：
+
+- 客户端 IP：不可信对端伪造 `X-Forwarded-For` 被忽略；可信代理链取最右不可信地址；IPv4-mapped IPv6 规范化。
+- 登录防护：各维度阈值与窗口滚动；锁定时返回 429 且 **`verifyPassword` 未被调用**；不存在的 login 与存在的
+  login 的计数、状态码、响应体一致；成功只清零账户+IP；可信网络只豁免账户维度、不豁免另两项；SSO 发起限速与
+  callback 失败计数、锁定时 callback 不消费 transaction；admin 解锁授权（401/403/CSRF）与 Audit；
+  `auth.login_locked` 每次锁定只写一条；日志/Audit/数据库中不出现测试用 login 明文与密码（扩展 Phase 13 脱敏
+  测试）；计数存储故障时返回 503。
+- Worker：容器创建参数（`ReadonlyRootfs`、`Mounts` 而非 `Binds`、home/tmp 挂载、Tmpfs、Ulimits、
+  LogConfig、`CARGO_HOME`）与校验能识别每一项偏差；`xfs_quota` argv 渲染（固定 argv、拒绝非受管路径与符号
+  链接）；project ID 分配不碰撞；`enforced=false` 时 ensure/start 返回 `STORAGE_QUOTA_UNENFORCED` 且未调用
+  Docker 启动；旧格式容器被识别并拒绝启动、运行中的旧容器被停止；存量目录的配额初始化（fake Docker）；用量采样与上报。
+- 协议：v3 hello/heartbeat/`workspace.storage.set`/ensure 的正反例；v2 hello 被拒绝。
+- Control Plane：`PATCH /api/admin/workspaces/:id` 授权、范围校验、Audit、在线时下发；调度排除
+  `storage.enforced=false`；用量只接受属于该 Worker 的 Workspace；普通用户只能看到自己 Workspace 的用量。
+- migration 与并发计数（50 个并发失败请求 → 计数精确、只产生一次锁定 Audit）在 `agent_runtime_test` 上验证。
+
+真实内核配额测试（`pnpm test:quota`）：需要挂载 XFS，必须 root。CI 在 ARM64 runner 上用 `sudo` 创建
+1GiB 稀疏文件 → `mkfs.xfs` → loop 以 `prjquota` 挂载后运行；本地由负责人在开发 XFS 上以
+`run-worker-privileged.sh` 同样的能力运行。断言：
+
+- 写入超过 data 上限返回 `EDQUOT`，pi project 仍可写；inode 上限生效；新建子目录与文件继承 project；
+  跨 project `rename` 为 `EXDEV`、硬链接被拒绝；`statfs` 返回 project 上限与用量；调整上限即时生效；删除后
+  用量归零、上限清零。
+- 状态检测：同一文件系统以无 `prjquota` 挂载、ext4、根文件系统子目录三种情况均判定 `enforced=false`。
+
+真实 Docker 集成测试（`pnpm test:e2e:runtime`，`WORKER_MANAGED_ROOT` 指向 XFS 测试挂载）：容器内向
+`/workspace`、`/home/agent`、`/tmp` 写超限失败；向 `/`、`/usr/local/rustup`、`/opt` 写入返回 `EROFS`；
+`ulimit -n` 为 65536、`ulimit -c` 为 0；`df /workspace` 显示配额；`cargo build`（含依赖）、`pnpm install`、
+`uv pip install`、Chromium 截图正常；迁移脚本（停止检查、目标非空中止、label 校验）执行后 home 内容完整且计入配额；XFS 未挂载时容器无法启动（`Mounts` 源
+缺失）。
+
+**变异检查**（实现时执行并在交付说明中记录）：去掉 `ReadonlyRootfs`（写根文件系统的 e2e 断言失败）；`Mounts`
+改回 `Binds`（源缺失测试失败）；去掉启动前配额读回（单元测试失败）；去掉调度器的 storage 条件；锁定判断
+移到 scrypt 之后（`verifyPassword` 未调用断言失败）；可信网络豁免扩大到全部维度；信任任意来源的
+`X-Forwarded-For`；成功登录清零全部计数——对应测试均应失败。
+
+### 15.11 验收
+
+自动验收：上述测试全部通过，CI 绿（含 `test:quota`）。
+
+人工验收（详细步骤随交付说明给出），要点与预期结果：
+
+0. **开发设备准备**（负责人 sudo）：安装 xfsprogs；停止全部 Workspace 与 Worker；创建稀疏镜像并 `mkfs.xfs`；
+   以 `loop,prjquota` 写入 fstab 并挂载到 `/var/lib/agent-runtime`（先把现有数据移出再拷回，保留属主与权限）；
+   确认 `agent-runtime-egress.service` 读取的快照路径在挂载后可用、`docker.service` 在挂载之后启动。
+   预期：`findmnt` 显示 xfs + prjquota；`xfs_quota -x -c 'state -p'` 显示 enforcement ON。
+1. 以带 `CAP_NET_ADMIN`+`CAP_SYS_ADMIN` 的方式启动 Worker：Admin Workers 页面“磁盘配额”为已生效，显示容量。
+   去掉 `CAP_SYS_ADMIN` 重启：显示未生效，Workspace 无法启动且 Portal 显示原因。
+2. 存量 Workspace（升级前在其 `/home/agent` 放一个标记文件）：直接启动被拒绝，Portal 显示需要迁移；停止状态下
+   执行 `migrate-legacy-workspace.sh <id>` 后启动成功，home 标记文件、`/workspace` 文件与 Pi Session 完整，
+   `df -h /home/agent` 显示配额且已用量包含迁移的 home；`/tmp` 旧内容不存在。
+3. 将某 Workspace 上限调为 2GiB：在 Terminal 中 `df -h /workspace` 显示 2G；`fallocate`/`dd` 写超过上限得到
+   “Disk quota exceeded”；同一 Worker 上另一 Workspace 写入正常；写满状态下 pi-web 仍能对话、Session 继续保存，
+   在 Terminal 删除文件后恢复；Portal 进度条与 `df` 一致（采样延迟 ≤ 70 秒）。
+4. `touch /usr/local/x`、`rustup target add …` 失败为只读；`ulimit -n` = 65536；`cargo build`（含依赖）、
+   `pnpm install`、`uv pip install`、Playwright 截图正常；`docker inspect` 显示日志 `max-size`。
+5. admin 调高上限：无需重启立即可写；Audit 有 `workspace.storage_limit_changed`。
+6. 本地登录：对一个账户从同一浏览器连续输错 5 次 → 第 6 次（即使密码正确）返回 429 与剩余时间；从另一台
+   设备（不同 IP）用正确密码可以登录；对不存在的账户同样输错 5 次，表现完全一致；Audit 有 `auth.login_locked`，
+   其中无 login 明文。
+7. break-glass：用脚本从非可信地址对 Local Admin 触发账户维度锁定后，从可信网络（Control Plane 宿主机本地）
+   用正确密码登录成功；`pnpm auth:unlock -- --login <admin>` 与 Admin 页面“解除”均可解锁并记 Audit。
+8. SSO：短时间内反复打开 `/auth/oidc/login` 超过阈值后返回 429；正常用户从其他 IP 的 OIDC 登录不受影响。
+9. 伪造 `X-Forwarded-For` 直接访问 Control Plane 端口：限速仍按真实对端地址计数。
+10. 重启 Worker 宿主机：XFS 先于 Docker 挂载，`unless-stopped` 拉起的容器配额生效；卸载 XFS 的情况下容器
+    无法启动（而不是在根分区上带空目录启动）。
+
+失败时收集：Worker/Control Plane 日志（按 request ID）、`findmnt -T /var/lib/agent-runtime`、
+`sudo xfs_quota -x -c 'state -p' -c 'report -p -b -i' /var/lib/agent-runtime`、`docker inspect <容器>` 的
+`HostConfig`、Audit 页面截图。
+
+### 15.12 决策
+
+2026-10-06：Q1、Q7 经讨论确认；Q2–Q5、Q8–Q10 负责人确认按建议执行；Q6 选方案 B。
+
+- **Q1 配额机制与文件系统**（**已确认，2026-10-06**）：`WORKER_MANAGED_ROOT` 为独立 XFS + `prjquota`
+  （生产：独立磁盘/分区/LV；Q8B：根分区上的稀疏 loop 镜像），v1.0 只支持 XFS，ext4 project quota 暂不支持。
+- **Q2 特权**（**已确认：按建议**）：Worker 增加 ambient `CAP_SYS_ADMIN`（经固定 argv 调用 `xfs_quota`），且不提供关闭配额的开关？
+  建议采用，理由同 14.11 Q1。备选是一个 root 所有、只接受“project ID + 字节数 + 受管路径”的最小 helper
+  （经 sudoers 或 systemd socket 调用），权限面更窄但多一个需要安装与维护的组件。
+- **Q3 `/tmp`**（**已确认：按建议**）：用 data project 内的磁盘目录、在 Worker 发起的每次启动前清空（建议）；备选 tmpfs（更快、
+  天然易失，但计入 4GiB 内存上限，大 git clone/构建会挤占内存或触发 OOM）。
+- **Q4 两个 project**（**已确认：按建议**）：Pi 状态单独 2GiB project，保证 `/workspace` 写满时 Pi Session 仍可写？建议采用。
+- **Q5 默认值**（**已确认：按建议**）：data 20GiB / 2 000 000 inode；pi 2GiB / 200 000 inode；`nofile` 65536；`core` 0；日志
+  10MB×3；`/var/tmp` 256MB、`/run` 16MB；admin 可按 Workspace 调整 data 上限（1GiB～1TiB），用户不能自助。
+  请确认或给出数值。
+- **Q6 存量迁移**（**已确认：方案 B，2026-10-06**）：Worker 只识别旧格式容器并拒绝启动
+  （`STORAGE_MIGRATION_REQUIRED`），由管理员用一次性脚本 `migrate-legacy-workspace.sh` 复制 home 并删除旧容器；
+  不实现 Worker 内的自动迁移（15.6）。
+- **Q7 只读根的副作用**（**已确认，2026-10-06**）：采用只读根（15.4）。`rustup` 组件/target、系统包等
+  Runtime 中缺少的工具，由负责人收集用户需求后通过更新 Runtime 镜像提供（Phase 18 的镜像升级机制），
+  不在 Workspace 内开放安装；设置 `CARGO_HOME=/home/agent/.cargo`。
+- **Q8 登录阈值与可信网络**（**已确认：按建议**）：15.9 表中的阈值；`AUTH_TRUSTED_NETWORKS` 默认仅 loopback；不设永久锁定（全部为
+  定时自动解除）？建议采用。
+- **Q9 协议 v3**（**已确认：按建议**）：与 v2 不兼容，同时升级？建议是。
+- **Q10 inotify**（**已确认：按建议**）：本 Phase 不做隔离，runbook 建议宿主机设置 `fs.inotify.max_user_instances=8192`、
+  `max_user_watches=1048576`（所有 Workspace 共享 UID 1000 的计数）？建议采用，隔离留到 v1.x userns-remap。
+
+### 15.13 负责人执行的检查（2026-10-06）
+
+- `sudo dumpe2fs -h /dev/nvme0n1p3`：features 为 `has_journal ext_attr resize_inode dir_index orphan_file
+  filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink
+  extra_isize metadata_csum orphan_present`，无 `project`/`quota`；inode size 256。
+- `docker create --name ar-storageopt-probe --storage-opt size=1G agent-runtime:phase7-toolchain true`：创建成功
+  （未报错），随后已删除。结论见 15.1。
 
 ## Phase 16：模型网关与凭据托管
 
