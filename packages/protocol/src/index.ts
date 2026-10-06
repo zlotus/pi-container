@@ -1,6 +1,10 @@
 import { z } from "zod";
 
-export const WORKER_PROTOCOL_VERSION = 1 as const;
+import { EgressPolicySchema, WorkerEgressStatusSchema } from "./egress.js";
+
+export * from "./egress.js";
+
+export const WORKER_PROTOCOL_VERSION = 2 as const;
 
 export const WorkspaceIdSchema = z.string().uuid();
 
@@ -83,6 +87,7 @@ export const WorkerHelloMessageSchema = RequestEnvelopeSchema.extend({
       maxWorkspaces: z.number().int().positive().max(10_000),
       allocatedWorkspaces: z.number().int().nonnegative().max(10_000),
       systemResources: WorkerSystemResourcesSchema,
+      egress: WorkerEgressStatusSchema,
     })
     .strict()
     .refine(
@@ -97,6 +102,7 @@ export const WorkerHeartbeatMessageSchema = RequestEnvelopeSchema.extend({
     .object({
       workerId: WorkerIdSchema,
       allocatedWorkspaces: z.number().int().nonnegative().max(10_000),
+      egress: WorkerEgressStatusSchema,
       observedAt: z.string().datetime({ offset: true }),
     })
     .strict(),
@@ -212,9 +218,15 @@ export const WorkerReconcileMessageSchema = RequestEnvelopeSchema.extend({
     ),
 }).strict();
 
+export const WorkerEgressApplyMessageSchema = RequestEnvelopeSchema.extend({
+  type: z.literal("worker.egress.apply"),
+  payload: EgressPolicySchema,
+}).strict();
+
 export const ControlCommandTypeSchema = z.union([
   WorkspaceCommandTypeSchema,
   z.literal("worker.reconcile"),
+  z.literal("worker.egress.apply"),
 ]);
 
 export const WorkspaceEnsureMessageSchema = RequestEnvelopeSchema.extend({
@@ -262,11 +274,19 @@ const WorkerReconcileResponseOkPayloadSchema = z
   })
   .strict();
 
+const WorkerEgressApplyResponseOkPayloadSchema = z
+  .object({
+    requestType: z.literal("worker.egress.apply"),
+    egress: WorkerEgressStatusSchema,
+  })
+  .strict();
+
 export const ResponseOkMessageSchema = RequestEnvelopeSchema.extend({
   type: z.literal("response.ok"),
   payload: z.union([
     WorkspaceResponseOkPayloadSchema,
     WorkerReconcileResponseOkPayloadSchema,
+    WorkerEgressApplyResponseOkPayloadSchema,
   ]),
 }).strict();
 
@@ -323,6 +343,7 @@ export const WorkerToControlMessageSchema = z.discriminatedUnion("type", [
 
 export const ControlToWorkerMessageSchema = z.discriminatedUnion("type", [
   WorkerReconcileMessageSchema,
+  WorkerEgressApplyMessageSchema,
   WorkspaceEnsureMessageSchema,
   WorkspaceStartMessageSchema,
   WorkspaceStopMessageSchema,

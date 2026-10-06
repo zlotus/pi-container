@@ -1,6 +1,6 @@
 # Project Progress
 
-Last reviewed: 2026-09-29
+Last reviewed: 2026-10-05
 
 ## Current Milestone
 
@@ -16,6 +16,15 @@ API error code 中文化。
 Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立可用。
 
 ## Current Baseline
+
+- Phase 14（已验收，`v1.0.0-alpha.2`）：Workspace 出口控制。Worker 在平台独占的
+  nftables 表 `inet agent_runtime` 中按 `arw-*` bridge 名过滤出站流量：拒绝 Worker 宿主机全部地址
+  （`fib daddr type local`，DNAT 之前）、RFC1918、管理员追加网段与全部 IPv6，先拒绝平台保护地址再匹配
+  白名单。规则以 `nft -j -f <临时文件>` 原子替换、读回校验、随心跳修复漂移；无法确认时 fail-closed（不启动、关闭
+  Gateway、停止运行中的 Workspace）。`agent-runtime-egress.service` 在 Docker 之前加载规则快照。Worker
+  协议升到 v2（`worker.egress.apply`、hello/heartbeat 的 `egress`），migration `0010_egress_policy`，
+  Admin API `/api/admin/egress`、Portal“网络出口”页与 Worker 出口状态列；存量 `br-<id>` 网络在停止状态下
+  迁移为 `arw-` bridge。真实内核测试 `pnpm test:egress` 在非特权 user+net namespace 中运行（CI 同样运行）。
 
 - Phase 13（已验收，`v1.0.0-alpha.1`）：Control Plane 路由按领域拆分到 `apps/control-plane/src/routes/`（`app.ts` 只做组装），
   repository 由 `packages/database/src/repository.ts` 的单一 `createRepository` 按领域模块组合，移除 7 个
@@ -189,9 +198,13 @@ v0.x 已以 `v0.13.0` 封版：Portal UI 两轮调整（中文化、交互与审
 
 1. Phase 13（工程基线）已验收（含 CI 双架构、日志脱敏、Portal 回归、Worker 对账与 OAuth2 回归），经 PR #1
    合入 master，tag `v1.0.0-alpha.1`。
-2. Phase 14（网络出口控制）开工设计：扩写 `specs.md` 第 64 节 Phase 14 小节，先在目标 ARM64 设备上确认
-   Docker / iptables / nftables 环境。
-3. 生产部署入口的 SPA fallback、刷新/前进后退与登录态恢复回归，并入 Phase 19 验收。
+2. Phase 14（网络出口控制）已验收（2026-10-06），经 PR #2 合入 master，tag `v1.0.0-alpha.2`。负责人在 Q8B 上
+   完成全部 11 项人工验收：开机 unit、`CAP_NET_ADMIN` Worker、存量网络迁移、白名单增删与保护地址拒绝、
+   规则漂移恢复、fail-closed、重启宿主机后在 Worker 启动前即生效（Clash 未启动与 TUN 开启两种状态下，
+   宿主机全部地址与 LAN 均 `BLOCKED`、公网 `REACHABLE`）、TUN 下的 IP 字面量拦截、Tailscale 网段与
+   worker-c 接入。CI 的真实内核测试同时覆盖了 Ubuntu 24.04 的 nft 1.0.9。
+3. 下一步：Phase 15（资源与认证防护）开工设计，先在 ARM64 设备上确认文件系统与配额机制。
+4. 生产部署入口的 SPA fallback、刷新/前进后退与登录态恢复回归，并入 Phase 19 验收。
 
 ## Risks And Blockers
 

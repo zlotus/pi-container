@@ -13,6 +13,7 @@ export const AUDIT_CATEGORY_LABELS: Record<string, string> = {
   auth: "登录与会话",
   user: "用户管理",
   identity: "登录方式绑定",
+  egress: "网络出口",
 };
 
 export interface AuditFilter {

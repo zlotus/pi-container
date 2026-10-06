@@ -1,18 +1,21 @@
 import { randomUUID } from "node:crypto";
 
-import type {
-  ControlToWorkerMessage,
-  WorkspaceObservation,
+import {
+  WORKER_PROTOCOL_VERSION,
+  type ControlToWorkerMessage,
+  type WorkerEgressStatus,
+  type WorkspaceObservation,
 } from "@agent-runtime/protocol";
 import type { FastifyReply } from "fastify";
 
 import type { ControlPlaneDependencies } from "./context.js";
+import { egressPolicyForWorkers } from "./egress.js";
 import { errorBody } from "./http.js";
 import { type WorkerChannel, WorkerChannelError } from "./worker-channel.js";
 
 export type WorkspaceRuntimeCommand = Exclude<
   ControlToWorkerMessage,
-  { type: "worker.reconcile" }
+  { type: "worker.reconcile" | "worker.egress.apply" }
 >;
 
 export type DispatchResult =
@@ -48,7 +51,10 @@ export function createRuntimeCommands(
           message: response.payload.message,
         };
       }
-      if (response.payload.requestType === "worker.reconcile") {
+      if (
+        response.payload.requestType === "worker.reconcile" ||
+        response.payload.requestType === "worker.egress.apply"
+      ) {
         return {
           ok: false,
           workerOffline: false,
@@ -88,6 +94,58 @@ export function createRuntimeCommands(
     }
   }
 
+  const egressProtected = dependencies.egressProtected ?? (async () => []);
+
+  /**
+   * Sends the current egress policy to one Worker and records what it reports. Returns
+   * true only when the Worker enforces exactly the current revision.
+   */
+  async function applyWorkerEgress(workerId: string): Promise<boolean> {
+    const [record, protectedCidrs] = await Promise.all([
+      dependencies.workerStore.getEgressPolicy(),
+      egressProtected(),
+    ]);
+    let egress: WorkerEgressStatus;
+    try {
+      const response = await workerChannel.dispatch(workerId, {
+        version: WORKER_PROTOCOL_VERSION,
+        type: "worker.egress.apply",
+        requestId: randomUUID(),
+        payload: egressPolicyForWorkers(record, protectedCidrs),
+      });
+      if (
+        response.type !== "response.ok" ||
+        response.payload.requestType !== "worker.egress.apply"
+      ) {
+        dependencies.log?.warn(
+          {
+            workerId,
+            errorCode: response.type === "response.error" ? response.payload.code : null,
+          },
+          "worker did not apply the egress policy",
+        );
+        return false;
+      }
+      egress = response.payload.egress;
+    } catch (error) {
+      dependencies.log?.warn({ workerId, err: error }, "egress policy dispatch failed");
+      return false;
+    }
+    await dependencies.workerStore.recordWorkerEgress({
+      workerId,
+      egress,
+      receivedAt: dependencies.now?.() ?? new Date(),
+    });
+    return egress.enforced && egress.revision === record.revision;
+  }
+
+  /** Pushes a changed policy to every connected Worker; failures are logged only. */
+  async function broadcastEgressPolicy(): Promise<void> {
+    await Promise.all(
+      workerChannel.connectedWorkerIds().map((workerId) => applyWorkerEgress(workerId)),
+    );
+  }
+
   async function reconcileWorkerWorkspaces(workerId: string): Promise<void> {
     const workspaces =
       await dependencies.store.beginWorkerReconciliation(workerId);
@@ -95,7 +153,7 @@ export function createRuntimeCommands(
     let response;
     try {
       response = await workerChannel.dispatch(workerId, {
-        version: 1,
+        version: WORKER_PROTOCOL_VERSION,
         type: "worker.reconcile",
         requestId: randomUUID(),
         payload: {
@@ -229,6 +287,8 @@ export function createRuntimeCommands(
 
   return {
     workerChannel,
+    applyWorkerEgress,
+    broadcastEgressPolicy,
     dispatchRuntimeCommand,
     reconcileWorkerWorkspaces,
     markRuntimeFailure,

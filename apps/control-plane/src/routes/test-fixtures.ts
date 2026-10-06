@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { hashOpaqueToken, hashPassword } from "@agent-runtime/auth";
 import type {
   AuthenticatedSessionRecord,
+  EgressRuleRecord,
   PlatformAuditEvent,
   UserIdentityRecord,
   UserRecord,
@@ -139,10 +140,26 @@ export async function createTestDependencies(
       allocatedWorkspaces: 0,
       systemResources: { logicalCpuCount: null, memoryBytes: null },
       lastHeartbeatAt: null,
+      egress: { enforced: false, revision: null, checkedAt: null },
       createdAt: NOW,
       updatedAt: NOW,
     }),
   );
+  const egressRules: EgressRuleRecord[] = [];
+  const egressPolicy = { revision: 0 };
+  const recordEgress = (
+    worker: WorkerRecord,
+    egress: { enforced: boolean; revision: number | null },
+    receivedAt: Date,
+  ): void => {
+    worker.egress = { ...egress, checkedAt: receivedAt };
+    if (egress.enforced) return;
+    for (const workspace of workspaces) {
+      if (workspace.workerId === worker.id && workspace.state === "RUNNING") {
+        workspace.state = "ERROR";
+      }
+    }
+  };
   const credentials = new Map([
     [hashOpaqueToken(WORKER_1_TOKEN), "worker-01"],
     [hashOpaqueToken(WORKER_2_TOKEN), "worker-02"],
@@ -222,6 +239,7 @@ export async function createTestDependencies(
           lastHeartbeatAt: input.receivedAt,
           updatedAt: input.receivedAt,
         });
+        recordEgress(worker, input.egress, input.receivedAt);
         return true;
       },
       async recordWorkerHeartbeat(input) {
@@ -232,7 +250,63 @@ export async function createTestDependencies(
         worker.lastHeartbeatAt = input.receivedAt;
         worker.updatedAt = input.receivedAt;
         worker.status = "ONLINE";
+        recordEgress(worker, input.egress, input.receivedAt);
         return true;
+      },
+      async recordWorkerEgress(input) {
+        const worker = workers.find((candidate) => candidate.id === input.workerId);
+        if (worker !== undefined) recordEgress(worker, input.egress, input.receivedAt);
+      },
+      async getEgressPolicy() {
+        return { revision: egressPolicy.revision, rules: [...egressRules] };
+      },
+      async createEgressRule(input) {
+        const rule: EgressRuleRecord = {
+          id: randomUUID(),
+          action: input.action,
+          network: input.network,
+          protocol: input.protocol,
+          portMin: input.portMin,
+          portMax: input.portMax,
+          description: input.description,
+          createdBy: input.audit.actorUserId,
+          createdAt: NOW,
+        };
+        if (
+          egressRules.some(
+            (existing) =>
+              existing.action === rule.action &&
+              existing.network === rule.network &&
+              existing.protocol === rule.protocol &&
+              existing.portMin === rule.portMin &&
+              existing.portMax === rule.portMax,
+          )
+        ) {
+          return { outcome: "DUPLICATE" };
+        }
+        const rejected = input.validate([...egressRules, rule]);
+        if (rejected !== null) return { outcome: "REJECTED", code: rejected };
+        egressRules.push(rule);
+        egressPolicy.revision += 1;
+        addAuditEvent("egress.rule_created", {
+          actorUserId: input.audit.actorUserId,
+          details: { ruleId: rule.id, network: rule.network, revision: egressPolicy.revision },
+        });
+        return { outcome: "CREATED", rule, revision: egressPolicy.revision };
+      },
+      async deleteEgressRule(input) {
+        const index = egressRules.findIndex((rule) => rule.id === input.ruleId);
+        if (index < 0) return { outcome: "NOT_FOUND" };
+        const remaining = egressRules.filter((_rule, position) => position !== index);
+        const rejected = input.validate(remaining);
+        if (rejected !== null) return { outcome: "REJECTED", code: rejected };
+        const [removed] = egressRules.splice(index, 1);
+        egressPolicy.revision += 1;
+        addAuditEvent("egress.rule_deleted", {
+          actorUserId: input.audit.actorUserId,
+          details: { ruleId: removed?.id, network: removed?.network, revision: egressPolicy.revision },
+        });
+        return { outcome: "DELETED", revision: egressPolicy.revision };
       },
       async listWorkersWithAssignments() {
         return workers.map((worker) => ({
@@ -835,9 +909,12 @@ export async function createTestDependencies(
                 (candidate) => candidate.workerId === worker.id,
               ).length,
               lastHeartbeatAt: worker.lastHeartbeatAt,
+              egressEnforced: worker.egress.enforced,
+              egressRevision: worker.egress.revision,
             })),
             connectedWorkerIds: input.connectedWorkerIds,
             heartbeatCutoff: input.heartbeatCutoff,
+            egressRevision: egressPolicy.revision,
           });
           if (selected === null) return { outcome: "NO_ELIGIBLE_WORKER" };
           workspace.workerId = selected.id;
@@ -1065,7 +1142,7 @@ export async function beginOAuth2Login(app: ReturnType<typeof buildControlPlane>
 
 export function workerHello(workerId: string) {
   return {
-    version: 1,
+    version: 2,
     type: "worker.hello",
     requestId: randomUUID(),
     payload: {
@@ -1088,8 +1165,38 @@ export function workerHello(workerId: string) {
         logicalCpuCount: 8,
         memoryBytes: 16 * 1024 ** 3,
       },
+      egress: { enforced: true, revision: 0 },
     },
   };
+}
+
+/**
+ * Answers `worker.egress.apply` like a Worker that enforces the received policy.
+ * Returns true when the message was that command.
+ */
+export function answerEgressApply(
+  socket: { send(data: string): void },
+  data: unknown,
+  enforced = true,
+): boolean {
+  const command = JSON.parse(String(data)) as {
+    type: string;
+    requestId: string;
+    payload?: { revision?: number };
+  };
+  if (command.type !== "worker.egress.apply") return false;
+  socket.send(
+    JSON.stringify({
+      version: 2,
+      type: "response.ok",
+      requestId: command.requestId,
+      payload: {
+        requestType: "worker.egress.apply",
+        egress: { enforced, revision: command.payload?.revision ?? null },
+      },
+    }),
+  );
+  return true;
 }
 
 export type WorkerOkResponse = Extract<
@@ -1106,7 +1213,7 @@ export type ReconcileOkResponse = Omit<WorkerOkResponse, "payload"> & {
 
 export function emptyReconciliation(requestId: string): ReconcileOkResponse {
   return {
-    version: 1,
+    version: 2,
     type: "response.ok",
     requestId,
     payload: {

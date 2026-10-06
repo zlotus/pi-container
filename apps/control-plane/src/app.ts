@@ -6,6 +6,7 @@ import {
   type ControlPlaneDependencies,
   createRouteContext,
 } from "./context.js";
+import { registerAdminEgressRoutes } from "./routes/admin-egress.js";
 import { registerAdminUserRoutes } from "./routes/admin-users.js";
 import { registerAdminWorkerRoutes } from "./routes/admin-workers.js";
 import { registerAuditRoutes } from "./routes/audit.js";
@@ -54,11 +55,18 @@ export function buildControlPlane(
       channel: workerChannel,
       now: context.now,
       onHelloAccepted: (workerId) => {
-        void runtime.reconcileWorkerWorkspaces(workerId).catch((error: unknown) => {
-          // The Workspace stays WORKER_OFFLINE when reconciliation cannot be
-          // completed. A later Worker reconnect can safely try again.
-          dependencies.log?.warn({ err: error, workerId }, "worker reconciliation failed");
-        });
+        // The policy goes out before reconciliation so restored Workspaces run under it.
+        void runtime
+          .applyWorkerEgress(workerId)
+          .catch((error: unknown) => {
+            dependencies.log?.warn({ err: error, workerId }, "worker egress sync failed");
+          })
+          .then(() => runtime.reconcileWorkerWorkspaces(workerId))
+          .catch((error: unknown) => {
+            // The Workspace stays WORKER_OFFLINE when reconciliation cannot be
+            // completed. A later Worker reconnect can safely try again.
+            dependencies.log?.warn({ err: error, workerId }, "worker reconciliation failed");
+          });
       },
     });
   });
@@ -69,6 +77,7 @@ export function buildControlPlane(
   registerWorkspaceRoutes(app, context, runtime);
   registerAuditRoutes(app, context);
   registerAdminWorkerRoutes(app, context);
+  registerAdminEgressRoutes(app, context, runtime);
   registerAdminUserRoutes(app, context);
 
   return app;

@@ -50,4 +50,13 @@ jobs:
       - run: pnpm lint
       - run: pnpm test
       - run: pnpm test:e2e
+      - name: Egress rules on a real kernel (unprivileged user + network namespace)
+        run: |
+          sudo apt-get install -y --no-install-recommends nftables
+          # A user namespace cannot autoload kernel modules on every kernel; load the
+          # ones the egress table and the test topology use (fails if one is missing).
+          sudo modprobe -a nf_tables nft_ct nft_fib nft_fib_inet nft_fib_ipv4 nft_fib_ipv6 bridge veth
+          # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          pnpm test:egress
       - run: pnpm build:web

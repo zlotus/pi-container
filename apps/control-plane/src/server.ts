@@ -7,6 +7,7 @@ import {
 import { createLogger, LoggingConfigSchema } from "@agent-runtime/logging";
 import { buildControlPlane } from "./app.js";
 import { parseServerConfig } from "./config.js";
+import { protectedAddressResolver } from "./egress.js";
 import { buildWorkspaceGateway } from "./gateway.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
 import { SessionConnectionRegistry } from "./session-connections.js";
@@ -96,6 +97,10 @@ const app = buildControlPlane({
   sessionConnections,
   ...(oidc === undefined ? {} : { oidc }),
   ...(oauth2 === undefined ? {} : { oauth2 }),
+  egressProtected: protectedAddressResolver(
+    config.PLATFORM_EGRESS_PROTECTED,
+    config.DATABASE_URL,
+  ),
   reportRecoveryIssue: (issue) => {
     log.warn({ issue }, "worker recovery issue");
   },

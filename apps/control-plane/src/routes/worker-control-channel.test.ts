@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { buildControlPlane } from "../app.js";
 import {
   createTestDependencies,
+  answerEgressApply,
   emptyReconciliation,
   login,
   NOW,
@@ -97,7 +98,7 @@ describe("Phase 2 worker control channel", () => {
     const closed = once(worker, "close");
     worker.send(
       JSON.stringify({
-        version: 1,
+        version: 2,
         type: "worker.heartbeat",
         requestId: randomUUID(),
         payload: {
@@ -255,6 +256,7 @@ describe("Phase 2 worker control channel", () => {
         headers: { authorization: `Bearer ${token}` },
       });
       socket.on("message", (data) => {
+        if (answerEgressApply(socket, data)) return;
         const command = JSON.parse(data.toString()) as {
           requestId: string;
           type: "worker.reconcile" | "workspace.ensure" | "workspace.start";
@@ -266,7 +268,7 @@ describe("Phase 2 worker control channel", () => {
         }
         commands[workerId]?.push(`${command.type}:${command.payload.workspaceId}`);
         socket.send(JSON.stringify({
-          version: 1,
+          version: 2,
           type: "response.ok",
           requestId: command.requestId,
           payload: {

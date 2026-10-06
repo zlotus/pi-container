@@ -4,9 +4,12 @@ import { cpus, hostname, totalmem } from "node:os";
 import { createJsonLogger, type Logger } from "@agent-runtime/logging";
 import {
   ControlToWorkerMessageSchema,
+  WORKER_PROTOCOL_VERSION,
   type Architecture,
   type ControlToWorkerMessage,
+  type EgressPolicy,
   type WorkerCapabilities,
+  type WorkerEgressStatus,
   type WorkerReconcileAssignment,
   type WorkerReconciliationReport,
   type WorkerToControlMessage,
@@ -16,6 +19,7 @@ import WebSocket from "ws";
 
 import type { WorkerConfig } from "./config.js";
 import type { RuntimeCapabilityProbe } from "./capabilities.js";
+import { EgressApplyError } from "./egress/controller.js";
 import {
   WorkspaceRuntimeError,
   type WorkspaceRuntimeObservation,
@@ -44,6 +48,14 @@ export interface WorkspaceRuntime {
     assignments: readonly WorkerReconcileAssignment[],
   ): Promise<WorkerReconciliationReport>;
   allocatedWorkspaces(): Promise<number>;
+  stopRunningWorkspaces(): Promise<string[]>;
+}
+
+/** The Worker's egress rule controller as used by the daemon. */
+export interface WorkerEgress {
+  status(): WorkerEgressStatus;
+  ensure(): Promise<WorkerEgressStatus>;
+  apply(policy: EgressPolicy): Promise<WorkerEgressStatus>;
 }
 
 export function currentArchitecture(nodeArchitecture: string): Architecture {
@@ -61,10 +73,11 @@ export function buildWorkerHello(
     memoryBytes: number;
   },
   capabilities: WorkerCapabilities,
+  egress: WorkerEgressStatus,
   allocatedWorkspaces = 0,
 ): WorkerHelloMessage {
   return {
-    version: 1,
+    version: WORKER_PROTOCOL_VERSION,
     type: "worker.hello",
     requestId: randomUUID(),
     payload: {
@@ -80,6 +93,7 @@ export function buildWorkerHello(
         logicalCpuCount: system.logicalCpuCount,
         memoryBytes: system.memoryBytes,
       },
+      egress,
     },
   };
 }
@@ -87,15 +101,17 @@ export function buildWorkerHello(
 export function buildWorkerHeartbeat(
   workerId: string,
   observedAt: Date,
+  egress: WorkerEgressStatus,
   allocatedWorkspaces = 0,
 ): WorkerHeartbeatMessage {
   return {
-    version: 1,
+    version: WORKER_PROTOCOL_VERSION,
     type: "worker.heartbeat",
     requestId: randomUUID(),
     payload: {
       workerId,
       allocatedWorkspaces,
+      egress,
       observedAt: observedAt.toISOString(),
     },
   };
@@ -104,6 +120,7 @@ export function buildWorkerHeartbeat(
 export class WorkerDaemon {
   #socket: WebSocket | null = null;
   #heartbeatTimer: NodeJS.Timeout | null = null;
+  #egressTimer: NodeJS.Timeout | null = null;
   #reconnectTimer: NodeJS.Timeout | null = null;
   #reconnectDelayMs: number;
   #stopping = false;
@@ -113,6 +130,7 @@ export class WorkerDaemon {
     readonly config: WorkerConfig,
     readonly runtime: WorkspaceRuntime,
     readonly capabilityProbe: RuntimeCapabilityProbe,
+    readonly egress: WorkerEgress,
     readonly log: Pick<Logger, "info" | "warn"> = createJsonLogger("worker"),
   ) {
     this.#reconnectDelayMs = config.WORKER_RECONNECT_INITIAL_MS;
@@ -121,13 +139,44 @@ export class WorkerDaemon {
   start(): void {
     if (this.#socket !== null || this.#reconnectTimer !== null) return;
     this.#stopping = false;
+    // Egress verification does not depend on the Control Plane being reachable.
+    this.#egressTimer ??= setInterval(() => {
+      void this.checkEgress();
+    }, this.config.WORKER_HEARTBEAT_INTERVAL_MS);
     this.#connect();
+  }
+
+  /**
+   * Verifies the egress rules (repairing drift). When they cannot be enforced, every
+   * running Workspace is stopped: fail closed, data preserved (specs.md Phase 14.11 Q3).
+   */
+  async checkEgress(): Promise<WorkerEgressStatus> {
+    const status = await this.egress.ensure();
+    if (!status.enforced) {
+      try {
+        const stopped = await this.runtime.stopRunningWorkspaces();
+        if (stopped.length > 0) {
+          this.log.warn(
+            { workerId: this.config.WORKER_ID, workspaceIds: stopped },
+            "stopped running Workspaces because egress rules are not enforced",
+          );
+        }
+      } catch (error) {
+        this.log.warn(
+          { workerId: this.config.WORKER_ID, err: error },
+          "could not stop Workspaces while egress rules are not enforced",
+        );
+      }
+    }
+    return status;
   }
 
   stop(): void {
     this.#stopping = true;
     if (this.#heartbeatTimer !== null) clearInterval(this.#heartbeatTimer);
     if (this.#reconnectTimer !== null) clearTimeout(this.#reconnectTimer);
+    if (this.#egressTimer !== null) clearInterval(this.#egressTimer);
+    this.#egressTimer = null;
     this.#heartbeatTimer = null;
     this.#reconnectTimer = null;
     this.#socket?.close(1000, "Worker shutting down");
@@ -205,6 +254,7 @@ export class WorkerDaemon {
             memoryBytes: totalmem(),
           },
           capabilities,
+          this.egress.status(),
           allocatedWorkspaces,
         ),
       );
@@ -228,6 +278,7 @@ export class WorkerDaemon {
         buildWorkerHeartbeat(
           this.config.WORKER_ID,
           new Date(),
+          this.egress.status(),
           allocatedWorkspaces,
         ),
       );
@@ -247,10 +298,20 @@ export class WorkerDaemon {
           message.payload.assignments,
         );
         this.#send({
-          version: 1,
+          version: WORKER_PROTOCOL_VERSION,
           type: "response.ok",
           requestId: message.requestId,
           payload: { requestType: message.type, reconciliation },
+        });
+        return;
+      }
+      if (message.type === "worker.egress.apply") {
+        const egress = await this.egress.apply(message.payload);
+        this.#send({
+          version: WORKER_PROTOCOL_VERSION,
+          type: "response.ok",
+          requestId: message.requestId,
+          payload: { requestType: message.type, egress },
         });
         return;
       }
@@ -277,7 +338,7 @@ export class WorkerDaemon {
           break;
       }
       this.#send({
-        version: 1,
+        version: WORKER_PROTOCOL_VERSION,
         type: "response.ok",
         requestId: message.requestId,
         payload: { requestType: message.type, workspace },
@@ -286,13 +347,15 @@ export class WorkerDaemon {
       const runtimeError =
         error instanceof WorkspaceRuntimeError
           ? error
-          : new WorkspaceRuntimeError(
+          : error instanceof EgressApplyError
+            ? { code: "EGRESS_APPLY_FAILED", message: "Egress rules could not be applied", retryable: true }
+            : new WorkspaceRuntimeError(
               "RUNTIME_ENGINE_ERROR",
               "Workspace Runtime operation failed",
               true,
             );
       this.#send({
-        version: 1,
+        version: WORKER_PROTOCOL_VERSION,
         type: "response.error",
         requestId: message.requestId,
         payload: {

@@ -62,7 +62,12 @@ type Phase1Store = Pick<
 
 type WorkerAdminStore = Pick<
   Repository,
-  "listWorkersWithAssignments" | "setWorkerSchedulable"
+  | "listWorkersWithAssignments"
+  | "setWorkerSchedulable"
+  | "getEgressPolicy"
+  | "recordWorkerEgress"
+  | "createEgressRule"
+  | "deleteEgressRule"
 >;
 
 export interface ControlPlaneDependencies {
@@ -83,6 +88,8 @@ export interface ControlPlaneDependencies {
   sessionConnections?: SessionConnectionRegistry;
   oidc?: OidcRuntime;
   oauth2?: OAuth2Runtime;
+  /** Platform addresses no egress whitelist may open; defaults to none. */
+  egressProtected?: () => Promise<string[]>;
   reportRecoveryIssue?: (
     issue: WorkerRecoveryIssue & { workerId: string },
   ) => void;

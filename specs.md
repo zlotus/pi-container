@@ -1975,7 +1975,8 @@ v1.0：采用现成的模型网关组件（LiteLLM Proxy、New API / One API 一
 v0.x：Workspace 默认允许任意出站访问，只实现了 Workspace 之间、以及 Workspace 到宿主机 loopback
 upstream / Worker Gateway 的隔离。
 
-v1.0（Phase 14 实现）：**默认允许公网、拒绝内网，内网按管理员白名单放行。**
+v1.0（Phase 14 实现，详细设计见第 64 节 Phase 14，运维见 `docs/egress-runbook.md`）：**默认允许公网、
+拒绝内网，内网按管理员白名单放行。**
 
 默认拒绝的目标采用通用内网定义：
 
@@ -3463,11 +3464,368 @@ Worker、Docker Runtime、pi-web、pi-agent 不认识 OIDC/OAuth2。
 
 ## Phase 14：Workspace 网络出口控制
 
-状态：待开工设计。方向见第 44 节。
+状态：**已验收（2026-10-06）**，经 PR #2 合入 master，tag `v1.0.0-alpha.2`（2026-10-05 负责人确认 14.11 全部按建议执行）；运维说明见 `docs/egress-runbook.md`。方向见第 44 节与 `docs/v1-roadmap.md` 决策 D3。
 
-- 验收要点：从容器内实测访问 RFC1918 地址、Worker 宿主机地址、Worker Gateway、Control Plane、
-  PostgreSQL 全部失败；公网与白名单目标成功；Worker 重启与 reconciliation 后规则
-  自动恢复；规则缺失时 Workspace 不启动。
+目标：Workspace 默认可以访问公网，但不能访问内网与 Worker 宿主机；内网目标只能由管理员按网段/端口
+放行；平台管理地址永远不可放行；规则缺失或无法确认时 fail-closed。
+
+### 14.1 开工环境核查（Q8B，2026-10-05，只读）
+
+| 项 | 结果 | 对设计的影响 |
+|---|---|---|
+| OS / 内核 | Ubuntu 26.04.1，Linux 7.0.11 aarch64 | nftables interval 拼接集合、`fib` 表达式可用 |
+| Docker | 29.8.1（API 1.56），`Firewall Backend: iptables`，userland proxy 开启，无 `daemon.json` | Docker 规则经 `iptables-nft` 写入 nf_tables |
+| iptables | 1.8.11 `(nf_tables)`；nft 1.1.6；ufw / firewalld / nftables.service 均未启用 | 平台规则放在独立 nftables 表中，与 Docker 的表并存 |
+| sysctl | `ip_forward=1`，IPv6 `forwarding=0`，`bridge-nf-call-iptables=1`，`route_localnet=0` | 宿主机不转发 IPv6 |
+| 运行身份 | Worker 以 `radxa`（docker 组，非 root）经 `tsx watch` 运行 | 当前 Worker **没有**写 netfilter 的权限（见 14.4） |
+| Workspace 网络 | 每 Workspace 一个 bridge，名称为 Docker 默认的 `br-<id>`；`EnableIPv6=false`，容器内 `eth0` 的 `disable_ipv6=1`；`enable_icc=false`；端口只绑定 `127.0.0.1` | 需要可匹配的固定 bridge 名称（见 14.3） |
+| 容器重启策略 | `unless-stopped` | 宿主机重启后 Docker 先于 Worker 拉起容器，**规则必须在 Docker 启动前就位**（见 14.4） |
+| 容器 DNS | `127.0.0.11`（Docker 内置 DNS）；容器内 resolv.conf 注释为 `ExtServers: [host(100.100.100.100) host(fd7a:115c:a1e0::53)]`，即 dockerd 在宿主机网络命名空间中向上游转发 | DNS 不经过 Workspace bridge：拒绝宿主机地址与内网不影响解析，即使上游 DNS 位于内网。由特权集成测试确认 |
+| Clash Verge | mihomo TUN：`stack: gvisor`、`auto-route`、`strict-route: false`、fake-ip `198.18.0.1/16`、`dns-hijack any:53`；接口 `Meta`；策略路由 `not iif lo → table 2022 (default via Meta)`，非默认路由仍走 `main` | 见 14.8 |
+| Tailscale | `tailscale0` 100.112.169.46，路由表 52 | 默认不拦截（D3） |
+| 宿主机监听 | Control Plane `0.0.0.0:3000/3001`、Worker Gateway `0.0.0.0:3100`、Clash mixed `*:7897`、Clash DNS `*:53`、ssh 等 | 全部可被 Workspace 通过网关地址访问（下表） |
+
+在现有 Workspace 容器内用 `/dev/tcp` 实测（不改动任何状态）：
+
+| 目标 | 现状 |
+|---|---|
+| 网关 `172.22.0.1`：Worker Gateway 3100、Control Plane 3000、Clash 7897、Clash DNS 53 | **可连** |
+| 宿主机 LAN `192.168.1.124`：3100、22；Tailscale 地址 3000；`docker0` 地址 3000 | **可连** |
+| LAN 路由器 `192.168.1.1:80` | **可连** |
+| 其他 Workspace 的 pi-web（`172.21.0.2`）、其他 compose 网络的 PostgreSQL 容器 | 不可连（Docker 在 `raw PREROUTING` 按目的容器地址与入口 bridge 丢弃，已有隔离有效） |
+| `10.1.2.3:80`（不存在的地址） | **显示可连**：经 TUN 由 gvisor 栈代为完成握手，并非真实可达 |
+| 域名解析 | 返回 fake-ip（`198.18.0.x`、`fdfe:dcba:9876::x`） |
+
+结论：G1 属实，并且在开发设备上还会让 Workspace 使用宿主机的 Clash 代理端口。
+
+负责人以 root 导出的规则（`nft list ruleset`、`iptables-save`、`ip6tables-save`、`iptables-legacy-save`）：
+
+- 只有 iptables-nft 管理的表（`ip`/`ip6` 的 `filter`、`nat`、`raw`、`mangle`）；legacy 后端为空；
+  不存在其他 `inet` 表。
+- `filter FORWARD` / `INPUT` 默认策略均为 `accept`；`DOCKER-USER` 为空。FORWARD 依次跳转
+  `ts-forward` → `DOCKER-USER` → `DOCKER-FORWARD`；Workspace bridge 的出站由 `DOCKER-FORWARD` 的
+  `iifname "br-…" oifname != "br-…" accept` 放行。
+- Tailscale（iptables-nft 模式）写入 `ts-input`、`ts-forward`、`ts-postrouting` 与 `mangle` 中的
+  fwmark 规则；`ts-forward` 对 `oifname "tailscale0"` 执行 `accept`。nftables 中 `accept` 只结束本表
+  的判定，平台表的 `drop` 仍然生效，因此不冲突。
+- mihomo（Clash）没有写入任何 netfilter 规则，只使用 TUN 接口与策略路由。
+- Docker 在 `nat PREROUTING` 以 `fib daddr type local` 跳转 DNAT，在 `raw PREROUTING` 为每个容器地址
+  做入口 bridge 校验；pi-web 发布端口的 DNAT 只匹配 `ip daddr 127.0.0.1`。
+
+### 14.2 范围与非目标
+
+范围：
+
+- 所有受管 Workspace 的出站流量按 14.3 的规则过滤：拒绝 Worker 宿主机全部地址、RFC1918、管理员追加的
+  拒绝网段；平台管理地址始终拒绝；管理员白名单放行内网中的具体网段或网段+协议+端口。
+- 默认拒绝 Workspace bridge 上的一切 IPv6 流量（Workspace 网络继续不启用 IPv6）。
+- Worker 下发、校验、在漂移时恢复规则；规则无法确认时拒绝启动 Workspace（14.5）。
+- 宿主机启动时在 Docker 之前加载规则（14.4）。
+- Control Plane：出口规则的数据模型、Admin API、Portal 页面、Audit，以及向 Worker 分发（14.6、14.7）。
+- 调度：未确认出口规则生效的 Worker 不接受新的 placement，也不能启动 Workspace。
+
+非目标（v1.0 不做）：
+
+- 域名级策略、HTTP(S) 代理、TLS 检查；DNS 过滤或 DNS 外泄防护（容器仍可经 dockerd 解析内网域名，
+  但解析到的内网地址按本节规则拒绝）。
+- Workspace 级、用户级的不同策略；入站方向的新控制（入站仍只有经 Gateway 的 pi-web）。
+- 带宽限制、连接数限制、出口流量审计（Phase 17 只做指标）。
+- 针对 Clash / Tailscale 的默认规则（D3）。
+- Workspace IPv6 出网。
+
+### 14.3 规则模型
+
+规则放在平台独占的 nftables 表 `inet agent_runtime` 中，**不修改 Docker 的表和链，也不使用
+`DOCKER-USER`**。nftables 中同一 hook 上任何一个表的 `drop` 都是最终结果，因此平台表与 Docker 的规则
+（无论 Docker 使用 iptables-nft、iptables-legacy 还是 nftables 后端）独立生效，Docker 重启或重建自身
+规则不会清除平台规则。
+
+Workspace bridge 改为固定名称 `arw-<Workspace UUID 去掉连字符后的前 11 个十六进制字符>`（`arw` 取
+**a**gent-**r**untime **w**orkspace；共 15 字符，Linux 接口名上限），通过 network option `com.docker.network.bridge.name` 设置。规则用接口名前缀
+`arw-*` 匹配，因此**规则本身是静态的、不依赖逐个 Workspace 登记**：新建 bridge 一出现就被覆盖，
+宿主机刚启动、Worker 尚未运行时同样生效。`iifname` 由内核根据实际入口接口给出，容器无法伪造。
+
+结构（示意，具体以实现的 JSON 渲染为准）：
+
+```text
+table inet agent_runtime {
+  set deny_default_v4  { type ipv4_addr; flags interval;   # 静态：RFC1918
+                         elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } }
+  set deny_extra_v4    { type ipv4_addr; flags interval; }   # 管理员追加的拒绝网段
+  set protected_v4     { type ipv4_addr; flags interval; }   # 平台管理地址，永不放行
+  set allow_net_v4     { type ipv4_addr; flags interval; }   # 白名单：整个网段
+  set allow_svc_v4     { type ipv4_addr . inet_proto . inet_service; flags interval; }  # 白名单：网段+协议+端口
+
+  chain ws_prerouting {                    # hook prerouting，priority -150（conntrack 之后、DNAT 之前）
+    iifname != "arw-*" return
+    ct direction reply accept              # pi-web 对入站（经 127.0.0.1 发布端口）连接的回包
+    meta nfproto ipv6 drop
+    fib daddr type { local, broadcast, multicast } drop   # Worker 宿主机全部地址，含 DNAT 之前的目标
+  }
+  chain ws_forward {                       # hook forward，priority -10
+    iifname != "arw-*" return
+    ct direction reply accept
+    meta nfproto ipv6 drop
+    ip daddr @protected_v4 drop            # 先拒绝平台管理地址
+    ip daddr . meta l4proto . th dport @allow_svc_v4 accept
+    ip daddr @allow_net_v4 accept
+    ip daddr @deny_default_v4 drop
+    ip daddr @deny_extra_v4 drop
+  }                                        # 其余（公网）交给 Docker 自身规则照常放行
+}
+```
+
+要点：
+
+- **宿主机地址**在 prerouting 用 `fib daddr type local` 判定，覆盖宿主机当前与将来出现的所有地址
+  （LAN、Docker 网关、`docker0`、Tailscale、公网 IPv6 对应的 IPv4 等），也覆盖“连宿主机地址上被
+  Docker 发布并 DNAT 到其他容器的端口”这条路径。白名单**不能**放行宿主机地址：Worker 宿主机上运行着
+  Worker Gateway 与 Docker，按平台管理地址处理。
+- 拒绝逐包生效（只豁免 conntrack 的 reply 方向），因此删除白名单或追加拒绝网段会立即切断已建立的
+  出站连接，无需清理 conntrack。
+- `protected_v4` 由两部分合并：Control Plane 下发的（`PLATFORM_EGRESS_PROTECTED` 显式配置，加上
+  `DATABASE_URL` 主机解析出的地址）与 Worker 本地的（`CONTROL_PLANE_URL` 主机解析出的地址，加上
+  `WORKER_EGRESS_PROTECTED` 显式配置）。即使 Control Plane 位于公网或 Tailscale 地址，Workspace 也
+  无法连接它。主机名解析结果只在每次下发时刻生效，文档建议生产环境显式配置地址。
+- 公网目标不在本表中做任何放行动作，仍由 Docker 自身规则与 MASQUERADE 处理。
+- 只处理 IPv4 网段；`deny_default_v4` 不包含 `169.254.0.0/16`、`100.64.0.0/10`，按部署环境追加
+  （第 44 节）。
+
+### 14.4 特权与启动顺序
+
+写入和读取 netfilter 都需要 `CAP_NET_ADMIN`。当前 Worker 以 docker 组普通用户运行，没有该权限。
+
+建议方案（见 14.11 Q1）：
+
+- **Worker 进程获得 ambient `CAP_NET_ADMIN`**，自身管理 `inet agent_runtime` 表：通过
+  `spawn("/usr/sbin/nft", ["-j", "-f", <私有临时文件>])` 提交一个 JSON 原子事务（nft 1.1 之前不接受管道输入；固定 argv、无
+  shell、所有元素先经 Zod 校验与规范化），用 `nft -j list table inet agent_runtime` 读回校验。docker 组
+  本身已等价于 root，增加 `CAP_NET_ADMIN` 不扩大 Worker 的实际权限面。
+  - 生产（Phase 19 的 systemd unit）：`AmbientCapabilities=CAP_NET_ADMIN`、
+    `CapabilityBoundingSet=CAP_NET_ADMIN`。
+  - 开发：`tools/dev/run-worker-with-egress.sh <env 文件>`，即 `sudo setpriv --reuid --regid --init-groups
+    --inh-caps=+net_admin --ambient-caps=+net_admin` 后以原用户运行 `pnpm dev:worker`；不对 node 二进制做
+    `setcap`。
+- **启动顺序**：新增 root oneshot unit `agent-runtime-egress.service`（`Before=docker.service`，
+  `WantedBy=multi-user.target`）。它先加载 Worker 最近一次成功应用后原子写入的快照
+  `${WORKER_MANAGED_ROOT}/egress/ruleset.json`；快照缺失或加载失败时加载随仓库发布的基础规则
+  `deploy/egress/agent-runtime-egress.nft`（结构相同、动态集合为空，即“拒绝全部内网与宿主机，无
+  白名单”）。这样宿主机重启后 Docker 按 `unless-stopped` 拉起的容器从第一个包起就受控。
+- Ubuntu 默认 `/etc/nftables.conf` 以 `flush ruleset` 开头；启用 nftables.service 会清掉平台表（以及
+  Docker 的规则），由 14.5 的周期校验发现并恢复。runbook 中说明这一点。
+
+被否决的方案：
+
+- 由 root 管理员维护静态规则文件、Worker 只读：白名单无法由 Admin UI 管理，且读取规则同样需要
+  `CAP_NET_ADMIN`。
+- Worker 用 Docker 启动一个 `--network host --cap-add NET_ADMIN` 的 helper 容器代为执行：违背
+  Runtime 安全基线的表述，且需要额外管理并 pin 一个多架构镜像。
+- 把 Workspace 网络改为 `Internal: true` 并经 HTTP 代理出网：非 HTTP 流量（git over ssh 等）不可用，
+  内部网络也不支持端口发布，属于 v1.x 的域名级策略范畴。
+
+### 14.5 Worker 行为
+
+- **网络**：新建 Workspace 网络带 `com.docker.network.bridge.name=arw-…`；`#verifyManagedNetwork`
+  增加检查该 option 与 `EnableIPv6=false`。若该接口名已被非受管接口或网络占用，返回
+  `UNMANAGED_NETWORK_CONFLICT`，不复用。
+- **存量网络迁移**：已有 Workspace 的 `br-<id>` 网络不满足新校验。Workspace 处于停止状态时，下一次
+  `workspace.ensure` / `workspace.start` 由 Worker 原地迁移：断开容器 → 删除旧受管网络 → 以同名、新
+  option 重建 → 重新连接（每一步都校验 managed label）。迁移完成前不启动容器。运行中的存量 Workspace
+  见 14.11 Q4。
+- **出口状态**：Worker 维护 `egress = { enforced: boolean, revision: number | null }`。`enforced=true`
+  的条件：表存在、链与 hook/priority/规则结构与期望一致、静态集合元素正确、动态集合内容与最近一次
+  应用的策略一致。
+- **启动门禁**：`workspace.ensure`（会创建或启动容器时）与 `workspace.start` 在启动容器前同步校验一次；
+  `enforced=false` 时返回新的错误码 `EGRESS_UNENFORCED`，不启动。
+- **Worker 启动 / 重连**：先校验，缺失或漂移则重新应用（基础规则 + 最近一次策略快照），再发送
+  `worker.hello`。
+- **周期校验**：随心跳（默认 10s）校验；发现漂移立即重新应用并记 `warn` 日志；重新应用失败时
+  `enforced=false`，并对正在运行的受管 Workspace 执行 14.11 Q3 选定的处置。
+- **reconciliation**：observed state 中增加网络名称/接口名校验结果；`worker.reconcile` 的完整
+  inventory 也校验出口状态，不满足时运行中的 Workspace 不得恢复为 `RUNNING`。
+- 没有 `CAP_NET_ADMIN` 时 Worker 仍能启动、注册和上报（`enforced=false`），但不会启动任何 Workspace；
+  日志给出明确原因。不提供“关闭出口控制”的开关。
+
+### 14.6 Control Plane：数据模型、API、Portal、Audit
+
+migration `0010_egress_policy`：
+
+```text
+egress_rules
+  id           uuid primary key (server generated)
+  action       text not null check (action in ('allow', 'deny'))
+  network      cidr not null check (family(network) = 4)
+  protocol     text null check (protocol in ('tcp', 'udp'))
+  port_min     integer null, port_max integer null   -- 仅 allow 且指定 protocol 时可用，1..65535，min <= max
+  description  text not null default ''              -- <= 200 字符
+  created_by   uuid not null references users(id)
+  created_at   timestamptz not null default now()
+  unique nulls not distinct (action, network, protocol, port_min, port_max)
+
+egress_policy_state                                   -- 单行
+  revision     bigint not null                         -- 每次规则变化在同一事务内 +1
+
+workers
+  + egress_enforced    boolean not null default false
+  + egress_revision    bigint null
+  + egress_checked_at  timestamptz null
+```
+
+校验（Control Plane，失败返回 400/409 与 error code）：
+
+- `network` 为规范化的 IPv4 CIDR（主机位为 0），前缀长度 ≥ 8；不接受 IPv6。
+- `allow` 必须完全落在 RFC1918 ∪ 现有 `deny` 规则之内（放行公网无意义）；不得与 Control Plane 已知的
+  protected 地址重叠（Worker 本地 protected 由 nft 规则顺序兜底）。
+- 删除一条 `deny` 时，若有 `allow` 依赖它才落在拒绝范围内，返回 409，要求先删除对应 `allow`。
+- 规则总数上限 1000。
+
+Admin API（admin role、CSRF、Origin 校验与现有 admin 路由一致）：
+
+- `GET /api/admin/egress`：`{ revision, defaultDeny, protected, rules[], workers[{ id, enforced,
+  revision, checkedAt }] }`。
+- `POST /api/admin/egress/rules`：`{ action, network, protocol?, portMin?, portMax?, description? }`。
+- `DELETE /api/admin/egress/rules/:id`。
+- 不提供修改，修改 = 删除 + 新建，便于审计。
+
+Audit：`egress.rule_created`、`egress.rule_deleted`，details 含 action、network、protocol、端口、
+description、新 revision 与 request ID；Worker 上报的状态翻转记 `worker.egress_enforced` /
+`worker.egress_unenforced`。Worker 上报 `enforced=false` 时，其 `RUNNING` 的 Workspace 在同一事务内置为
+`ERROR`（Worker 已按 Q3 停止它们）。Audit 新增类别 `egress`。
+
+错误码：`EGRESS_ALLOW_OUTSIDE_DENY`、`EGRESS_ALLOW_OVERLAPS_PROTECTED`、`EGRESS_RULE_LIMIT`、
+`EGRESS_RULE_EXISTS`（409），`EGRESS_RULE_IN_USE`（删除被依赖的 deny，409），`EGRESS_RULE_NOT_FOUND`
+（404）。删除时只做依赖检查，不因 protected 配置的后续变化而拒绝删除。
+
+Portal：
+
+- Admin 新增“网络出口”页面：显示默认拒绝网段、平台保护地址（只读）、规则列表、新增/删除，以及各 Worker
+  已应用的 revision 与 enforced 状态。
+- Admin Workers 页面增加“出口控制”状态列；`enforced=false` 时用告警色。
+- Workspace 启动失败为 `EGRESS_UNENFORCED` 时显示中文说明（“Worker 网络出口规则未生效，暂时无法启动”）。
+
+调度：`enforced=false` 或 revision 落后于当前策略的 Worker 不参与新的 placement；对已有 assignment 的
+start，Control Plane 先下发策略，仍不满足时返回 `EGRESS_UNENFORCED`，不改 sticky placement。
+
+### 14.7 Worker Protocol
+
+协议版本 `WORKER_PROTOCOL_VERSION` 升到 `2`（schema 均为 strict，Control Plane 与 Worker 同时升级；
+Control Plane 对 v1 hello 返回明确的版本错误，见 14.11 Q5）：
+
+- `worker.hello` / `worker.heartbeat` 的 payload 增加 `egress: { enforced: boolean, revision:
+  number | null }`。
+- 新命令 `worker.egress.apply`：`{ revision, allow: [{ network, protocol?, portMin?, portMax? }],
+  denyExtra: [network], protected: [network] }`，数组上限 1000，元素用共享 Zod schema 校验 CIDR。
+  Worker 合并本地 protected 后原子应用，成功返回 `{ egress: { enforced, revision } }`；revision 小于已应用值时
+  忽略并返回当前状态；应用失败返回 `EGRESS_APPLY_FAILED`（retryable），并继续执行之前的规则。
+- Control Plane 在 Worker 每次 authenticated hello 之后、`worker.reconcile` 之前下发当前策略；规则变化
+  时向所有在线 Worker 下发。离线 Worker 保留上一次快照（可能比当前策略更宽或更严），重连后立即更新。
+- 新错误码 `EGRESS_UNENFORCED`、`EGRESS_NETWORK_LEGACY`、`EGRESS_APPLY_FAILED`。
+
+### 14.8 开发环境：Clash 与 Tailscale
+
+Clash Verge 与 Tailscale 是负责人开发设备上的工具，与业务无关，默认规则不针对它们（D3）。但平台必须在
+这些设备上行为正确、可以测试和验收。逐项处理如下：
+
+| 现象 | 平台的处理 |
+|---|---|
+| Workspace 可连宿主机上的 Clash 代理 `7897`、Clash DNS `53`、Clash 控制端口，以及宿主机的 Tailscale 地址 | 属于“Worker 宿主机地址”，由 prerouting 的 `fib daddr type local` 统一拒绝，无需专门规则 |
+| TUN 策略路由把转发流量送往 `Meta` | 平台规则按**入口接口 + 真实目的地址**判定，与路由选择无关：forward hook 在 TUN 之前看到真实目的地址，内网 IP 字面量在进入 TUN 前已被丢弃 |
+| Tailscale `ts-forward` 对 `tailscale0` 出口执行 `accept` | 平台表独立，`drop` 为最终结果；若设备接受了 Tailscale subnet route（例如经 `tailscale0` 到达 `10.x`），同样按目的地址拒绝 |
+| Tailscale `100.64.0.0/10` 默认不拒绝 | D3 接受。需要在开发设备上验证时，在 Admin 页面追加拒绝网段 `100.64.0.0/10`；DNS 不受影响（dockerd 在宿主机命名空间解析，见 14.1） |
+| Control Plane 与 Worker 经 Tailscale 跨主机通信 | Worker 把 `CONTROL_PLANE_URL` 解析出的地址（含 `100.x`）加入 protected，Workspace 无法连接 Control Plane |
+| fake-ip：域名解析为 `198.18.x.x`，由 mihomo 在宿主机发起真实连接，平台看不到真实目的地址 | **开发环境的已知限制**，生产环境无 Clash。默认规则不拒绝 `198.18.0.0/15`（否则开发设备上所有域名访问失败）。需要验证“内网域名”场景时，把 mihomo `dns.enhanced-mode` 改为 `redir-host`（DNS 返回真实地址，TUN 照常接管公网流量），或关闭 TUN |
+| gvisor 栈为任意经 TUN 的目的地址完成 TCP 握手，“能 connect”不等于可达 | 测试与验收工具只以**应用层响应**判定可达；被平台拒绝的目标表现为超时 |
+| 宿主机 resolver 为 Tailscale MagicDNS，DNS 被 `dns-hijack any:53` 接管 | 不影响平台规则（DNS 不经过 Workspace bridge） |
+
+平台为此提供：
+
+- **Worker 启动时的环境诊断日志**（只读、无需 root）：读取 `ip -j rule` / `ip -j route show table all`
+  与接口列表，发现“默认路由经 TUN 类接口的策略路由”时记 `warn`（说明域名目标可能经用户态代理绕过出口
+  规则，仅影响开发环境）；发现 `tailscale0` 时记 `info`（`100.64.0.0/10` 默认不拒绝，可按需追加）。
+  诊断结果只用于提示，不改变 `enforced` 判定，也不新增配置开关。
+- **特权集成测试不依赖 TUN 状态**：测试用 network namespace 中的“内网/公网”主机都是直连路由
+  （`main` 表中的非默认前缀，Clash 的 `suppress_prefixlength 0` 规则不会把它们送往 `Meta`），并以 HTTP
+  响应判定，开启或关闭 TUN 结果一致。
+- **开发验收探测工具** `tools/dev/egress-probe.sh`：在指定 Workspace 容器内（`docker exec`）对一组
+  `IP:端口` 目标发送请求，输出 `REACHABLE`（收到应用层数据）/ `BLOCKED`（连接失败或超时）/
+  `HANDSHAKE_ONLY`（握手成功但无数据，典型为 TUN 代答），避免把 TUN 的假握手误判为可达。
+
+人工验收分两轮：关闭 TUN 做完整一轮；开启 TUN（fake-ip）再做 IP 字面量一轮并确认宿主机端口不可达。
+
+### 14.9 测试计划
+
+单元 / 组件测试（CI 常规任务）：
+
+- 策略校验：CIDR 规范化、前缀长度、IPv6 拒绝、allow 必须落在拒绝范围内、与 protected 重叠拒绝、
+  deny 被依赖时删除 409、端口与协议组合、上限。
+- nft JSON 渲染：给定策略生成的事务与快照一致；对读回结果的结构比较能识别缺链、缺规则、hook/priority
+  不同、集合元素不同。
+- 协议 schema：v2 hello/heartbeat/`worker.egress.apply` 的正反例；v1 hello 被拒绝。
+- Worker：`enforced=false` 时 ensure/start 返回 `EGRESS_UNENFORCED` 且未调用 Docker 启动；网络 option
+  校验；存量网络迁移的调用顺序与 label 校验（fake Docker）。
+- Control Plane：Admin API 授权（user 403、未登录 401、CSRF）、Audit 写入、revision 递增、调度排除
+  `enforced=false` 或 revision 落后的 Worker、hello 后先 apply 再 reconcile。
+- migration 在 `agent_runtime_test` 上验证。
+
+真实内核测试（`pnpm test:egress`）：在非特权 user + network namespace（`unshare --user
+--map-root-user --net`）中运行，不需要 root、不需要 Docker、不改动宿主机；CI 在 ARM64 runner 上安装
+`nftables` 并放开 AppArmor 的 userns 限制后运行。
+
+- 用 network namespace + veth 模拟“容器”（挂在 `arw-` bridge 上）、非 Workspace bridge 上的对照容器、
+  内网主机 `10.99.0.2` 与“公网”主机 `203.0.113.2`（TEST-NET-3），全部是直连路由，因此不受开发设备上
+  Clash TUN 与 Tailscale 影响。
+- 断言：宿主机全部地址（bridge 网关、其他接口、“公网”侧地址、IPv6）不可达；内网主机不可达；“公网”主机
+  可达；非 Workspace bridge 不受影响；宿主机到容器的入站连接（pi-web 路径）正常；`allow_svc` 只放行指定
+  端口；protected 优先于 allow；管理员追加的拒绝网段生效；删除白名单后已建立连接被切断；删除平台表后
+  `ensure` 恢复规则；随仓库发布的基础规则文件与 Worker 快照都能由 `nft` 加载，并与 Worker 的校验一致。
+- 真实 Docker 集成测试（`pnpm test:e2e:runtime`）覆盖 `arw-` bridge 命名与停止状态下的存量网络迁移。
+- start 门禁、Gateway 门禁、规则丢失时停止运行中的 Workspace 由 Worker 单元测试覆盖。
+- 容器 DNS 在拒绝全部内网时仍可用（dockerd 在宿主机命名空间转发）依赖真实 Docker，放在人工验收中确认。
+- **变异检查**（已执行）：去掉 prerouting 的 `fib daddr type local` 规则、去掉 protected 规则、改错
+  `iifname` 前缀，真实内核测试分别失败；去掉 Worker start 门禁、Gateway 门禁、Control Plane start 门禁、
+  调度器的出口条件，对应单元测试分别失败。
+
+### 14.10 验收
+
+自动验收：上述测试全部通过，CI 绿（含真实内核出口测试）。
+
+人工验收（详细步骤随交付说明给出），至少覆盖：
+
+1. 安装 `agent-runtime-egress.service`，以带 `CAP_NET_ADMIN` 的方式启动 Worker；Admin Workers 页面显示
+   出口控制已生效。
+2. 关闭 Clash TUN：在 Workspace Terminal 中访问 Worker Gateway、Control Plane、宿主机 ssh、LAN 路由器、
+   PostgreSQL 全部失败；访问公网 HTTPS 成功；`git clone`、`pnpm install`、`uv pip install` 正常。
+3. 在 Admin 页面添加 `192.168.1.1/32 tcp 80` 白名单：路由器 80 可访问、443 仍不可；尝试添加覆盖
+   Control Plane 地址的白名单被拒绝；删除白名单后访问立即失败；Audit 中有对应记录。
+4. 存量 Workspace：停止后再启动，网络迁移为 `arw-` bridge，文件与 Pi Session 完整。
+5. `sudo nft delete table inet agent_runtime`：Worker 在一个心跳周期内恢复规则并记日志；在恢复失败场景
+   （如去掉 `CAP_NET_ADMIN` 重启 Worker）下 Workspace 无法启动，Portal 显示原因。
+6. 重启 Worker 宿主机：`agent-runtime-egress.service` 先于 Docker 加载规则；Docker 拉起的 Workspace 在
+   Worker 启动前即不可访问内网；Worker 启动后 reconciliation 正常、白名单恢复。
+7. 开启 Clash TUN 重复第 2 步的 IP 字面量部分，并确认 `7897`、`53` 等宿主机端口不可达。
+
+### 14.11 已确认决策
+
+负责人已确认 Q1–Q8 全部按建议执行（2026-10-05）。
+
+- **Q1 特权方式**：Worker 进程以 ambient `CAP_NET_ADMIN` 自行管理 nftables 表 + root oneshot unit 在 Docker
+  之前加载快照（14.4）？建议采用。
+- **Q2 bridge 命名**：改为固定前缀 `arw-` 并按前缀匹配，存量网络在停止状态下迁移？建议采用：这是规则在
+  宿主机启动时、Worker 运行前即可覆盖全部 Workspace 的前提。
+- **Q3 规则丢失且无法恢复时如何处置运行中的 Workspace**：建议由 Worker 停止这些容器（数据与 Pi Session
+  保留），Workspace 进入 `ERROR`（`EGRESS_UNENFORCED`）并记 Audit，规则恢复后由用户重新启动；备选是只
+  拒绝新的启动、保持已运行的容器（不满足 fail-closed）。
+- **Q4 升级时仍在运行的存量 Workspace**：建议 runbook 要求升级前停止全部 Workspace；若 reconciliation
+  发现运行中的存量网络，按 Q3 同样处置（停止并置 `ERROR`），用户再次启动即完成迁移。
+- **Q5 协议版本**：升到 v2 且不兼容 v1（Control Plane 与 Worker 必须同时升级）？建议是，与当前单负责人
+  部署方式一致，避免为过渡期写兼容分支。
+- **Q6 `offline` 模式**：路线图写“预留”。建议本 Phase 不加数据库字段、API 或协议字段，只在文档中保留
+  方向；如需要现在实现，代价是一个 `egress_mode` 字段、一个按接口名的 nft 集合和一个 Portal 开关。
+- **Q7 拒绝网段的配置位置**：建议追加拒绝网段与白名单一样存在 Control Plane（Admin UI 管理、全局生效、
+  记 Audit）；平台保护地址由 `PLATFORM_EGRESS_PROTECTED` / `WORKER_EGRESS_PROTECTED` 环境变量配置，
+  不在 UI 中编辑。
+- **Q8 白名单是否允许 Worker 宿主机地址**：建议不允许（宿主机即平台管理地址）。如果 Phase 16 的模型网关
+  部署在 Worker 宿主机上，届时以“网关推理端口”作为单独、受限的例外设计，而不是开放通用白名单。
 
 ## Phase 15：资源与认证防护
 

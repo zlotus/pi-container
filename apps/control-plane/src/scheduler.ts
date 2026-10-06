@@ -19,6 +19,9 @@ function isCompatible(
     candidate.maxWorkspaces === null ||
     candidate.assignedWorkspaces >= candidate.maxWorkspaces ||
     candidate.runtimeImage !== workspace.runtimeImage ||
+    // Only Workers that verifiably enforce the current egress policy (Phase 14).
+    !candidate.egressEnforced ||
+    candidate.egressRevision !== input.egressRevision ||
     (workspace.requiredArchitecture !== null &&
       candidate.architecture !== workspace.requiredArchitecture)
   ) {

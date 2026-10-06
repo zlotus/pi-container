@@ -7,7 +7,7 @@ import type Docker from "dockerode";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { loadWorkerConfig } from "./config.js";
-import { DockerWorkspaceRuntime } from "./runtime.js";
+import { DockerWorkspaceRuntime, type EgressGate } from "./runtime.js";
 import type { WorkspaceRuntimeError } from "./runtime.js";
 
 const WORKSPACE_ID = "90b38efc-aa9a-4bc6-8eee-528b4e0c7c60";
@@ -36,6 +36,7 @@ interface FakeContainerInspection {
   }>;
   NetworkSettings: {
     Ports: Record<string, Array<{ HostIp: string; HostPort: string }>>;
+    Networks: Record<string, { NetworkID: string }>;
   };
 }
 
@@ -45,6 +46,7 @@ class FakeDocker {
   createdOptions: Docker.ContainerCreateOptions | null = null;
   omitDefaultCwdOnCreate = false;
   hostPort = "1";
+  networkSequence = 0;
 
   async createContainer(options: Docker.ContainerCreateOptions) {
     this.createdOptions = options;
@@ -76,7 +78,13 @@ class FakeDocker {
             RW: true,
           };
         }),
-        NetworkSettings: { Ports: {} },
+        NetworkSettings: {
+          Ports: {},
+          Networks: (() => {
+            const network = this.networks.get(String(options.HostConfig?.NetworkMode));
+            return network === undefined ? {} : { [network.name]: { NetworkID: network.id } };
+          })(),
+        },
       },
       this,
     );
@@ -84,12 +92,17 @@ class FakeDocker {
     return container;
   }
 
-  async listContainers() {
-    return [...this.containers.entries()].map(([name, container]) => ({
-      Id: container.id,
-      Names: [`/${name}`],
-      Labels: container.inspection.Config.Labels,
-    }));
+  async listContainers(options?: { filters?: { status?: string[] } }) {
+    return [...this.containers.entries()]
+      .filter(
+        ([, container]) =>
+          options?.filters?.status === undefined || container.inspection.State.Running,
+      )
+      .map(([name, container]) => ({
+        Id: container.id,
+        Names: [`/${name}`],
+        Labels: container.inspection.Config.Labels,
+      }));
   }
 
   getContainer(id: string) {
@@ -101,8 +114,9 @@ class FakeDocker {
   }
 
   async createNetwork(options: Docker.NetworkCreateOptions) {
+    this.networkSequence += 1;
     const network = new FakeNetwork(
-      `network-${this.networks.size}`,
+      `network-${this.networkSequence}`,
       options.Name,
       options.Labels ?? {},
       options.Options ?? {},
@@ -137,7 +151,7 @@ class FakeContainer {
   ) {}
 
   async inspect() {
-    return this.inspection as Docker.ContainerInspectInfo;
+    return { Id: this.id, ...this.inspection } as unknown as Docker.ContainerInspectInfo;
   }
 
   async start() {
@@ -183,6 +197,33 @@ class FakeNetwork {
   async remove() {
     this.docker.networks.delete(this.name);
   }
+
+  async disconnect(options: { Container: string }) {
+    const container = this.docker.getContainer(options.Container);
+    const networks = container.inspection.NetworkSettings.Networks;
+    container.inspection.NetworkSettings.Networks = Object.fromEntries(
+      Object.entries(networks).filter(([name]) => name !== this.name),
+    );
+  }
+
+  async connect(options: { Container: string }) {
+    const container = this.docker.getContainer(options.Container);
+    container.inspection.NetworkSettings.Networks[this.name] = { NetworkID: this.id };
+  }
+}
+
+class FakeEgress implements EgressGate {
+  enforced = true;
+  ensureCalls = 0;
+
+  isEnforced(): boolean {
+    return this.enforced;
+  }
+
+  async ensure(): Promise<{ enforced: boolean }> {
+    this.ensureCalls += 1;
+    return { enforced: this.enforced };
+  }
 }
 
 const temporaryRoots: string[] = [];
@@ -217,12 +258,14 @@ async function fixture() {
     WORKSPACE_GID: String(TEST_GID),
   });
   const docker = new FakeDocker();
+  const egress = new FakeEgress();
   const runtime = new DockerWorkspaceRuntime(
     config,
     docker as unknown as Docker,
     async () => true,
+    egress,
   );
-  return { root, config, docker, runtime };
+  return { root, config, docker, runtime, egress };
 }
 
 describe("Docker Workspace Runtime", () => {
@@ -336,7 +379,7 @@ describe("Docker Workspace Runtime", () => {
           },
           HostConfig: {},
           Mounts: [],
-          NetworkSettings: { Ports: {} },
+          NetworkSettings: { Ports: {}, Networks: {} },
         },
         docker,
       ),
@@ -420,12 +463,13 @@ describe("Docker Workspace Runtime", () => {
   });
 
   it("safely stops and deletes a Workspace whose recorded image predates the Worker image upgrade", async () => {
-    const { root, config, docker, runtime } = await fixture();
+    const { root, config, docker, runtime, egress } = await fixture();
     const historicalImage = "agent-runtime:phase4-legacy";
     const legacyRuntime = new DockerWorkspaceRuntime(
       { ...config, RUNTIME_IMAGE: historicalImage },
       docker as unknown as Docker,
       async () => true,
+      egress,
     );
     await legacyRuntime.ensure(WORKSPACE_ID, historicalImage, RESOURCES);
     await legacyRuntime.start(WORKSPACE_ID);
@@ -632,5 +676,129 @@ describe("Docker Workspace Runtime", () => {
       state: "CREATED",
     });
     expect(existsSync(join(root, "workspaces", WORKSPACE_ID))).toBe(false);
+  });
+});
+
+describe("Docker Workspace Runtime egress", () => {
+  const networkName = `agent-runtime-${WORKSPACE_ID}`;
+
+  /** A managed Workspace whose network predates Phase 14 (Docker's default bridge name). */
+  async function legacyNetworkFixture(running: boolean) {
+    const context = await fixture();
+    const { config, docker, runtime } = context;
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    const legacy = docker.networks.get(networkName);
+    if (legacy === undefined) throw new Error("network fixture missing");
+    delete legacy.options["com.docker.network.bridge.name"];
+    if (running) await docker.containers.get(networkName)?.start();
+    return { ...context, legacyNetworkId: legacy.id };
+  }
+
+  it("names the Workspace bridge arw-<id> so the egress rules match it, without IPv6", async () => {
+    const { config, docker, runtime } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    const network = await docker.networks.get(networkName)?.inspect();
+    expect(network?.Options).toEqual({
+      "com.docker.network.bridge.enable_icc": "false",
+      "com.docker.network.bridge.host_binding_ipv4": "127.0.0.1",
+      "com.docker.network.bridge.name": "arw-90b38efcaa9",
+    });
+  });
+
+  it("refuses to start a container while the egress rules are not enforced", async () => {
+    const { config, docker, runtime, egress } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    egress.enforced = false;
+
+    await expect(runtime.start(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "EGRESS_UNENFORCED" });
+    expect(docker.containers.get(networkName)?.inspection.State.Running).toBe(false);
+    expect(egress.ensureCalls).toBe(1);
+
+    egress.enforced = true;
+    await expect(runtime.start(WORKSPACE_ID)).resolves.toMatchObject({ state: "RUNNING" });
+  });
+
+  it("closes the Gateway path while the egress rules are not enforced", async () => {
+    const { config, runtime, egress } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.start(WORKSPACE_ID);
+    egress.enforced = false;
+
+    await expect(runtime.gatewayTarget(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "EGRESS_UNENFORCED" });
+  });
+
+  it("migrates a stopped Workspace from a legacy network to the arw- bridge", async () => {
+    const { config, docker, runtime, legacyNetworkId } = await legacyNetworkFixture(false);
+
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    const network = docker.networks.get(networkName);
+    expect(network?.id).not.toBe(legacyNetworkId);
+    expect(network?.options["com.docker.network.bridge.name"]).toBe("arw-90b38efcaa9");
+    expect(docker.containers.get(networkName)?.inspection.NetworkSettings.Networks).toEqual({
+      [networkName]: { NetworkID: network?.id },
+    });
+    await expect(runtime.start(WORKSPACE_ID)).resolves.toMatchObject({ state: "RUNNING" });
+  });
+
+  it("does not replace the network under a running legacy Workspace", async () => {
+    const { config, docker, runtime, legacyNetworkId } = await legacyNetworkFixture(true);
+
+    await expect(
+      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES),
+    ).rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({ code: "EGRESS_NETWORK_LEGACY" });
+    expect(docker.networks.get(networkName)?.id).toBe(legacyNetworkId);
+  });
+
+  it("stops a running Workspace found on a legacy network during reconciliation", async () => {
+    const { config, docker, runtime } = await legacyNetworkFixture(true);
+
+    const report = await runtime.reconcile([
+      { workspaceId: WORKSPACE_ID, runtimeImage: config.RUNTIME_IMAGE, desiredState: "RUNNING" },
+    ]);
+    expect(report.workspaces).toEqual([
+      {
+        status: "INVALID",
+        workspaceId: WORKSPACE_ID,
+        code: "EGRESS_NETWORK_LEGACY",
+        retryable: false,
+      },
+    ]);
+    expect(docker.containers.get(networkName)?.inspection.State.Running).toBe(false);
+  });
+
+  it("stops a running Workspace during reconciliation while the egress rules are not enforced", async () => {
+    const { config, docker, runtime, egress } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.start(WORKSPACE_ID);
+    egress.enforced = false;
+
+    const report = await runtime.reconcile([
+      { workspaceId: WORKSPACE_ID, runtimeImage: config.RUNTIME_IMAGE, desiredState: "RUNNING" },
+    ]);
+    expect(report.workspaces).toEqual([
+      {
+        status: "INVALID",
+        workspaceId: WORKSPACE_ID,
+        code: "EGRESS_UNENFORCED",
+        retryable: false,
+      },
+    ]);
+    expect(docker.containers.get(networkName)?.inspection.State.Running).toBe(false);
+  });
+
+  it("stops only running managed containers when enforcement is lost", async () => {
+    const { config, docker, runtime } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.start(WORKSPACE_ID);
+    const stoppedId = "1f0e0a52-3b55-4f51-9a49-34c9b2f9a0b1";
+    await runtime.ensure(stoppedId, config.RUNTIME_IMAGE, RESOURCES);
+
+    await expect(runtime.stopRunningWorkspaces()).resolves.toEqual([WORKSPACE_ID]);
+    expect(docker.containers.get(networkName)?.inspection.State.Running).toBe(false);
+    await expect(runtime.stopRunningWorkspaces()).resolves.toEqual([]);
   });
 });

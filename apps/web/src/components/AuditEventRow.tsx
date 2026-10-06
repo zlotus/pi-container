@@ -21,6 +21,10 @@ const AUDIT_LABELS: Record<string, string> = {
   "worker.scheduling_paused": "Worker 已暂停调度",
   "worker.scheduling_resumed": "Worker 已恢复调度",
   "worker.runtime_reported": "Worker 运行环境已更新",
+  "worker.egress_enforced": "Worker 出口规则已生效",
+  "worker.egress_unenforced": "Worker 出口规则未生效",
+  "egress.rule_created": "出口规则已添加",
+  "egress.rule_deleted": "出口规则已删除",
   "identity.bound": "登录方式已绑定",
   "identity.unbound": "登录方式已解绑",
   "auth.login_succeeded": "登录成功",
@@ -41,6 +45,10 @@ const AUDIT_SEVERITY: Record<string, AuditSeverity> = {
   "workspace.running": "success",
   "worker.online": "success",
   "worker.scheduling_resumed": "success",
+  "worker.egress_enforced": "success",
+  "worker.egress_unenforced": "danger",
+  "egress.rule_created": "warning",
+  "egress.rule_deleted": "warning",
   "user.enabled": "success",
   "auth.login_failed": "danger",
   "workspace.error": "danger",
@@ -67,7 +75,20 @@ const SEVERITY_LABELS: Record<AuditSeverity, string> = {
   danger: "异常",
 };
 
+/** `放行 192.168.1.1/32 tcp 80` style text for an egress rule audit event. */
+export function egressRuleText(details: Record<string, unknown>): string | null {
+  const { action, network, protocol, portMin, portMax } = details;
+  if (typeof network !== "string" || (action !== "allow" && action !== "deny")) return null;
+  const ports =
+    typeof portMin === "number" && typeof portMax === "number"
+      ? ` ${portMin === portMax ? portMin : `${portMin}-${portMax}`}`
+      : "";
+  return `${action === "allow" ? "放行" : "拒绝"} ${network}${typeof protocol === "string" ? ` ${protocol}` : ""}${ports}`;
+}
+
 function auditDetail(details: Record<string, unknown>): string | null {
+  const egressRule = egressRuleText(details);
+  if (egressRule !== null) return egressRule;
   const fromState = details.fromState;
   const toState = details.toState;
   if (typeof fromState === "string" && typeof toState === "string") {
@@ -124,7 +145,8 @@ export function describeAuditEvent(
   );
   const targetUserId = event.ownerUserId ?? event.actorUserId;
   const actor = event.actorUserId;
-  const isWorkerAdminEvent = event.eventType.startsWith("worker.scheduling_");
+  const isWorkerAdminEvent =
+    event.eventType.startsWith("worker.scheduling_") || event.eventType.startsWith("egress.");
   const workspaceSubject = isAdmin && event.workspaceId !== null && event.ownerUserId !== null
     ? `${workspaceName}（${auditUserName(event.ownerUserId, users)}）`
     : workspaceName;

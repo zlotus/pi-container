@@ -18,6 +18,7 @@ export const AUDIT_EVENT_CATEGORIES = [
   "auth",
   "user",
   "identity",
+  "egress",
 ] as const;
 
 export type AuditEventCategory = (typeof AUDIT_EVENT_CATEGORIES)[number];

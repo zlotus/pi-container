@@ -101,5 +101,10 @@ export function publicWorker(
     allocatedWorkspaces: worker.allocatedWorkspaces,
     systemResources: worker.systemResources,
     lastHeartbeatAt: worker.lastHeartbeatAt?.toISOString() ?? null,
+    egress: {
+      enforced: worker.egress.enforced,
+      revision: worker.egress.revision,
+      checkedAt: worker.egress.checkedAt?.toISOString() ?? null,
+    },
   };
 }

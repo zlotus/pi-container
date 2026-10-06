@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { buildControlPlane } from "../app.js";
 import {
   createTestDependencies,
+  answerEgressApply,
   emptyReconciliation,
   login,
   NOW,
@@ -25,6 +26,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
       headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
     });
     firstWorker.on("message", (data) => {
+      if (answerEgressApply(firstWorker, data)) return;
       const command = JSON.parse(data.toString()) as {
         requestId: string;
         type: "worker.reconcile" | "workspace.ensure" | "workspace.start";
@@ -36,7 +38,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
       }
       firstWorker.send(
         JSON.stringify({
-          version: 1,
+          version: 2,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -60,6 +62,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
     });
     const otherWorkerCommands: string[] = [];
     otherWorker.on("message", (data) => {
+      if (answerEgressApply(otherWorker, data)) return;
       const command = JSON.parse(data.toString()) as {
         requestId: string;
         type: string;
@@ -122,6 +125,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
       | undefined;
     const reconnectCommands: string[] = [];
     reconnectedWorker.on("message", (data) => {
+      if (answerEgressApply(reconnectedWorker, data)) return;
       const command = JSON.parse(data.toString()) as {
         requestId: string;
         type: "worker.reconcile";
@@ -160,7 +164,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
     }
     reconnectedWorker.send(
       JSON.stringify({
-        version: 1,
+        version: 2,
         type: "response.ok",
         requestId: reconcileCommand.requestId,
         payload: {
@@ -233,13 +237,14 @@ describe("Phase 6 Worker recovery reconciliation", () => {
         headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
       });
       worker.on("message", (data) => {
+        if (answerEgressApply(worker, data)) return;
         const command = JSON.parse(data.toString()) as {
           requestId: string;
           type: "worker.reconcile";
         };
         worker.send(
           JSON.stringify({
-            version: 1,
+            version: 2,
             type: "response.ok",
             requestId: command.requestId,
             payload: {
@@ -308,13 +313,14 @@ describe("Phase 6 Worker recovery reconciliation", () => {
         headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
       });
       worker.on("message", (data) => {
+        if (answerEgressApply(worker, data)) return;
         const command = JSON.parse(data.toString()) as {
           requestId: string;
           type: "worker.reconcile";
         };
         worker.send(
           JSON.stringify({
-            version: 1,
+            version: 2,
             type: "response.ok",
             requestId: command.requestId,
             payload: {
@@ -359,6 +365,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
       headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
     });
     worker.on("message", (data) => {
+      if (answerEgressApply(worker, data)) return;
       const command = JSON.parse(data.toString()) as { requestId: string };
       const response = emptyReconciliation(command.requestId);
       response.payload.reconciliation.issues.push({
@@ -407,10 +414,11 @@ describe("Phase 6 Worker recovery reconciliation", () => {
       headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
     });
     worker.on("message", (data) => {
+      if (answerEgressApply(worker, data)) return;
       const command = JSON.parse(data.toString()) as { requestId: string };
       worker.send(
         JSON.stringify({
-          version: 1,
+          version: 2,
           type: "response.ok",
           requestId: command.requestId,
           payload: {

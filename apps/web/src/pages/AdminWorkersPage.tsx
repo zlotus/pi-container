@@ -97,7 +97,7 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>Worker</th><th>状态</th><th>架构</th><th>Workspace 容量</th><th>主机资源</th><th>最后心跳</th><th>操作</th></tr>
+                <tr><th>Worker</th><th>状态</th><th>出口控制</th><th>架构</th><th>Workspace 容量</th><th>主机资源</th><th>最后心跳</th><th>操作</th></tr>
               </thead>
               <tbody>
                 {workers.map((worker) => (
@@ -109,6 +109,13 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
                           <span className={`state worker-${worker.status.toLowerCase()}`}>{workerStatusLabel(worker.status)}</span>
                           {worker.schedulable ? null : <span className="state worker-paused" title="不再分配新的 Workspace，已有 Workspace 不受影响">暂停调度</span>}
                         </span>
+                      </td>
+                      <td>
+                        {worker.egress.enforced ? (
+                          <span className="state worker-online" title={`已应用策略版本 ${worker.egress.revision ?? "基础规则"}`}>已生效</span>
+                        ) : (
+                          <span className="state worker-offline" title="该 Worker 不会启动任何 Workspace，直到出口规则生效">未生效</span>
+                        )}
                       </td>
                       <td><strong>{worker.architecture ?? "—"}</strong></td>
                       <td title="当前已分配的 Workspace 数量和容量上限">
@@ -130,7 +137,7 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
                     </tr>
                     {expandedWorkerId === worker.id ? (
                       <tr className="metadata-row">
-                        <td colSpan={7}>
+                        <td colSpan={8}>
                           <dl className="worker-details">
                             <div><dt>运行环境版本</dt><dd>{worker.runtimeVersion ?? "—"}</dd></div>
                             <div><dt>运行环境镜像</dt><dd>{worker.runtimeImage ?? "尚未上报"}</dd></div>

@@ -35,6 +35,14 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   WORKER_COMMAND_FAILED: "Worker 执行操作失败",
   INVALID_WORKER_RESPONSE: "Worker 返回了异常结果",
   WORKER_RESPONSE_MISMATCH: "Worker 返回了异常结果",
+  EGRESS_UNENFORCED: "Worker 网络出口规则未生效，暂时无法启动",
+  EGRESS_NETWORK_LEGACY: "Workspace 仍在旧网络上，已被停止，请重新启动",
+  EGRESS_RULE_EXISTS: "相同的出口规则已存在",
+  EGRESS_RULE_NOT_FOUND: "出口规则不存在",
+  EGRESS_RULE_IN_USE: "仍有放行规则依赖这个拒绝网段，请先删除这些放行规则",
+  EGRESS_ALLOW_OUTSIDE_DENY: "放行规则必须位于内网（RFC1918）或已有拒绝网段之内",
+  EGRESS_ALLOW_OVERLAPS_PROTECTED: "放行规则不能包含平台保护地址",
+  EGRESS_RULE_LIMIT: "出口规则数量已达上限",
 };
 
 export function apiErrorText(code: string | undefined, serverMessage: string): string {

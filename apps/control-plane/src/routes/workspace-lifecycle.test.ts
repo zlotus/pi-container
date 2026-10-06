@@ -4,10 +4,12 @@ import { describe, expect, it } from "vitest";
 import { buildControlPlane } from "../app.js";
 import {
   createTestDependencies,
+  answerEgressApply,
   emptyReconciliation,
   login,
   NOW,
   ORIGIN,
+  USER_A_ID,
   WORKER_1_TOKEN,
   WORKER_2_TOKEN,
   workerHello,
@@ -23,6 +25,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
     });
     const commands: string[] = [];
     worker.on("message", (data) => {
+      if (answerEgressApply(worker, data)) return;
       const command = JSON.parse(data.toString()) as {
         requestId: string;
         type:
@@ -46,7 +49,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
             : "CREATED";
       worker.send(
         JSON.stringify({
-          version: 1,
+          version: 2,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -242,6 +245,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
     const worker1Commands: string[] = [];
     const worker2Commands: string[] = [];
     worker1.on("message", (data) => {
+      if (answerEgressApply(worker1, data)) return;
       const command = JSON.parse(data.toString()) as {
         requestId: string;
         type: "worker.reconcile" | "workspace.ensure" | "workspace.start";
@@ -254,7 +258,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       worker1Commands.push(command.type);
       worker1.send(
         JSON.stringify({
-          version: 1,
+          version: 2,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -270,6 +274,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       );
     });
     worker2.on("message", (data) => {
+      if (answerEgressApply(worker2, data)) return;
       const command = JSON.parse(data.toString()) as {
         requestId: string;
         type: "worker.reconcile" | "workspace.ensure" | "workspace.start";
@@ -282,7 +287,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       worker2Commands.push(command.type);
       worker2.send(
         JSON.stringify({
-          version: 1,
+          version: 2,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -357,6 +362,122 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
     expect(worker2Commands).toEqual(["workspace.ensure", "workspace.start"]);
     worker1.close();
     worker2.close();
+    await app.close();
+  });
+
+  it("never starts a Workspace on a Worker that cannot enforce the egress policy", async () => {
+    const dependencies = await createTestDependencies();
+    const app = buildControlPlane(dependencies);
+    await app.ready();
+    const worker = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    const commands: string[] = [];
+    let enforce = true;
+    worker.on("message", (data) => {
+      if (answerEgressApply(worker, data, enforce)) return;
+      const command = JSON.parse(data.toString()) as { requestId: string; type: string };
+      if (command.type === "worker.reconcile") {
+        worker.send(JSON.stringify(emptyReconciliation(command.requestId)));
+        return;
+      }
+      commands.push(command.type);
+    });
+    worker.send(JSON.stringify(workerHello("worker-01")));
+    await expect
+      .poll(() => dependencies.testState.workers[0]?.egress.enforced)
+      .toBe(true);
+
+    const owner = await login(app, "user-a", "password-for-user-a");
+    const headers = { cookie: owner.cookie, origin: ORIGIN, "x-csrf-token": owner.csrfToken };
+    const create = await app.inject({
+      method: "POST",
+      url: "/api/workspaces",
+      headers,
+      payload: { name: "egress-gated" },
+    });
+    const workspaceId = create.json<{ workspace: WorkspaceRecord }>().workspace.id;
+
+    enforce = false;
+    const start = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${workspaceId}/start`,
+      headers,
+      payload: {},
+    });
+    expect(start.statusCode).toBe(503);
+    expect(start.json()).toMatchObject({ error: { code: "EGRESS_UNENFORCED" } });
+    expect(commands).toEqual([]);
+    expect(
+      dependencies.testState.workspaces.find((workspace) => workspace.id === workspaceId),
+    ).toMatchObject({ state: "ERROR", workerId: "worker-01" });
+
+    // Once the Worker no longer reports enforcement, it gets no new placements either.
+    const second = await app.inject({
+      method: "POST",
+      url: "/api/workspaces",
+      headers,
+      payload: { name: "egress-unplaced" },
+    });
+    const secondId = second.json<{ workspace: WorkspaceRecord }>().workspace.id;
+    const unplaced = await app.inject({
+      method: "POST",
+      url: `/api/workspaces/${secondId}/start`,
+      headers,
+      payload: {},
+    });
+    expect(unplaced.json()).toMatchObject({ error: { code: "NO_ELIGIBLE_WORKER" } });
+    worker.terminate();
+    await app.close();
+  });
+
+  it("marks running Workspaces ERROR when the Worker reports lost egress rules", async () => {
+    const dependencies = await createTestDependencies();
+    const app = buildControlPlane(dependencies);
+    await app.ready();
+    const worker = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    worker.on("message", (data) => {
+      if (answerEgressApply(worker, data)) return;
+      const command = JSON.parse(data.toString()) as { requestId: string; type: string };
+      if (command.type === "worker.reconcile") {
+        worker.send(JSON.stringify(emptyReconciliation(command.requestId)));
+      }
+    });
+    worker.send(JSON.stringify(workerHello("worker-01")));
+    await expect
+      .poll(() => dependencies.testState.workers[0]?.egress.enforced)
+      .toBe(true);
+    dependencies.testState.workspaces.push({
+      id: "8d6f5c43-0d3a-4f53-9d84-3f8c0f3e7a10",
+      userId: USER_A_ID,
+      name: "running",
+      workerId: "worker-01",
+      state: "RUNNING",
+      runtimeImage: "agent-runtime:test-unassigned",
+      createdAt: NOW,
+      updatedAt: NOW,
+      lastActivityAt: NOW,
+    });
+
+    worker.send(
+      JSON.stringify({
+        version: 2,
+        type: "worker.heartbeat",
+        requestId: crypto.randomUUID(),
+        payload: {
+          workerId: "worker-01",
+          allocatedWorkspaces: 1,
+          egress: { enforced: false, revision: 0 },
+          observedAt: NOW.toISOString(),
+        },
+      }),
+    );
+    await expect
+      .poll(() => dependencies.testState.workspaces.at(-1)?.state)
+      .toBe("ERROR");
+    worker.terminate();
     await app.close();
   });
 });

@@ -1,9 +1,11 @@
 import type {
   Architecture,
   WorkerCapabilities,
+  WorkerEgressStatus,
   WorkerSystemResources,
 } from "@agent-runtime/protocol";
 
+import { createEgressRepository } from "./egress.js";
 import type { DatabaseClient } from "./index.js";
 
 export type WorkerStatus = "REGISTERED" | "ONLINE" | "OFFLINE" | "DISABLED";
@@ -26,6 +28,12 @@ export interface WorkerRecord {
     memoryBytes: number | null;
   };
   lastHeartbeatAt: Date | null;
+  /** Last reported egress rule state (specs.md Phase 14). */
+  egress: {
+    enforced: boolean;
+    revision: number | null;
+    checkedAt: Date | null;
+  };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -50,6 +58,9 @@ interface WorkerRow {
   cpu_capacity: { logicalCpuCount?: number };
   memory_bytes: string | null;
   last_heartbeat_at: Date | null;
+  egress_enforced: boolean;
+  egress_revision: string | null;
+  egress_checked_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -73,6 +84,11 @@ function mapWorker(row: WorkerRow): WorkerRecord {
         row.memory_bytes === null ? null : Number.parseInt(row.memory_bytes, 10),
     },
     lastHeartbeatAt: row.last_heartbeat_at,
+    egress: {
+      enforced: row.egress_enforced,
+      revision: row.egress_revision === null ? null : Number(row.egress_revision),
+      checkedAt: row.egress_checked_at,
+    },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -84,6 +100,7 @@ export interface WorkerGatewayRoute {
 }
 
 export function createWorkerRepository(database: DatabaseClient) {
+  const egress = createEgressRepository(database);
   return {
     async rotateWorkerCredential(input: {
       workerId: string;
@@ -128,54 +145,64 @@ export function createWorkerRepository(database: DatabaseClient) {
       maxWorkspaces: number;
       allocatedWorkspaces: number;
       systemResources: WorkerSystemResources;
+      egress: WorkerEgressStatus;
       receivedAt: Date;
     }): Promise<boolean> {
       const capabilities = database.json(input.capabilities);
       const cpuCapacity = database.json({
         logicalCpuCount: input.systemResources.logicalCpuCount,
       });
-      const rows = await database<{ id: string }[]>`
-        update workers
-        set
-          hostname = ${input.hostname},
-          architecture = ${input.architecture},
-          status = 'ONLINE',
-          runtime_image = ${input.runtimeImage},
-          runtime_version = ${input.runtimeVersion},
-          capabilities = ${capabilities},
-          max_workspaces = ${input.maxWorkspaces},
-          allocated_workspaces = ${input.allocatedWorkspaces},
-          cpu_capacity = ${cpuCapacity},
-          memory_bytes = ${input.systemResources.memoryBytes},
-          last_heartbeat_at = ${input.receivedAt},
-          updated_at = ${input.receivedAt}
-        where id = ${input.workerId}
-          and credential_hash = ${input.credentialHash}
-          and enabled
-        returning id
-      `;
-      return rows.length === 1;
+      return database.begin(async (transaction) => {
+        const rows = await transaction<{ id: string }[]>`
+          update workers
+          set
+            hostname = ${input.hostname},
+            architecture = ${input.architecture},
+            status = 'ONLINE',
+            runtime_image = ${input.runtimeImage},
+            runtime_version = ${input.runtimeVersion},
+            capabilities = ${capabilities},
+            max_workspaces = ${input.maxWorkspaces},
+            allocated_workspaces = ${input.allocatedWorkspaces},
+            cpu_capacity = ${cpuCapacity},
+            memory_bytes = ${input.systemResources.memoryBytes},
+            last_heartbeat_at = ${input.receivedAt},
+            updated_at = ${input.receivedAt}
+          where id = ${input.workerId}
+            and credential_hash = ${input.credentialHash}
+            and enabled
+          returning id
+        `;
+        if (rows.length !== 1) return false;
+        await egress.recordWorkerEgressInTransaction(transaction, input);
+        return true;
+      });
     },
 
     async recordWorkerHeartbeat(input: {
       credentialHash: string;
       workerId: string;
       allocatedWorkspaces: number;
+      egress: WorkerEgressStatus;
       receivedAt: Date;
     }): Promise<boolean> {
-      const rows = await database<{ id: string }[]>`
-        update workers
-        set
-          status = 'ONLINE',
-          allocated_workspaces = ${input.allocatedWorkspaces},
-          last_heartbeat_at = ${input.receivedAt},
-          updated_at = ${input.receivedAt}
-        where id = ${input.workerId}
-          and credential_hash = ${input.credentialHash}
-          and enabled
-        returning id
-      `;
-      return rows.length === 1;
+      return database.begin(async (transaction) => {
+        const rows = await transaction<{ id: string }[]>`
+          update workers
+          set
+            status = 'ONLINE',
+            allocated_workspaces = ${input.allocatedWorkspaces},
+            last_heartbeat_at = ${input.receivedAt},
+            updated_at = ${input.receivedAt}
+          where id = ${input.workerId}
+            and credential_hash = ${input.credentialHash}
+            and enabled
+          returning id
+        `;
+        if (rows.length !== 1) return false;
+        await egress.recordWorkerEgressInTransaction(transaction, input);
+        return true;
+      });
     },
 
     async listWorkers(): Promise<WorkerRecord[]> {
@@ -184,7 +211,8 @@ export function createWorkerRepository(database: DatabaseClient) {
           id, hostname, architecture, status, enabled, schedulable, runtime_image,
           runtime_version, capabilities, max_workspaces,
           allocated_workspaces, cpu_capacity, memory_bytes,
-          last_heartbeat_at, created_at, updated_at
+          last_heartbeat_at, egress_enforced, egress_revision::text,
+          egress_checked_at, created_at, updated_at
         from workers
         order by id asc
       `;
@@ -193,23 +221,23 @@ export function createWorkerRepository(database: DatabaseClient) {
 
     async markWorkersOffline(cutoff: Date): Promise<number> {
       return database.begin(async (transaction) => {
-        const offlineWorkers = await transaction<{ id: string }[]>`
-          update workers
-          set status = 'OFFLINE', updated_at = now()
-          where enabled
-            and status = 'ONLINE'
-            and (last_heartbeat_at is null or last_heartbeat_at <= ${cutoff})
-          returning id
-        `;
-        for (const worker of offlineWorkers) {
-          await transaction`
-            update workspaces
-            set state = 'WORKER_OFFLINE', updated_at = now()
-            where worker_id = ${worker.id}
-              and state in ('STARTING', 'RUNNING', 'STOPPING', 'STOPPED', 'ERROR')
+          const offlineWorkers = await transaction<{ id: string }[]>`
+            update workers
+            set status = 'OFFLINE', updated_at = now()
+            where enabled
+              and status = 'ONLINE'
+              and (last_heartbeat_at is null or last_heartbeat_at <= ${cutoff})
+            returning id
           `;
-        }
-        return offlineWorkers.length;
+          for (const worker of offlineWorkers) {
+            await transaction`
+              update workspaces
+              set state = 'WORKER_OFFLINE', updated_at = now()
+              where worker_id = ${worker.id}
+                and state in ('STARTING', 'RUNNING', 'STOPPING', 'STOPPED', 'ERROR')
+            `;
+          }
+          return offlineWorkers.length;
       });
     },
 

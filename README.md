@@ -272,11 +272,25 @@ set +a
 pnpm dev:worker
 ```
 
+从 Phase 14 起 Worker 需要 `CAP_NET_ADMIN` 来管理 Workspace 出口规则（仍以普通用户运行）。开发时用
+`tools/dev/run-worker-with-egress.sh .data/worker-a.env` 代替上面的 `pnpm dev:worker`；不带该
+capability 时 Worker 会拒绝启动任何 Workspace。宿主机还需安装开机加载规则的 unit，见
+[Workspace Egress Runbook](docs/egress-runbook.md)。
+
 Worker 每次建立 control channel 时，都会先对 `RUNTIME_IMAGE` 启动一次短时、无网络且受资源/
 安全约束的 capability probe。只有镜像 OS/architecture 与宿主机匹配且 probe 返回严格 typed 结果，
 Worker 才发送 hello；各能力组的失败会如实上报 `false`。超时可通过
 `RUNTIME_CAPABILITY_PROBE_TIMEOUT_MS` 调整，默认 120 秒。新部署的 Control Plane 和 Worker 默认
 使用 `agent-runtime:phase7-toolchain` / `phase-7`；已有私有环境文件中的显式旧值不会被自动改写。
+
+## Workspace network egress
+
+Workspace 默认可以访问公网，不能访问 RFC1918 内网与 Worker 宿主机的任何地址；IPv6 一律拒绝。
+管理员在 Portal“网络出口”页面放行具体的内网网段或网段+协议+端口，并可追加拒绝网段（例如
+`169.254.0.0/16`、`100.64.0.0/10`）；Control Plane、PostgreSQL 等平台保护地址永远不可放行。
+每次变更记录 Audit 并立即下发到所有在线 Worker。规则由 Worker 在平台独占的 nftables 表中维护并
+持续校验；无法确认规则生效时 fail-closed（不启动 Workspace、停止运行中的 Workspace，数据保留）。
+安装、配置、开发环境中的 Clash/Tailscale 注意事项与排障见 [Workspace Egress Runbook](docs/egress-runbook.md)。
 
 ## Logs
 

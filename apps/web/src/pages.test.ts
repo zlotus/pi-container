@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { egressRuleText } from "./components/AuditEventRow.js";
+import { egressRuleRequest, egressServiceText } from "./pages/AdminEgressPage.js";
+
 import { api, ApiError } from "./api.js";
 import {
   EMPTY_ADMIN_USER_FILTER,
@@ -108,5 +111,43 @@ describe("Asynchronous confirmation", () => {
       runConfirmedAdminUserUpdate(target, { status: "disabled" }, async () => true, request),
     ).resolves.toBe(true);
     expect(request).toHaveBeenCalledOnce();
+  });
+});
+
+describe("Admin egress rules", () => {
+  const base = { action: "allow", network: " 192.168.1.1 ", protocol: "", ports: "", description: "" };
+
+  it("builds API bodies for whole networks, protocols and port ranges", () => {
+    expect(egressRuleRequest(base)).toEqual({ body: { action: "allow", network: "192.168.1.1" } });
+    expect(egressRuleRequest({ ...base, protocol: "tcp", ports: "80", description: " router " })).toEqual({
+      body: { action: "allow", network: "192.168.1.1", protocol: "tcp", portMin: 80, portMax: 80, description: "router" },
+    });
+    expect(egressRuleRequest({ ...base, protocol: "udp", ports: "8000 - 8100" })).toMatchObject({
+      body: { protocol: "udp", portMin: 8000, portMax: 8100 },
+    });
+    // A deny range never carries a service.
+    expect(egressRuleRequest({ ...base, action: "deny", protocol: "tcp", ports: "80" })).toEqual({
+      body: { action: "deny", network: "192.168.1.1" },
+    });
+  });
+
+  it("explains unusable port input instead of sending it", () => {
+    expect(egressRuleRequest({ ...base, ports: "80" })).toEqual({ error: "指定端口时需要选择协议" });
+    expect(egressRuleRequest({ ...base, protocol: "tcp", ports: "http" })).toEqual({
+      error: "端口格式应为 80 或 8000-8100",
+    });
+  });
+
+  it("describes rules and their audit events", () => {
+    expect(egressServiceText({ protocol: null, portMin: null, portMax: null })).toBe("全部");
+    expect(egressServiceText({ protocol: "udp", portMin: null, portMax: null })).toBe("udp 全部端口");
+    expect(egressServiceText({ protocol: "tcp", portMin: 80, portMax: 81 })).toBe("tcp 80-81");
+    expect(
+      egressRuleText({ action: "allow", network: "10.0.0.0/8", protocol: "tcp", portMin: 443, portMax: 443 }),
+    ).toBe("放行 10.0.0.0/8 tcp 443");
+    expect(egressRuleText({ action: "deny", network: "100.64.0.0/10", protocol: null })).toBe(
+      "拒绝 100.64.0.0/10",
+    );
+    expect(egressRuleText({ protocol: "LOCAL" })).toBeNull();
   });
 });
