@@ -158,6 +158,8 @@ inode 上限、继承、跨 project 的 rename/硬链接被拒、符号链接不
 truncate -s 512M /tmp/quota-test.xfs && mkfs.xfs -q /tmp/quota-test.xfs
 sudo mkdir -p /mnt/agent-runtime-quota-test
 sudo mount -o loop,prjquota /tmp/quota-test.xfs /mnt/agent-runtime-quota-test
-sudo env "PATH=$PATH" TEST_XFS_ROOT=/mnt/agent-runtime-quota-test pnpm test:quota
+# 以 root 直接运行 vitest（经 pnpm 会以 root 重新检查并改写 node_modules）
+(cd apps/worker && sudo env "PATH=$PATH" TEST_XFS_ROOT=/mnt/agent-runtime-quota-test \
+  ../../node_modules/.bin/vitest run src/storage/quota.xfs.test.ts)
 sudo umount /mnt/agent-runtime-quota-test && rm /tmp/quota-test.xfs
 ```

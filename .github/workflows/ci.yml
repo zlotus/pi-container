@@ -68,4 +68,7 @@ jobs:
           mkfs.xfs -q "$RUNNER_TEMP/quota.xfs"
           sudo mkdir -p /mnt/agent-runtime-quota
           sudo mount -o loop,prjquota "$RUNNER_TEMP/quota.xfs" /mnt/agent-runtime-quota
-          sudo env "PATH=$PATH" TEST_XFS_ROOT=/mnt/agent-runtime-quota pnpm test:quota
+          # vitest directly: pnpm as root would re-check (and try to reinstall) node_modules.
+          cd apps/worker
+          sudo env "PATH=$PATH" TEST_XFS_ROOT=/mnt/agent-runtime-quota \
+            ../../node_modules/.bin/vitest run src/storage/quota.xfs.test.ts
