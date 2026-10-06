@@ -1,12 +1,15 @@
+import { randomUUID } from "node:crypto";
 import { constants, type Dirent } from "node:fs";
 import {
   access,
+  chmod,
   chown,
   lstat,
   mkdir,
   readdir,
   readFile,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -17,6 +20,8 @@ import {
   type WorkerReconcileAssignment,
   type WorkerReconciliationReport,
   type WorkerRecoveryIssue,
+  type WorkerStorageStatus,
+  type WorkspaceDiskUsage,
   type WorkspaceResources,
   type WorkspaceState,
 } from "@agent-runtime/protocol";
@@ -26,6 +31,13 @@ import { z } from "zod";
 
 import type { WorkerConfig } from "./config.js";
 import { workspaceBridgeName } from "./egress/ruleset.js";
+import {
+  type ProjectUsage,
+  StorageQuotaError,
+  type StoragePolicy,
+  type WorkspaceQuota,
+  type WorkspaceQuotaDirectories,
+} from "./storage/controller.js";
 
 const APP_LABEL = "agent-runtime-platform";
 const MANAGED_BY_LABEL = "worker";
@@ -33,6 +45,20 @@ const PI_WEB_PORT = "30141/tcp";
 const PI_WEB_DEFAULT_CWD_ENV = "PI_WEB_DEFAULT_CWD=/workspace";
 const RESOURCE_NAME_PREFIX = "agent-runtime-";
 const BRIDGE_NAME_OPTION = "com.docker.network.bridge.name";
+const CARGO_HOME_ENV = "CARGO_HOME=/home/agent/.cargo";
+const HOME_INIT_PREFIX = "agent-runtime-home-init-";
+
+/** Read-only root: these tmpfs mounts are the only writable places outside the binds. */
+const WORKSPACE_TMPFS: Record<string, string> = {
+  "/run": "rw,nosuid,nodev,noexec,size=16m,mode=755",
+  "/run/lock": "rw,nosuid,nodev,noexec,size=1m,mode=1777",
+  "/var/tmp": "rw,nosuid,nodev,size=256m,mode=1777",
+};
+
+const WORKSPACE_LOG_CONFIG = {
+  Type: "json-file",
+  Config: { "max-size": "10m", "max-file": "3" },
+};
 
 /** The Worker's egress rule state as seen by the Runtime (specs.md Phase 14.5). */
 export interface EgressGate {
@@ -48,7 +74,48 @@ const UNENFORCED_EGRESS: EgressGate = {
   ensure: async () => ({ enforced: false }),
 };
 
+/** The Worker's disk quota controller as used by the Runtime (specs.md Phase 15.6). */
+export interface StorageGate {
+  readonly policy: StoragePolicy;
+  isEnforced(): boolean;
+  status(): WorkerStorageStatus;
+  prepareWorkspace(
+    directories: WorkspaceQuotaDirectories,
+    quota: WorkspaceQuota,
+    dataLimitBytes: number,
+  ): Promise<void>;
+  setDataLimit(
+    directories: WorkspaceQuotaDirectories,
+    quota: WorkspaceQuota,
+    dataLimitBytes: number,
+  ): Promise<ProjectUsage>;
+  releaseWorkspace(quota: WorkspaceQuota): Promise<void>;
+  usage(directory: string): Promise<ProjectUsage>;
+}
+
+/** Used when no controller is wired in: nothing may start without enforced quotas. */
+const UNENFORCED_STORAGE: StorageGate = {
+  policy: { projectIdMin: 1_000_000, dataInodeLimit: 0, piLimitBytes: 0, piInodeLimit: 0 },
+  isEnforced: () => false,
+  status: () => ({ enforced: false, fsType: null, totalBytes: null, freeBytes: null }),
+  prepareWorkspace: async () => {
+    throw new StorageQuotaError("STORAGE_QUOTA_UNENFORCED", "Disk quotas are not enforced");
+  },
+  setDataLimit: async () => {
+    throw new StorageQuotaError("STORAGE_QUOTA_UNENFORCED", "Disk quotas are not enforced");
+  },
+  releaseWorkspace: async () => undefined,
+  usage: async () => {
+    throw new StorageQuotaError("STORAGE_QUOTA_UNENFORCED", "Disk quotas are not enforced");
+  },
+};
+
+/** "legacy" = created before Phase 15 (writable root, two binds); it may not start. */
+type ContainerGeneration = "current" | "legacy";
+
 type NetworkGeneration = "current" | "legacy";
+
+const ProjectIdSchema = z.number().int().min(1).max(2 ** 32 - 2);
 
 const MetadataSchema = z
   .object({
@@ -56,12 +123,26 @@ const MetadataSchema = z
     workspaceId: WorkspaceIdSchema,
     workerId: z.string(),
     runtimeImage: z.string().min(1),
+    /** Added by Phase 15 the first time the Workspace is prepared under quotas. */
+    quota: z
+      .object({
+        dataProjectId: ProjectIdSchema,
+        piProjectId: ProjectIdSchema,
+        dataLimitBytes: z.number().int().positive(),
+      })
+      .strict()
+      .optional(),
+    homeInitialized: z.boolean().optional(),
   })
   .strict();
+
+type WorkspaceMetadata = z.infer<typeof MetadataSchema>;
 
 interface WorkspacePaths {
   root: string;
   workspace: string;
+  home: string;
+  tmp: string;
   pi: string;
   metadata: string;
   metadataFile: string;
@@ -69,6 +150,7 @@ interface WorkspacePaths {
 
 interface ManagedWorkspacePaths extends WorkspacePaths {
   runtimeImage: string;
+  managed: WorkspaceMetadata;
 }
 
 export interface WorkspaceRuntimeObservation {
@@ -90,7 +172,11 @@ export class WorkspaceRuntimeError extends Error {
       | "RUNTIME_NOT_READY"
       | "RUNTIME_ENGINE_ERROR"
       | "EGRESS_UNENFORCED"
-      | "EGRESS_NETWORK_LEGACY",
+      | "EGRESS_NETWORK_LEGACY"
+      | "STORAGE_QUOTA_UNENFORCED"
+      | "STORAGE_QUOTA_APPLY_FAILED"
+      | "STORAGE_LIMIT_EXCEEDED"
+      | "STORAGE_MIGRATION_REQUIRED",
     message: string,
     readonly retryable = false,
   ) {
@@ -144,6 +230,10 @@ export class DockerWorkspaceRuntime {
   readonly #workspaceBaseUrl: ReturnType<typeof parseWorkspaceBaseUrl>;
   readonly #readinessProbe: (port: string) => Promise<boolean>;
   readonly #egress: EgressGate;
+  readonly #storage: StorageGate;
+  readonly #nofileLimit: number;
+  /** Serializes project ID allocation across concurrent Workspace commands. */
+  #projectAllocation: Promise<unknown> = Promise.resolve();
   #initialized = false;
 
   constructor(
@@ -160,9 +250,12 @@ export class DockerWorkspaceRuntime {
       }
     },
     egress: EgressGate = UNENFORCED_EGRESS,
+    storage: StorageGate = UNENFORCED_STORAGE,
   ) {
     this.#docker = docker;
     this.#egress = egress;
+    this.#storage = storage;
+    this.#nofileLimit = config.WORKSPACE_NOFILE_LIMIT;
     this.#managedRoot = resolve(config.WORKER_MANAGED_ROOT);
     this.#workspacesRoot = join(this.#managedRoot, "workspaces");
     this.#runtimeUser = `${config.WORKSPACE_UID}:${config.WORKSPACE_GID}`;
@@ -184,15 +277,24 @@ export class DockerWorkspaceRuntime {
     workspaceId: string,
     runtimeImage: string,
     resources: WorkspaceResources,
+    storage: { diskLimitBytes: number },
   ): Promise<WorkspaceRuntimeObservation> {
     this.#assertRuntimeImage(runtimeImage);
     this.#assertResources(resources);
-    const paths = await this.#ensureWorkspacePaths(workspaceId);
+    let paths = await this.#ensureWorkspacePaths(workspaceId);
     const networkName = this.#networkName(workspaceId);
-    await this.#ensureNetwork(workspaceId, networkName, paths);
     const existing = await this.#findNamedContainer(workspaceId);
+    if (existing !== null) {
+      this.#assertCurrentGeneration(
+        this.#verifyManagedContainerIdentity(await existing.inspect(), workspaceId, paths, networkName),
+      );
+    }
+    // Quotas are in place before a container can see the directories (Phase 15.6).
+    paths = await this.#prepareStorage(paths, storage.diskLimitBytes);
+    await this.#ensureNetwork(workspaceId, networkName, paths);
     const created = existing === null;
     if (existing === null) {
+      paths = await this.#initializeHome(paths);
       try {
         await this.#docker.createContainer({
           name: this.#containerName(workspaceId),
@@ -209,15 +311,27 @@ export class DockerWorkspaceRuntime {
             "PI_WEB_IDLE_TIMEOUT_MS=0",
             `PI_WEB_ALLOWED_HOSTS=${workspaceId}.${this.#workspaceBaseUrl.hostname}`,
             "PORT=30141",
+            CARGO_HOME_ENV,
           ],
           ExposedPorts: { [PI_WEB_PORT]: {} },
           Labels: managedLabels(this.#workerId, workspaceId),
           HostConfig: {
             AutoRemove: false,
-            Binds: [
-              `${paths.workspace}:/workspace:rw`,
-              `${paths.pi}:/agent/pi:rw`,
+            // `Mounts`, unlike `Binds`, fails instead of creating a missing source as
+            // root: no container starts on bare disk when the quota filesystem is absent.
+            Mounts: this.#workspaceMounts(paths).map((mount) => ({
+              Type: "bind" as const,
+              Source: mount.source,
+              Target: mount.target,
+              ReadOnly: false,
+            })),
+            ReadonlyRootfs: true,
+            Tmpfs: { ...WORKSPACE_TMPFS },
+            Ulimits: [
+              { Name: "nofile", Soft: this.#nofileLimit, Hard: this.#nofileLimit },
+              { Name: "core", Soft: 0, Hard: 0 },
             ],
+            LogConfig: WORKSPACE_LOG_CONFIG,
             CapDrop: ["ALL"],
             Memory: resources.memoryBytes,
             NanoCpus: Math.round(resources.cpuCount * 1_000_000_000),
@@ -238,11 +352,8 @@ export class DockerWorkspaceRuntime {
 
     const container = await this.#requireManagedContainer(workspaceId);
     const inspection = await container.inspect();
-    this.#verifyManagedContainerIdentity(
-      inspection,
-      workspaceId,
-      paths,
-      networkName,
+    this.#assertCurrentGeneration(
+      this.#verifyManagedContainerIdentity(inspection, workspaceId, paths, networkName),
     );
     if (created) {
       this.#verifyCurrentRuntimeConfiguration(inspection, resources);
@@ -260,16 +371,28 @@ export class DockerWorkspaceRuntime {
     this.#assertRuntimeImage(paths.runtimeImage);
     const container = await this.#requireManagedContainer(workspaceId);
     let inspection = await container.inspect();
-    this.#verifyManagedContainerIdentity(
-      inspection,
-      workspaceId,
-      paths,
-      this.#networkName(workspaceId),
+    this.#assertCurrentGeneration(
+      this.#verifyManagedContainerIdentity(
+        inspection,
+        workspaceId,
+        paths,
+        this.#networkName(workspaceId),
+      ),
     );
     this.#verifyLegacyCompatibleDefaultCwd(inspection);
     await this.#ensureNetwork(workspaceId, this.#networkName(workspaceId), paths);
     if (!inspection.State.Running) {
       await this.#assertEgressEnforced();
+      const quota = paths.managed.quota;
+      if (quota === undefined) {
+        throw new WorkspaceRuntimeError(
+          "STORAGE_QUOTA_UNENFORCED",
+          "Workspace has no disk quota yet; ensure it before starting",
+        );
+      }
+      // Re-verify (and repair) the projects right before the container starts.
+      await this.#prepareStorage(paths, quota.dataLimitBytes);
+      await this.#clearTemporaryDirectory(paths);
       try {
         await container.start();
       } catch (error) {
@@ -398,6 +521,11 @@ export class DockerWorkspaceRuntime {
     }
 
     await rm(paths.root, { recursive: true, force: false });
+    const quota = paths.managed.quota;
+    if (quota !== undefined && this.#storage.isEnforced()) {
+      // Hygiene only: every later user of these IDs sets its own limits first.
+      await this.#storage.releaseWorkspace(quota).catch(() => undefined);
+    }
     return this.#observation(workspaceId, "CREATED", paths.runtimeImage);
   }
 
@@ -417,6 +545,65 @@ export class DockerWorkspaceRuntime {
     } catch (error) {
       throw this.#engineError(error, "count managed Workspace containers");
     }
+  }
+
+  /**
+   * Changes a Workspace's data limit in place (specs.md Phase 15.7). A Workspace that was
+   * never prepared under quotas gets its limit from the next `workspace.ensure` instead.
+   */
+  async setDiskLimit(
+    workspaceId: string,
+    dataLimitBytes: number,
+  ): Promise<{ dataLimitBytes: number; dataUsedBytes: number }> {
+    const paths = await this.#requireWorkspacePaths(workspaceId);
+    const quota = paths.managed.quota;
+    if (quota === undefined) return { dataLimitBytes, dataUsedBytes: 0 };
+    let usage: ProjectUsage;
+    try {
+      usage = await this.#storage.setDataLimit(paths, quota, dataLimitBytes);
+    } catch (error) {
+      throw this.#storageError(error);
+    }
+    await this.#writeMetadata(paths, {
+      ...paths.managed,
+      quota: { ...quota, dataLimitBytes },
+    });
+    return { dataLimitBytes, dataUsedBytes: usage.usedBytes };
+  }
+
+  /**
+   * Samples every prepared Workspace's projects through `statfs` (no privilege needed).
+   * Empty while quotas are not enforced, because `statfs` would then describe the disk.
+   */
+  async diskUsage(): Promise<WorkspaceDiskUsage[]> {
+    if (!this.#storage.isEnforced()) return [];
+    await this.#initialize();
+    const samples: WorkspaceDiskUsage[] = [];
+    for (const entry of await readdir(this.#workspacesRoot, { withFileTypes: true })) {
+      const workspaceId = WorkspaceIdSchema.safeParse(entry.name);
+      if (!workspaceId.success || !entry.isDirectory()) continue;
+      try {
+        const paths = await this.#requireWorkspacePaths(workspaceId.data);
+        const quota = paths.managed.quota;
+        if (quota === undefined) continue;
+        const [data, pi] = await Promise.all([
+          this.#storage.usage(paths.workspace),
+          this.#storage.usage(paths.pi),
+        ]);
+        samples.push({
+          workspaceId: workspaceId.data,
+          dataUsedBytes: data.usedBytes,
+          dataLimitBytes: data.limitBytes,
+          dataUsedInodes: data.usedInodes,
+          piUsedBytes: pi.usedBytes,
+          piLimitBytes: pi.limitBytes,
+        });
+      } catch {
+        // A Workspace being deleted or with damaged metadata is simply not sampled.
+      }
+      if (samples.length >= 10_000) break;
+    }
+    return samples;
   }
 
   async reconcile(
@@ -598,17 +785,26 @@ export class DockerWorkspaceRuntime {
     this.#assertRuntimeImage(paths.runtimeImage);
     const container = await this.#requireManagedContainer(workspaceId);
     const inspection = await container.inspect();
-    this.#verifyManagedContainerIdentity(
-      inspection,
-      workspaceId,
-      paths,
-      this.#networkName(workspaceId),
+    this.#assertCurrentGeneration(
+      this.#verifyManagedContainerIdentity(
+        inspection,
+        workspaceId,
+        paths,
+        this.#networkName(workspaceId),
+      ),
     );
     this.#verifyLegacyCompatibleDefaultCwd(inspection);
     if (!inspection.State.Running) {
       throw new WorkspaceRuntimeError(
         "RUNTIME_NOT_READY",
         "Workspace Runtime is not running",
+        true,
+      );
+    }
+    if (!this.#storage.isEnforced()) {
+      throw new WorkspaceRuntimeError(
+        "STORAGE_QUOTA_UNENFORCED",
+        "Disk quotas are not enforced on this Worker",
         true,
       );
     }
@@ -669,6 +865,8 @@ export class DockerWorkspaceRuntime {
     return {
       root,
       workspace: join(root, "workspace"),
+      home: join(root, "home"),
+      tmp: join(root, "tmp"),
       pi: join(root, "pi"),
       metadata,
       metadataFile: join(metadata, "managed.json"),
@@ -686,14 +884,17 @@ export class DockerWorkspaceRuntime {
     }
 
     if (!created) {
-      this.#assertRuntimeImage(await this.#verifyMetadata(paths, workspaceId));
+      this.#assertRuntimeImage((await this.#verifyMetadata(paths, workspaceId)).runtimeImage);
     }
-    await mkdir(paths.workspace, { recursive: true, mode: 0o700 });
-    await mkdir(paths.pi, { recursive: true, mode: 0o700 });
-    await mkdir(paths.metadata, { recursive: true, mode: 0o700 });
+    for (const directory of [paths.workspace, paths.home, paths.tmp, paths.pi, paths.metadata]) {
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+    }
     try {
-      await chown(paths.workspace, this.#runtimeUid, this.#runtimeGid);
-      await chown(paths.pi, this.#runtimeUid, this.#runtimeGid);
+      for (const directory of [paths.workspace, paths.home, paths.tmp, paths.pi]) {
+        await chown(directory, this.#runtimeUid, this.#runtimeGid);
+      }
+      // The Workspace's /tmp; the parent directory keeps it private on the host.
+      await chmod(paths.tmp, 0o1777);
     } catch (error) {
       throw this.#engineError(error, "set managed Workspace directory ownership");
     }
@@ -709,8 +910,9 @@ export class DockerWorkspaceRuntime {
         { encoding: "utf8", flag: "wx", mode: 0o600 },
       );
     }
-    await this.#assertRealDirectories(paths);
-    return { ...paths, runtimeImage: this.#runtimeImage };
+    await this.#assertRealDirectories(paths, true);
+    const managed = await this.#verifyMetadata(paths, workspaceId);
+    return { ...paths, runtimeImage: managed.runtimeImage, managed };
   }
 
   async #requireWorkspacePaths(workspaceId: string): Promise<ManagedWorkspacePaths> {
@@ -723,12 +925,12 @@ export class DockerWorkspaceRuntime {
         "Workspace is not managed by this Worker",
       );
     }
-    const runtimeImage = await this.#verifyMetadata(paths, workspaceId);
-    await this.#assertRealDirectories(paths);
-    return { ...paths, runtimeImage };
+    const managed = await this.#verifyMetadata(paths, workspaceId);
+    await this.#assertRealDirectories(paths, false);
+    return { ...paths, runtimeImage: managed.runtimeImage, managed };
   }
 
-  async #verifyMetadata(paths: WorkspacePaths, workspaceId: string): Promise<string> {
+  async #verifyMetadata(paths: WorkspacePaths, workspaceId: string): Promise<WorkspaceMetadata> {
     let decoded: unknown;
     try {
       const metadataFile = await lstat(paths.metadataFile);
@@ -753,12 +955,31 @@ export class DockerWorkspaceRuntime {
         "Workspace metadata does not match this Worker assignment",
       );
     }
-    return metadata.data.runtimeImage;
+    return metadata.data;
   }
 
-  async #assertRealDirectories(paths: WorkspacePaths): Promise<void> {
-    for (const path of [paths.root, paths.workspace, paths.pi, paths.metadata]) {
-      const stat = await lstat(path);
+  /** Replaces the metadata file atomically (write, then rename over it). */
+  async #writeMetadata(paths: WorkspacePaths, metadata: WorkspaceMetadata): Promise<void> {
+    const temporary = `${paths.metadataFile}.${randomUUID()}.tmp`;
+    await writeFile(temporary, `${JSON.stringify(MetadataSchema.parse(metadata))}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    await rename(temporary, paths.metadataFile);
+  }
+
+  /** Pre-Phase-15 Workspaces have no home/tmp yet; those are checked once they exist. */
+  async #assertRealDirectories(paths: WorkspacePaths, requireAll: boolean): Promise<void> {
+    const optional = new Set([paths.home, paths.tmp]);
+    for (const path of [paths.root, paths.workspace, paths.home, paths.tmp, paths.pi, paths.metadata]) {
+      let stat;
+      try {
+        stat = await lstat(path);
+      } catch (error) {
+        if (!requireAll && optional.has(path) && isNodeError(error, "ENOENT")) continue;
+        throw error;
+      }
       if (!stat.isDirectory() || stat.isSymbolicLink()) {
         throw new WorkspaceRuntimeError(
           "WORKSPACE_METADATA_MISMATCH",
@@ -913,6 +1134,154 @@ export class DockerWorkspaceRuntime {
     return stopped;
   }
 
+  #storageError(error: unknown): WorkspaceRuntimeError {
+    if (error instanceof WorkspaceRuntimeError) return error;
+    if (error instanceof StorageQuotaError) {
+      return new WorkspaceRuntimeError(error.code, error.message, error.retryable);
+    }
+    return new WorkspaceRuntimeError(
+      "STORAGE_QUOTA_APPLY_FAILED",
+      "Workspace disk quota could not be applied",
+      true,
+    );
+  }
+
+  /**
+   * Puts every Workspace directory under its projects with the requested data limit
+   * before a container is created or started (specs.md Phase 15.6). The first time, two
+   * project IDs are allocated and recorded in the Workspace's metadata.
+   */
+  async #prepareStorage(
+    paths: ManagedWorkspacePaths,
+    dataLimitBytes: number,
+  ): Promise<ManagedWorkspacePaths> {
+    if (!this.#storage.isEnforced()) {
+      throw new WorkspaceRuntimeError(
+        "STORAGE_QUOTA_UNENFORCED",
+        "Disk quotas are not enforced on this Worker",
+      );
+    }
+    let managed = paths.managed;
+    if (managed.quota === undefined) {
+      managed = await this.#withProjectAllocation(async () => {
+        const [dataProjectId, piProjectId] = await this.#unusedProjectIds(2);
+        if (dataProjectId === undefined || piProjectId === undefined) {
+          throw new WorkspaceRuntimeError(
+            "STORAGE_QUOTA_APPLY_FAILED",
+            "No free quota project IDs are left",
+          );
+        }
+        const next = {
+          ...paths.managed,
+          quota: { dataProjectId, piProjectId, dataLimitBytes },
+        };
+        await this.#writeMetadata(paths, next);
+        return next;
+      });
+    } else if (managed.quota.dataLimitBytes !== dataLimitBytes) {
+      managed = { ...managed, quota: { ...managed.quota, dataLimitBytes } };
+      await this.#writeMetadata(paths, managed);
+    }
+    const quota = managed.quota;
+    if (quota === undefined) throw new Error("quota metadata was not recorded");
+    try {
+      await this.#storage.prepareWorkspace(paths, quota, dataLimitBytes);
+    } catch (error) {
+      throw this.#storageError(error);
+    }
+    return { ...paths, managed };
+  }
+
+  async #withProjectAllocation<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.#projectAllocation.then(task, task);
+    this.#projectAllocation = run.catch(() => undefined);
+    return run;
+  }
+
+  /** The lowest IDs above the probe's that no local Workspace metadata records. */
+  async #unusedProjectIds(count: number): Promise<number[]> {
+    const used = new Set<number>();
+    for (const entry of await readdir(this.#workspacesRoot, { withFileTypes: true })) {
+      if (!WorkspaceIdSchema.safeParse(entry.name).success || !entry.isDirectory()) continue;
+      try {
+        const metadata = MetadataSchema.safeParse(
+          JSON.parse(await readFile(join(this.#workspacesRoot, entry.name, "metadata", "managed.json"), "utf8")),
+        );
+        if (metadata.success && metadata.data.quota !== undefined) {
+          used.add(metadata.data.quota.dataProjectId);
+          used.add(metadata.data.quota.piProjectId);
+        }
+      } catch {
+        // Unreadable metadata cannot hold an allocation this Worker made.
+      }
+    }
+    const ids: number[] = [];
+    const first = this.#storage.policy.projectIdMin + 1;
+    for (let candidate = first; ids.length < count && candidate < first + 2 ** 20; candidate += 1) {
+      if (!used.has(candidate)) ids.push(candidate);
+    }
+    return ids;
+  }
+
+  /** The Workspace's /tmp starts empty whenever the Worker starts the container. */
+  async #clearTemporaryDirectory(paths: WorkspacePaths): Promise<void> {
+    const stat = await lstat(paths.tmp);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new WorkspaceRuntimeError(
+        "WORKSPACE_METADATA_MISMATCH",
+        "Managed Workspace path is not a real directory",
+      );
+    }
+    for (const entry of await readdir(paths.tmp)) {
+      // rm never follows a symbolic link; it removes the link itself.
+      await rm(join(paths.tmp, entry), { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Seeds a new home with the image's /etc/skel without overwriting anything, inside a
+   * short-lived sandbox whose only writable mount is that home (specs.md Phase 15.4).
+   */
+  async #initializeHome(paths: ManagedWorkspacePaths): Promise<ManagedWorkspacePaths> {
+    if (paths.managed.homeInitialized === true) return paths;
+    const name = `${HOME_INIT_PREFIX}${randomUUID()}`;
+    let container: Docker.Container | null = null;
+    try {
+      container = await this.#docker.createContainer({
+        name,
+        Image: paths.runtimeImage,
+        User: this.#runtimeUser,
+        Entrypoint: ["/bin/sh", "-c"],
+        Cmd: [
+          'for f in /etc/skel/.[!.]* /etc/skel/*; do [ -e "$f" ] || continue; ' +
+            't="/home/agent/$(basename "$f")"; [ -e "$t" ] || [ -L "$t" ] || cp -a "$f" "$t" || exit 1; done',
+        ],
+        NetworkDisabled: true,
+        HostConfig: {
+          AutoRemove: false,
+          CapDrop: ["ALL"],
+          NetworkMode: "none",
+          Privileged: false,
+          ReadonlyRootfs: true,
+          SecurityOpt: ["no-new-privileges:true"],
+          Memory: 256 * 1024 ** 2,
+          PidsLimit: 32,
+          Mounts: [{ Type: "bind", Source: paths.home, Target: "/home/agent", ReadOnly: false }],
+        },
+      });
+      await container.start();
+      const result = (await container.wait()) as { StatusCode?: number };
+      if (result.StatusCode !== 0) throw new Error("home initialization failed");
+    } catch (error) {
+      throw this.#engineError(error, "initialize the Workspace home directory");
+    } finally {
+      await container?.remove({ force: true }).catch(() => undefined);
+    }
+    const managed = { ...paths.managed, homeInitialized: true };
+    await this.#writeMetadata(paths, managed);
+    return { ...paths, managed };
+  }
+
   async #findNamedContainer(workspaceId: string) {
     const name = this.#containerName(workspaceId);
     let containers;
@@ -992,6 +1361,7 @@ export class DockerWorkspaceRuntime {
       );
     }
     this.#verifyResourceConfiguration(inspection, resources);
+    this.#verifyStorageConfiguration(inspection);
   }
 
   #verifyLegacyRuntimeConfiguration(
@@ -1023,13 +1393,36 @@ export class DockerWorkspaceRuntime {
       networkName,
     );
     let inspection = await container.inspect();
-    this.#verifyManagedContainerIdentity(
+    const containerGeneration = this.#verifyManagedContainerIdentity(
       inspection,
       assignment.workspaceId,
       paths,
       networkName,
     );
     this.#verifyLegacyRuntimeConfiguration(inspection, this.#workspaceResources);
+    if (
+      inspection.State.Running &&
+      (containerGeneration === "legacy" || !this.#storage.isEnforced())
+    ) {
+      // Fail closed: a Workspace without enforced disk quotas must not keep running.
+      try {
+        await container.stop({ t: 15 });
+      } catch (error) {
+        if (dockerStatus(error) !== 304) {
+          throw this.#engineError(error, "stop a Workspace without disk quotas");
+        }
+      }
+      throw containerGeneration === "legacy"
+        ? new WorkspaceRuntimeError(
+            "STORAGE_MIGRATION_REQUIRED",
+            "Workspace was created before disk quotas and was stopped",
+          )
+        : new WorkspaceRuntimeError(
+            "STORAGE_QUOTA_UNENFORCED",
+            "Disk quotas are not enforced; the Workspace was stopped",
+          );
+    }
+    await this.#recordRecoveredDiskLimit(paths, assignment.diskLimitBytes);
     if (inspection.State.Running && (generation === "legacy" || !this.#egress.isEnforced())) {
       // Fail closed: a Workspace outside the egress rules must not keep running.
       try {
@@ -1084,6 +1477,25 @@ export class DockerWorkspaceRuntime {
       "pi-web did not become ready during recovery inspection",
       true,
     );
+  }
+
+  /**
+   * Brings a stored limit up to date after an offline period; a failure is left to the
+   * next ensure, which applies the Control Plane's limit before any start.
+   */
+  async #recordRecoveredDiskLimit(
+    paths: ManagedWorkspacePaths,
+    dataLimitBytes: number,
+  ): Promise<void> {
+    const quota = paths.managed.quota;
+    if (quota === undefined || quota.dataLimitBytes === dataLimitBytes) return;
+    if (!this.#storage.isEnforced()) return;
+    try {
+      await this.#storage.setDataLimit(paths, quota, dataLimitBytes);
+      await this.#writeMetadata(paths, { ...paths.managed, quota: { ...quota, dataLimitBytes } });
+    } catch {
+      // Applied again by the next workspace.ensure.
+    }
   }
 
   /** Returns "legacy" for a managed network created before the `arw-` bridge name. */
@@ -1196,23 +1608,34 @@ export class DockerWorkspaceRuntime {
     }
   }
 
+  /** The Workspace's bind mounts, in the order they are created. */
+  #workspaceMounts(paths: WorkspacePaths): Array<{ source: string; target: string }> {
+    return [
+      { source: paths.workspace, target: "/workspace" },
+      { source: paths.home, target: "/home/agent" },
+      { source: paths.tmp, target: "/tmp" },
+      { source: paths.pi, target: "/agent/pi" },
+    ];
+  }
+
+  /**
+   * Checks ownership and the security baseline of a managed container and tells a
+   * current container from one created before Phase 15 (writable root, two `Binds`),
+   * which may still be inspected, stopped or deleted, but not started or served.
+   */
   #verifyManagedContainerIdentity(
     inspection: Docker.ContainerInspectInfo,
     workspaceId: string,
-    paths: ManagedWorkspacePaths,
+    paths: WorkspacePaths,
     networkName: string,
-  ): void {
-    const mounts = new Map(
-      inspection.Mounts.map((mount) => [mount.Destination, mount]),
-    );
+  ): ContainerGeneration {
     const portBinding = inspection.HostConfig.PortBindings?.[PI_WEB_PORT]?.[0];
     if (
       inspection.Name !== `/${this.#containerName(workspaceId)}` ||
-      inspection.Config.Image !== paths.runtimeImage ||
+      inspection.Config.Image !== (paths as Partial<ManagedWorkspacePaths>).runtimeImage ||
       inspection.Config.User !== this.#runtimeUser ||
       inspection.Config.WorkingDir !== "/workspace" ||
       !inspection.Config.Env.includes("PI_CODING_AGENT_DIR=/agent/pi") ||
-      inspection.Mounts.length !== 2 ||
       inspection.HostConfig.Privileged ||
       inspection.HostConfig.NetworkMode !== networkName ||
       !inspection.HostConfig.CapDrop?.includes("ALL") ||
@@ -1222,17 +1645,73 @@ export class DockerWorkspaceRuntime {
       !labelsMatch(
         inspection.Config.Labels,
         managedLabels(this.#workerId, workspaceId),
-      ) ||
-      mounts.get("/workspace")?.Type !== "bind" ||
-      mounts.get("/workspace")?.Source !== paths.workspace ||
-      mounts.get("/workspace")?.RW !== true ||
-      mounts.get("/agent/pi")?.Type !== "bind" ||
-      mounts.get("/agent/pi")?.Source !== paths.pi ||
-      mounts.get("/agent/pi")?.RW !== true
+      )
     ) {
       throw new WorkspaceRuntimeError(
         "RUNTIME_CONFIGURATION_MISMATCH",
         "Managed Workspace container does not match the security baseline",
+      );
+    }
+    const mounts = new Map(inspection.Mounts.map((mount) => [mount.Destination, mount]));
+    const matches = (expected: Array<{ source: string; target: string }>) =>
+      inspection.Mounts.length === expected.length &&
+      expected.every(({ source, target }) => {
+        const mount = mounts.get(target);
+        return mount?.Type === "bind" && mount.Source === source && mount.RW === true;
+      });
+    const current = this.#workspaceMounts(paths);
+    if (
+      matches(current) &&
+      inspection.HostConfig.ReadonlyRootfs === true &&
+      (inspection.HostConfig.Binds ?? []).length === 0
+    ) {
+      return "current";
+    }
+    const legacy = current.filter(
+      (mount) => mount.target === "/workspace" || mount.target === "/agent/pi",
+    );
+    if (matches(legacy) && inspection.HostConfig.ReadonlyRootfs !== true) {
+      return "legacy";
+    }
+    throw new WorkspaceRuntimeError(
+      "RUNTIME_CONFIGURATION_MISMATCH",
+      "Managed Workspace container does not match the security baseline",
+    );
+  }
+
+  #assertCurrentGeneration(generation: ContainerGeneration): void {
+    if (generation === "legacy") {
+      throw new WorkspaceRuntimeError(
+        "STORAGE_MIGRATION_REQUIRED",
+        "Workspace was created before disk quotas; an administrator must migrate it",
+      );
+    }
+  }
+
+  /** Read-only root, tmpfs, ulimits and log limits of a current container (Phase 15.4/15.5). */
+  #verifyStorageConfiguration(inspection: Docker.ContainerInspectInfo): void {
+    const ulimits = new Map(
+      (inspection.HostConfig.Ulimits ?? []).map((limit) => [limit.Name, limit]),
+    );
+    const tmpfs = inspection.HostConfig.Tmpfs ?? {};
+    const log = inspection.HostConfig.LogConfig;
+    if (
+      inspection.HostConfig.ReadonlyRootfs !== true ||
+      Object.keys(tmpfs).length !== Object.keys(WORKSPACE_TMPFS).length ||
+      Object.entries(WORKSPACE_TMPFS).some(([path, options]) => tmpfs[path] !== options) ||
+      ulimits.size !== 2 ||
+      ulimits.get("nofile")?.Soft !== this.#nofileLimit ||
+      ulimits.get("nofile")?.Hard !== this.#nofileLimit ||
+      ulimits.get("core")?.Soft !== 0 ||
+      ulimits.get("core")?.Hard !== 0 ||
+      log?.Type !== WORKSPACE_LOG_CONFIG.Type ||
+      log.Config?.["max-size"] !== WORKSPACE_LOG_CONFIG.Config["max-size"] ||
+      log.Config["max-file"] !== WORKSPACE_LOG_CONFIG.Config["max-file"] ||
+      !inspection.Config.Env.includes(CARGO_HOME_ENV)
+    ) {
+      throw new WorkspaceRuntimeError(
+        "RUNTIME_CONFIGURATION_MISMATCH",
+        "Managed Workspace storage limits do not match the current Runtime configuration",
       );
     }
   }

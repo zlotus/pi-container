@@ -33,7 +33,7 @@ class FakeSocket {
 
 function inspectCommand(): ControlToWorkerMessage {
   return {
-    version: 2,
+    version: 3,
     type: "workspace.inspect",
     requestId: REQUEST_ID,
     payload: { workspaceId: WORKSPACE_ID },
@@ -51,7 +51,7 @@ describe("worker command correlation", () => {
     channel.register("worker-01", socket);
     const result = channel.dispatch("worker-01", inspectCommand());
     const response = {
-      version: 2 as const,
+      version: 3 as const,
       type: "response.ok" as const,
       requestId: REQUEST_ID,
       payload: {
@@ -88,7 +88,7 @@ describe("worker command correlation", () => {
     channel.register("worker-01", socket);
     const result = channel.dispatch("worker-01", inspectCommand());
     const response = {
-      version: 2 as const,
+      version: 3 as const,
       type: "response.ok" as const,
       requestId: REQUEST_ID,
       payload: {
@@ -110,7 +110,7 @@ describe("worker command correlation", () => {
 
     expect(
       channel.acceptResponse("worker-01", {
-        version: 2,
+        version: 3,
         type: "response.ok",
         requestId: REQUEST_ID,
         payload: {

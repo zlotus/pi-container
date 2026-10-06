@@ -22,6 +22,8 @@ function isCompatible(
     // Only Workers that verifiably enforce the current egress policy (Phase 14).
     !candidate.egressEnforced ||
     candidate.egressRevision !== input.egressRevision ||
+    // Only Workers whose disk quotas are enforced (Phase 15.6).
+    !candidate.storageEnforced ||
     (workspace.requiredArchitecture !== null &&
       candidate.architecture !== workspace.requiredArchitecture)
   ) {

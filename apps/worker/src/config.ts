@@ -75,7 +75,11 @@ export const WorkerConfigSchema = z
       .max(300_000)
       .default(120_000),
     DOCKER_SOCKET_PATH: AbsolutePathSchema.default("/var/run/docker.sock"),
-    WORKER_MANAGED_ROOT: AbsolutePathSchema.default("/var/lib/agent-runtime"),
+    /** Plain path characters only: it reaches `xfs_quota -c` (specs.md Phase 15.3). */
+    WORKER_MANAGED_ROOT: AbsolutePathSchema.default("/var/lib/agent-runtime").refine(
+      (value) => /^\/[A-Za-z0-9._/-]+$/.test(value) && !value.split("/").includes(".."),
+      "WORKER_MANAGED_ROOT may only contain letters, digits, '.', '_', '-' and '/'",
+    ),
     WORKSPACE_CPU_COUNT: z.coerce.number().positive().max(256).default(2),
     WORKSPACE_MEMORY_BYTES: z.coerce
       .number()
@@ -88,6 +92,19 @@ export const WorkerConfigSchema = z
     WORKSPACE_GID: z.coerce.number().int().positive().default(1_000),
     WORKER_EGRESS_PROTECTED: Ipv4CidrListConfigSchema,
     WORKER_EGRESS_NFT_PATH: AbsolutePathSchema.default("/usr/sbin/nft"),
+    WORKER_XFS_QUOTA_PATH: AbsolutePathSchema.default("/usr/sbin/xfs_quota"),
+    WORKER_LSATTR_PATH: AbsolutePathSchema.default("/usr/bin/lsattr"),
+    /** Start of this Worker's project ID range; the first ID is the capability probe's. */
+    WORKER_QUOTA_PROJECT_ID_MIN: z.coerce.number().int().min(1).max(2 ** 31).default(1_000_000),
+    WORKSPACE_DATA_INODE_LIMIT: z.coerce.number().int().min(1_000).max(2 ** 32).default(2_000_000),
+    WORKSPACE_PI_STATE_LIMIT_BYTES: z.coerce
+      .number()
+      .int()
+      .min(256 * 1024 ** 2)
+      .max(2 ** 50)
+      .default(2 * 1024 ** 3),
+    WORKSPACE_PI_INODE_LIMIT: z.coerce.number().int().min(1_000).max(2 ** 32).default(200_000),
+    WORKSPACE_NOFILE_LIMIT: z.coerce.number().int().min(1_024).max(1_048_576).default(65_536),
     WORKSPACE_START_TIMEOUT_MS: z.coerce
       .number()
       .int()

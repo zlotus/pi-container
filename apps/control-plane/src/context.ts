@@ -69,6 +69,7 @@ type Phase1Store = Pick<
   | "clearAuthThrottle"
   | "listAuthLocks"
   | "clearAuthLocks"
+  | "updateWorkspaceDiskLimit"
 >;
 
 type WorkerAdminStore = Pick<

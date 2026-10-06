@@ -20,6 +20,7 @@ import { WorkspaceSessionExchange } from "./session-exchange.js";
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const describeWithPostgres = databaseUrl === undefined ? describe.skip : describe;
 const NOW = new Date("2026-09-10T08:00:00.000Z");
+const STORAGE_ENFORCED = { enforced: true, fsType: "xfs", totalBytes: 2 ** 40, freeBytes: 2 ** 39 };
 
 describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
   const userAId = randomUUID();
@@ -642,6 +643,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
           memoryBytes: 16 * 1024 ** 3,
         },
         egress: { enforced: true, revision: await currentEgressRevision() },
+      storage: STORAGE_ENFORCED,
         receivedAt: NOW,
       }),
     ).toBe(true);
@@ -700,6 +702,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
           memoryBytes: 16 * 1024 ** 3,
         },
         egress: { enforced: true, revision: await currentEgressRevision() },
+      storage: STORAGE_ENFORCED,
         receivedAt: NOW,
       }),
     ).toBe(true);
@@ -947,6 +950,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         memoryBytes: 16 * 1024 ** 3,
       },
       egress: { enforced: true, revision: await currentEgressRevision() },
+      storage: STORAGE_ENFORCED,
       receivedAt: NOW,
     });
     const workspace = await repository.createWorkspace({
@@ -1086,6 +1090,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
           memoryBytes: 16 * 1024 ** 3,
         },
         egress: { enforced: true, revision: await currentEgressRevision() },
+      storage: STORAGE_ENFORCED,
         receivedAt: NOW,
       });
     }
@@ -1264,6 +1269,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         allocatedWorkspaces: 0,
         systemResources: { logicalCpuCount: 8, memoryBytes: 16 * 1024 ** 3 },
         egress: { enforced: true, revision: await currentEgressRevision() },
+      storage: STORAGE_ENFORCED,
         receivedAt: NOW,
       });
     }
@@ -1520,8 +1526,10 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         workerId: egressWorkerId,
         allocatedWorkspaces: 1,
         egress: { enforced, revision: start + 2 },
+        storage: STORAGE_ENFORCED,
+        workspaceDisk: [],
         receivedAt: NOW,
-      });
+      }).then((result) => result !== null);
     expect(await heartbeat(true)).toBe(true);
     const workspaceId = randomUUID();
     await database`
@@ -1662,5 +1670,156 @@ describeWithPostgres("Phase 15 login throttle PostgreSQL integration", () => {
     expect(await repository.findAuthLock([hit], at(400_500))).toBeNull();
     expect(await repository.deleteExpiredAuthThrottle(at(10 * 60 * 60_000), 60 * 60_000)).toBeGreaterThanOrEqual(0);
     await database`delete from platform_audit_events where event_type in ('auth.login_locked', 'auth.lock_cleared') and details->>'ipAddress' = '198.51.100.2'`;
+  });
+});
+
+describeWithPostgres("Phase 15 storage PostgreSQL integration", () => {
+  const ownerId = randomUUID();
+  const adminId = randomUUID();
+  const suffix = randomUUID();
+  const workerId = `storage-${suffix}`;
+  const otherWorkerId = `storage-other-${suffix}`;
+  const GIB = 1024 ** 3;
+  let database!: DatabaseClient;
+
+  beforeAll(async () => {
+    if (databaseUrl === undefined) throw new Error("TEST_DATABASE_URL is required");
+    database = createDatabaseClient(databaseUrl);
+    await migrateDatabase(database);
+    const repository = createRepository(database, selectWorker);
+    for (const [id, role] of [[ownerId, "user"], [adminId, "admin"]] as const) {
+      await repository.createUser({
+        id,
+        email: `${role}-${suffix}@example.test`,
+        username: null,
+        passwordHash: await hashPassword("integration-storage-password"),
+        role,
+      });
+    }
+  });
+
+  afterAll(async () => {
+    await database`delete from platform_audit_events where worker_id in (${workerId}, ${otherWorkerId}) or owner_user_id = ${ownerId}`;
+    await database`delete from workspaces where user_id = ${ownerId}`;
+    await database`delete from workers where id in (${workerId}, ${otherWorkerId})`;
+    await database`delete from users where id in (${ownerId}, ${adminId})`;
+    await database.end({ timeout: 5 });
+  });
+
+  it("stores limits, usage samples, Worker storage state and fails closed", async () => {
+    const repository = createRepository(database, selectWorker);
+    const credentialHash = hashOpaqueToken(`storage-${suffix}-credential-token`);
+    for (const [id, hash] of [
+      [workerId, credentialHash],
+      [otherWorkerId, hashOpaqueToken(`storage-other-${suffix}-credential-token`)],
+    ] as const) {
+      await repository.provisionWorkerWithGateway({
+        workerId: id,
+        credentialHash: hash,
+        gatewayBaseUrl: "http://127.0.0.1:18081",
+      });
+    }
+    const own = await repository.createWorkspace({
+      id: randomUUID(),
+      userId: ownerId,
+      name: "storage-own",
+      runtimeImage: "img",
+      diskLimitBytes: 7 * GIB,
+    });
+    const foreign = await repository.createWorkspace({
+      id: randomUUID(),
+      userId: ownerId,
+      name: "storage-foreign",
+      runtimeImage: "img",
+      diskLimitBytes: 9 * GIB,
+    });
+    expect(own.disk).toEqual({
+      limitBytes: 7 * GIB,
+      usedBytes: null,
+      usedInodes: null,
+      piUsedBytes: null,
+      piLimitBytes: null,
+      sampledAt: null,
+    });
+    await database`update workspaces set worker_id = ${workerId}, state = 'RUNNING' where id = ${own.id}`;
+    await database`update workspaces set worker_id = ${otherWorkerId}, state = 'RUNNING' where id = ${foreign.id}`;
+
+    const sample = (workspaceId: string) => ({
+      workspaceId,
+      dataUsedBytes: 3 * GIB,
+      dataLimitBytes: 7 * GIB,
+      dataUsedInodes: 1234,
+      piUsedBytes: 5_000,
+      piLimitBytes: 2 * GIB,
+    });
+    const heartbeat = (enforced: boolean) =>
+      repository.recordWorkerHeartbeat({
+        credentialHash,
+        workerId,
+        allocatedWorkspaces: 1,
+        egress: { enforced: true, revision: 0 },
+        storage: { ...STORAGE_ENFORCED, enforced },
+        workspaceDisk: [sample(own.id), sample(foreign.id)],
+        receivedAt: NOW,
+      });
+    // A Worker cannot write usage for a Workspace assigned to another Worker.
+    await expect(heartbeat(true)).resolves.toEqual({ ignoredDiskSamples: 1 });
+    const listed = await repository.listManagedUserWorkspaces(ownerId);
+    expect(listed?.find((workspace) => workspace.id === own.id)?.disk).toEqual({
+      limitBytes: 7 * GIB,
+      usedBytes: 3 * GIB,
+      usedInodes: 1234,
+      piUsedBytes: 5_000,
+      piLimitBytes: 2 * GIB,
+      sampledAt: NOW,
+    });
+    expect(listed?.find((workspace) => workspace.id === foreign.id)?.disk.usedBytes).toBeNull();
+
+    const workers = await repository.listWorkersWithAssignments();
+    expect(workers.find((worker) => worker.id === workerId)).toMatchObject({
+      storage: { ...STORAGE_ENFORCED, checkedAt: NOW },
+      allocatedDiskLimitBytes: 7 * GIB,
+    });
+
+    await heartbeat(false);
+    const [state] = await database<Array<{ state: string }>>`
+      select state from workspaces where id = ${own.id}
+    `;
+    expect(state?.state).toBe("ERROR");
+    const flips = await database<Array<{ event_type: string }>>`
+      select event_type from platform_audit_events
+      where worker_id = ${workerId} and event_type like 'worker.storage_%'
+      order by id asc
+    `;
+    expect(flips.map((event) => event.event_type)).toEqual([
+      "worker.storage_enforced",
+      "worker.storage_unenforced",
+    ]);
+
+    const changed = await repository.updateWorkspaceDiskLimit({
+      workspaceId: own.id,
+      diskLimitBytes: 11 * GIB,
+      audit: { actorUserId: adminId, requestId: "request", ipAddress: "127.0.0.1", userAgent: null },
+    });
+    expect(changed).toMatchObject({
+      outcome: "UPDATED",
+      previousLimitBytes: 7 * GIB,
+      workspace: { id: own.id, disk: { limitBytes: 11 * GIB } },
+    });
+    const [audit] = await database<Array<{ actor_user_id: string; details: Record<string, unknown> }>>`
+      select actor_user_id, details from platform_audit_events
+      where workspace_id = ${own.id} and event_type = 'workspace.storage_limit_changed'
+    `;
+    expect(audit).toMatchObject({
+      actor_user_id: adminId,
+      details: { previousLimitBytes: 7 * GIB, limitBytes: 11 * GIB },
+    });
+    await expect(
+      repository.updateWorkspaceDiskLimit({
+        workspaceId: randomUUID(),
+        diskLimitBytes: GIB,
+        audit: { actorUserId: adminId, requestId: "request", ipAddress: "127.0.0.1", userAgent: null },
+      }),
+    ).resolves.toEqual({ outcome: "NOT_FOUND" });
   });
 });

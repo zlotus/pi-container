@@ -30,10 +30,14 @@ export interface WorkerScheduleCandidate {
   lastHeartbeatAt: Date | null;
   egressEnforced: boolean;
   egressRevision: number | null;
+  /** Whether the Worker last reported enforced disk quotas (specs.md Phase 15.6). */
+  storageEnforced: boolean;
 }
 
 export interface WorkerPlacementRecord extends WorkerRecord {
   assignedWorkspaces: number;
+  /** Sum of the disk limits of every Workspace assigned here (may exceed capacity). */
+  allocatedDiskLimitBytes: number;
 }
 
 export interface WorkerSelectionInput {
@@ -84,6 +88,7 @@ interface CandidateRow {
   last_heartbeat_at: Date | null;
   egress_enforced: boolean;
   egress_revision: string | null;
+  storage_enforced: boolean;
 }
 
 function mapCandidate(row: CandidateRow): WorkerScheduleCandidate {
@@ -101,6 +106,7 @@ function mapCandidate(row: CandidateRow): WorkerScheduleCandidate {
     lastHeartbeatAt: row.last_heartbeat_at,
     egressEnforced: row.egress_enforced,
     egressRevision: row.egress_revision === null ? null : Number(row.egress_revision),
+    storageEnforced: row.storage_enforced,
   };
 }
 
@@ -113,19 +119,22 @@ export function createSchedulingRepository(
   async function listWorkersWithAssignments(): Promise<WorkerPlacementRecord[]> {
     const [workers, counts] = await Promise.all([
       workerRepository.listWorkers(),
-      database<Array<{ worker_id: string; assigned_workspaces: number }>>`
-        select worker_id, count(*)::integer as assigned_workspaces
+      database<
+        Array<{ worker_id: string; assigned_workspaces: number; disk_limit_bytes: string }>
+      >`
+        select
+          worker_id, count(*)::integer as assigned_workspaces,
+          sum(disk_limit_bytes)::text as disk_limit_bytes
         from workspaces
         where worker_id is not null
         group by worker_id
       `,
     ]);
-    const assignedByWorker = new Map(
-      counts.map((row) => [row.worker_id, row.assigned_workspaces]),
-    );
+    const assignedByWorker = new Map(counts.map((row) => [row.worker_id, row]));
     return workers.map((worker) => ({
       ...worker,
-      assignedWorkspaces: assignedByWorker.get(worker.id) ?? 0,
+      assignedWorkspaces: assignedByWorker.get(worker.id)?.assigned_workspaces ?? 0,
+      allocatedDiskLimitBytes: Number(assignedByWorker.get(worker.id)?.disk_limit_bytes ?? 0),
     }));
   }
 
@@ -227,7 +236,8 @@ export function createSchedulingRepository(
               count(assigned.id)::integer as assigned_workspaces,
               workers.last_heartbeat_at,
               workers.egress_enforced,
-              workers.egress_revision::text as egress_revision
+              workers.egress_revision::text as egress_revision,
+              workers.storage_enforced
             from workers
             left join workspaces assigned on assigned.worker_id = workers.id
             group by workers.id

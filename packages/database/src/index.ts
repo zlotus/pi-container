@@ -78,6 +78,10 @@ export {
   type WorkspaceSchedulingRequirements,
 } from "./scheduling.js";
 export {
+  type StorageAuditMetadata,
+  type UpdateWorkspaceDiskLimitResult,
+} from "./storage.js";
+export {
   type AdminUserRecord,
   type UpdateManagedUserResult,
 } from "./users.js";

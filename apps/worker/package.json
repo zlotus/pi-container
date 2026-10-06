@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:e2e": "vitest run src/gateway.test.ts",
     "test:e2e:runtime": "vitest run src/runtime.integration.test.ts",
+    "test:quota": "vitest run src/storage/quota.xfs.test.ts",
     "test:egress": "unshare --user --map-root-user --net env TEST_EGRESS_NETNS=1 vitest run src/egress/egress.netns.test.ts"
   },
   "dependencies": {

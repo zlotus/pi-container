@@ -55,6 +55,7 @@ export function buildControlPlane(
       store: dependencies.workerStore,
       channel: workerChannel,
       now: context.now,
+      ...(dependencies.log === undefined ? {} : { log: dependencies.log }),
       onHelloAccepted: (workerId) => {
         // The policy goes out before reconciliation so restored Workspaces run under it.
         void runtime
@@ -77,7 +78,7 @@ export function buildControlPlane(
   registerLocalAuthRoutes(app, context);
   registerWorkspaceRoutes(app, context, runtime);
   registerAuditRoutes(app, context);
-  registerAdminWorkerRoutes(app, context);
+  registerAdminWorkerRoutes(app, context, runtime);
   registerAdminEgressRoutes(app, context, runtime);
   registerAdminUserRoutes(app, context);
   registerAdminAuthLockRoutes(app, context);

@@ -168,10 +168,54 @@ export async function createTestDependencies(
       systemResources: { logicalCpuCount: null, memoryBytes: null },
       lastHeartbeatAt: null,
       egress: { enforced: false, revision: null, checkedAt: null },
+      storage: {
+        enforced: false,
+        fsType: null,
+        totalBytes: null,
+        freeBytes: null,
+        checkedAt: null,
+      },
       createdAt: NOW,
       updatedAt: NOW,
     }),
   );
+  const recordStorage = (
+    worker: WorkerRecord,
+    storage: Omit<WorkerRecord["storage"], "checkedAt">,
+    receivedAt: Date,
+  ): void => {
+    if (worker.storage.enforced !== storage.enforced) {
+      auditEvents.unshift({
+        id: String(auditEvents.length + 1),
+        eventType: storage.enforced ? "worker.storage_enforced" : "worker.storage_unenforced",
+        actorUserId: null,
+        ownerUserId: null,
+        workspaceId: null,
+        workerId: worker.id,
+        details: { fsType: storage.fsType },
+        createdAt: NOW,
+      });
+    }
+    worker.storage = { ...storage, checkedAt: receivedAt };
+    if (!storage.enforced) {
+      for (const workspace of workspaces) {
+        if (workspace.workerId === worker.id && workspace.state === "RUNNING") {
+          workspace.state = "ERROR";
+        }
+      }
+    }
+  };
+  const placement = (worker: WorkerRecord) => {
+    const assigned = workspaces.filter((workspace) => workspace.workerId === worker.id);
+    return {
+      ...worker,
+      assignedWorkspaces: assigned.length,
+      allocatedDiskLimitBytes: assigned.reduce(
+        (total, workspace) => total + workspace.disk.limitBytes,
+        0,
+      ),
+    };
+  };
   const egressRules: EgressRuleRecord[] = [];
   const egressPolicy = { revision: 0 };
   const recordEgress = (
@@ -287,18 +331,39 @@ export async function createTestDependencies(
           updatedAt: input.receivedAt,
         });
         recordEgress(worker, input.egress, input.receivedAt);
+        recordStorage(worker, input.storage, input.receivedAt);
         return true;
       },
       async recordWorkerHeartbeat(input) {
-        if (credentials.get(input.credentialHash) !== input.workerId) return false;
+        if (credentials.get(input.credentialHash) !== input.workerId) return null;
         const worker = workers.find((candidate) => candidate.id === input.workerId);
-        if (worker === undefined || !worker.enabled) return false;
+        if (worker === undefined || !worker.enabled) return null;
         worker.allocatedWorkspaces = input.allocatedWorkspaces;
         worker.lastHeartbeatAt = input.receivedAt;
         worker.updatedAt = input.receivedAt;
         worker.status = "ONLINE";
         recordEgress(worker, input.egress, input.receivedAt);
-        return true;
+        recordStorage(worker, input.storage, input.receivedAt);
+        let ignoredDiskSamples = 0;
+        for (const usage of input.workspaceDisk) {
+          const workspace = workspaces.find(
+            (candidate) =>
+              candidate.id === usage.workspaceId && candidate.workerId === input.workerId,
+          );
+          if (workspace === undefined) {
+            ignoredDiskSamples += 1;
+            continue;
+          }
+          workspace.disk = {
+            ...workspace.disk,
+            usedBytes: usage.dataUsedBytes,
+            usedInodes: usage.dataUsedInodes,
+            piUsedBytes: usage.piUsedBytes,
+            piLimitBytes: usage.piLimitBytes,
+            sampledAt: input.receivedAt,
+          };
+        }
+        return { ignoredDiskSamples };
       },
       async recordWorkerEgress(input) {
         const worker = workers.find((candidate) => candidate.id === input.workerId);
@@ -356,12 +421,7 @@ export async function createTestDependencies(
         return { outcome: "DELETED", revision: egressPolicy.revision };
       },
       async listWorkersWithAssignments() {
-        return workers.map((worker) => ({
-          ...worker,
-          assignedWorkspaces: workspaces.filter(
-            (workspace) => workspace.workerId === worker.id,
-          ).length,
-        }));
+        return workers.map(placement);
       },
       async setWorkerSchedulable(input) {
         const worker = workers.find((candidate) => candidate.id === input.workerId);
@@ -382,15 +442,7 @@ export async function createTestDependencies(
             createdAt: NOW,
           });
         }
-        return {
-          outcome: "UPDATED",
-          worker: {
-            ...worker,
-            assignedWorkspaces: workspaces.filter(
-              (workspace) => workspace.workerId === worker.id,
-            ).length,
-          },
-        };
+        return { outcome: "UPDATED", worker: placement(worker) };
       },
     },
     store: {
@@ -433,6 +485,26 @@ export async function createTestDependencies(
             );
           })
           .slice(0, input.limit);
+      },
+      async updateWorkspaceDiskLimit(input) {
+        const workspace = workspaces.find(
+          (candidate) => candidate.id === input.workspaceId && candidate.state !== "DELETING",
+        );
+        if (workspace === undefined) return { outcome: "NOT_FOUND" };
+        const previousLimitBytes = workspace.disk.limitBytes;
+        workspace.disk = { ...workspace.disk, limitBytes: input.diskLimitBytes };
+        const { actorUserId, ...request } = input.audit;
+        auditEvents.unshift({
+          id: String(auditEvents.length + 1),
+          eventType: "workspace.storage_limit_changed",
+          actorUserId,
+          ownerUserId: workspace.userId,
+          workspaceId: workspace.id,
+          workerId: workspace.workerId,
+          details: { ...request, previousLimitBytes, limitBytes: input.diskLimitBytes },
+          createdAt: NOW,
+        });
+        return { outcome: "UPDATED", workspace: { ...workspace }, previousLimitBytes };
       },
       async findAuthLock(keys, now) {
         assertThrottleAvailable();
@@ -1052,6 +1124,7 @@ export async function createTestDependencies(
               lastHeartbeatAt: worker.lastHeartbeatAt,
               egressEnforced: worker.egress.enforced,
               egressRevision: worker.egress.revision,
+              storageEnforced: worker.storage.enforced,
             })),
             connectedWorkerIds: input.connectedWorkerIds,
             heartbeatCutoff: input.heartbeatCutoff,
@@ -1283,7 +1356,7 @@ export async function beginOAuth2Login(app: ReturnType<typeof buildControlPlane>
 
 export function workerHello(workerId: string) {
   return {
-    version: 2,
+    version: 3,
     type: "worker.hello",
     requestId: randomUUID(),
     payload: {
@@ -1307,6 +1380,7 @@ export function workerHello(workerId: string) {
         memoryBytes: 16 * 1024 ** 3,
       },
       egress: { enforced: true, revision: 0 },
+      storage: { enforced: true, fsType: "xfs", totalBytes: 2 ** 40, freeBytes: 2 ** 39 },
     },
   };
 }
@@ -1328,7 +1402,7 @@ export function answerEgressApply(
   if (command.type !== "worker.egress.apply") return false;
   socket.send(
     JSON.stringify({
-      version: 2,
+      version: 3,
       type: "response.ok",
       requestId: command.requestId,
       payload: {
@@ -1354,7 +1428,7 @@ export type ReconcileOkResponse = Omit<WorkerOkResponse, "payload"> & {
 
 export function emptyReconciliation(requestId: string): ReconcileOkResponse {
   return {
-    version: 2,
+    version: 3,
     type: "response.ok",
     requestId,
     payload: {

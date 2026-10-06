@@ -12,7 +12,9 @@ import {
   type WorkerEgressStatus,
   type WorkerReconcileAssignment,
   type WorkerReconciliationReport,
+  type WorkerStorageStatus,
   type WorkerToControlMessage,
+  type WorkspaceDiskUsage,
   type WorkspaceResources,
 } from "@agent-runtime/protocol";
 import WebSocket from "ws";
@@ -39,7 +41,13 @@ export interface WorkspaceRuntime {
     workspaceId: string,
     runtimeImage: string,
     resources: WorkspaceResources,
+    storage: { diskLimitBytes: number },
   ): Promise<WorkspaceRuntimeObservation>;
+  setDiskLimit(
+    workspaceId: string,
+    dataLimitBytes: number,
+  ): Promise<{ dataLimitBytes: number; dataUsedBytes: number }>;
+  diskUsage(): Promise<WorkspaceDiskUsage[]>;
   start(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
   stop(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
   delete(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
@@ -58,6 +66,15 @@ export interface WorkerEgress {
   apply(policy: EgressPolicy): Promise<WorkerEgressStatus>;
 }
 
+/** The Worker's disk quota controller as used by the daemon (specs.md Phase 15.6). */
+export interface WorkerStorage {
+  status(): WorkerStorageStatus;
+  check(): Promise<WorkerStorageStatus>;
+}
+
+/** How often each Workspace's disk usage is sampled for the Control Plane. */
+export const DISK_USAGE_SAMPLE_INTERVAL_MS = 60_000;
+
 export function currentArchitecture(nodeArchitecture: string): Architecture {
   if (nodeArchitecture === "x64") return "amd64";
   if (nodeArchitecture === "arm64") return "arm64";
@@ -74,6 +91,7 @@ export function buildWorkerHello(
   },
   capabilities: WorkerCapabilities,
   egress: WorkerEgressStatus,
+  storage: WorkerStorageStatus,
   allocatedWorkspaces = 0,
 ): WorkerHelloMessage {
   return {
@@ -94,6 +112,7 @@ export function buildWorkerHello(
         memoryBytes: system.memoryBytes,
       },
       egress,
+      storage,
     },
   };
 }
@@ -102,7 +121,9 @@ export function buildWorkerHeartbeat(
   workerId: string,
   observedAt: Date,
   egress: WorkerEgressStatus,
+  storage: WorkerStorageStatus,
   allocatedWorkspaces = 0,
+  workspaceDisk: WorkspaceDiskUsage[] | null = null,
 ): WorkerHeartbeatMessage {
   return {
     version: WORKER_PROTOCOL_VERSION,
@@ -112,6 +133,8 @@ export function buildWorkerHeartbeat(
       workerId,
       allocatedWorkspaces,
       egress,
+      storage,
+      ...(workspaceDisk === null ? {} : { workspaceDisk }),
       observedAt: observedAt.toISOString(),
     },
   };
@@ -121,6 +144,9 @@ export class WorkerDaemon {
   #socket: WebSocket | null = null;
   #heartbeatTimer: NodeJS.Timeout | null = null;
   #egressTimer: NodeJS.Timeout | null = null;
+  #diskTimer: NodeJS.Timeout | null = null;
+  /** The latest usage sample, sent once with the next heartbeat. */
+  #pendingDiskUsage: WorkspaceDiskUsage[] | null = null;
   #reconnectTimer: NodeJS.Timeout | null = null;
   #reconnectDelayMs: number;
   #stopping = false;
@@ -131,6 +157,7 @@ export class WorkerDaemon {
     readonly runtime: WorkspaceRuntime,
     readonly capabilityProbe: RuntimeCapabilityProbe,
     readonly egress: WorkerEgress,
+    readonly storage: WorkerStorage,
     readonly log: Pick<Logger, "info" | "warn"> = createJsonLogger("worker"),
   ) {
     this.#reconnectDelayMs = config.WORKER_RECONNECT_INITIAL_MS;
@@ -141,9 +168,49 @@ export class WorkerDaemon {
     this.#stopping = false;
     // Egress verification does not depend on the Control Plane being reachable.
     this.#egressTimer ??= setInterval(() => {
-      void this.checkEgress();
+      void this.checkEgress().then(() => this.checkStorage());
     }, this.config.WORKER_HEARTBEAT_INTERVAL_MS);
+    this.#diskTimer ??= setInterval(() => {
+      void this.sampleDiskUsage();
+    }, DISK_USAGE_SAMPLE_INTERVAL_MS);
     this.#connect();
+  }
+
+  /**
+   * Re-checks that disk quotas are enforced. When they are not, every running Workspace
+   * is stopped: fail closed, data preserved (specs.md Phase 15.6).
+   */
+  async checkStorage(): Promise<WorkerStorageStatus> {
+    const status = await this.storage.check();
+    if (!status.enforced) {
+      await this.#stopRunning("disk quotas are not enforced");
+    }
+    return status;
+  }
+
+  async sampleDiskUsage(): Promise<void> {
+    try {
+      this.#pendingDiskUsage = await this.runtime.diskUsage();
+    } catch (error) {
+      this.log.warn({ workerId: this.config.WORKER_ID, err: error }, "disk usage sampling failed");
+    }
+  }
+
+  async #stopRunning(reason: string): Promise<void> {
+    try {
+      const stopped = await this.runtime.stopRunningWorkspaces();
+      if (stopped.length > 0) {
+        this.log.warn(
+          { workerId: this.config.WORKER_ID, workspaceIds: stopped, reason },
+          "stopped running Workspaces to fail closed",
+        );
+      }
+    } catch (error) {
+      this.log.warn(
+        { workerId: this.config.WORKER_ID, err: error, reason },
+        "could not stop running Workspaces",
+      );
+    }
   }
 
   /**
@@ -153,20 +220,7 @@ export class WorkerDaemon {
   async checkEgress(): Promise<WorkerEgressStatus> {
     const status = await this.egress.ensure();
     if (!status.enforced) {
-      try {
-        const stopped = await this.runtime.stopRunningWorkspaces();
-        if (stopped.length > 0) {
-          this.log.warn(
-            { workerId: this.config.WORKER_ID, workspaceIds: stopped },
-            "stopped running Workspaces because egress rules are not enforced",
-          );
-        }
-      } catch (error) {
-        this.log.warn(
-          { workerId: this.config.WORKER_ID, err: error },
-          "could not stop Workspaces while egress rules are not enforced",
-        );
-      }
+      await this.#stopRunning("egress rules are not enforced");
     }
     return status;
   }
@@ -176,7 +230,9 @@ export class WorkerDaemon {
     if (this.#heartbeatTimer !== null) clearInterval(this.#heartbeatTimer);
     if (this.#reconnectTimer !== null) clearTimeout(this.#reconnectTimer);
     if (this.#egressTimer !== null) clearInterval(this.#egressTimer);
+    if (this.#diskTimer !== null) clearInterval(this.#diskTimer);
     this.#egressTimer = null;
+    this.#diskTimer = null;
     this.#heartbeatTimer = null;
     this.#reconnectTimer = null;
     this.#socket?.close(1000, "Worker shutting down");
@@ -255,6 +311,7 @@ export class WorkerDaemon {
           },
           capabilities,
           this.egress.status(),
+          this.storage.status(),
           allocatedWorkspaces,
         ),
       );
@@ -274,12 +331,16 @@ export class WorkerDaemon {
     try {
       const allocatedWorkspaces = await this.runtime.allocatedWorkspaces();
       if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+      const workspaceDisk = this.#pendingDiskUsage;
+      this.#pendingDiskUsage = null;
       this.#send(
         buildWorkerHeartbeat(
           this.config.WORKER_ID,
           new Date(),
           this.egress.status(),
+          this.storage.status(),
           allocatedWorkspaces,
+          workspaceDisk,
         ),
       );
     } catch (error) {
@@ -315,6 +376,22 @@ export class WorkerDaemon {
         });
         return;
       }
+      if (message.type === "workspace.storage.set") {
+        const result = await this.runtime.setDiskLimit(
+          message.payload.workspaceId,
+          message.payload.diskLimitBytes,
+        );
+        this.#send({
+          version: WORKER_PROTOCOL_VERSION,
+          type: "response.ok",
+          requestId: message.requestId,
+          payload: {
+            requestType: message.type,
+            storage: { workspaceId: message.payload.workspaceId, ...result },
+          },
+        });
+        return;
+      }
       let workspace: WorkspaceRuntimeObservation;
       switch (message.type) {
         case "workspace.ensure":
@@ -322,6 +399,7 @@ export class WorkerDaemon {
             message.payload.workspaceId,
             message.payload.runtimeImage,
             message.payload.resources,
+            message.payload.storage,
           );
           break;
         case "workspace.start":

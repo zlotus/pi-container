@@ -59,6 +59,14 @@ export function publicWorkspace(workspace: WorkspaceRecord) {
     createdAt: workspace.createdAt.toISOString(),
     updatedAt: workspace.updatedAt.toISOString(),
     lastActivityAt: workspace.lastActivityAt.toISOString(),
+    disk: {
+      limitBytes: workspace.disk.limitBytes,
+      usedBytes: workspace.disk.usedBytes,
+      usedInodes: workspace.disk.usedInodes,
+      piUsedBytes: workspace.disk.piUsedBytes,
+      piLimitBytes: workspace.disk.piLimitBytes,
+      sampledAt: workspace.disk.sampledAt?.toISOString() ?? null,
+    },
   };
 }
 
@@ -105,6 +113,14 @@ export function publicWorker(
       enforced: worker.egress.enforced,
       revision: worker.egress.revision,
       checkedAt: worker.egress.checkedAt?.toISOString() ?? null,
+    },
+    storage: {
+      enforced: worker.storage.enforced,
+      fsType: worker.storage.fsType,
+      totalBytes: worker.storage.totalBytes,
+      freeBytes: worker.storage.freeBytes,
+      checkedAt: worker.storage.checkedAt?.toISOString() ?? null,
+      allocatedLimitBytes: worker.allocatedDiskLimitBytes,
     },
   };
 }

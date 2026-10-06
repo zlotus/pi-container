@@ -207,6 +207,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
         workspaceId: workspace.id,
         runtimeImage: workspace.runtimeImage,
         resources: dependencies.workspaceResources,
+        storage: { diskLimitBytes: starting.disk.limitBytes },
       },
     });
     if (!ensured.ok) {

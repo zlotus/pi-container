@@ -8,6 +8,7 @@ import {
   currentArchitecture,
   type WorkerEgress,
   WorkerDaemon,
+  type WorkerStorage,
   type WorkspaceRuntime,
 } from "./daemon.js";
 import { EgressApplyError } from "./egress/controller.js";
@@ -31,6 +32,18 @@ function fakeRuntime(): WorkspaceRuntime {
     reconcile: vi.fn<WorkspaceRuntime["reconcile"]>(),
     allocatedWorkspaces: vi.fn().mockResolvedValue(0),
     stopRunningWorkspaces: vi.fn().mockResolvedValue([]),
+    setDiskLimit: vi.fn<WorkspaceRuntime["setDiskLimit"]>(),
+    diskUsage: vi.fn<WorkspaceRuntime["diskUsage"]>().mockResolvedValue([]),
+  };
+}
+
+const STORAGE_STATUS = { enforced: true, fsType: "xfs", totalBytes: 1_000, freeBytes: 500 };
+
+function fakeStorage(enforced = true): WorkerStorage {
+  const status = { ...STORAGE_STATUS, enforced };
+  return {
+    status: vi.fn().mockReturnValue(status),
+    check: vi.fn().mockResolvedValue(status),
   };
 }
 
@@ -86,6 +99,7 @@ describe("worker daemon messages", () => {
       runtime,
       { probe: vi.fn().mockRejectedValue(error) },
       fakeEgress(),
+      fakeStorage(),
       log,
     );
     try {
@@ -113,10 +127,10 @@ describe("worker daemon messages", () => {
       architecture: "arm64",
       logicalCpuCount: 8,
       memoryBytes: 16 * 1024 ** 3,
-    }, capabilities, { enforced: true, revision: 4 });
+    }, capabilities, { enforced: true, revision: 4 }, STORAGE_STATUS);
 
     expect(message).toMatchObject({
-      version: 2,
+      version: 3,
       type: "worker.hello",
       payload: {
         workerId: "worker-01",
@@ -131,6 +145,7 @@ describe("worker daemon messages", () => {
         maxWorkspaces: 8,
         allocatedWorkspaces: 0,
         egress: { enforced: true, revision: 4 },
+        storage: STORAGE_STATUS,
       },
     });
   });
@@ -140,11 +155,13 @@ describe("worker daemon messages", () => {
       "worker-01",
       new Date("2026-09-10T08:00:00.000Z"),
       { enforced: false, revision: null },
+      STORAGE_STATUS,
     );
     const second = buildWorkerHeartbeat(
       "worker-01",
       new Date("2026-09-10T08:00:10.000Z"),
       { enforced: true, revision: 1 },
+      STORAGE_STATUS,
     );
 
     expect(first.requestId).not.toBe(second.requestId);
@@ -177,6 +194,7 @@ describe("worker daemon egress", () => {
       runtime,
       { probe: vi.fn() },
       fakeEgress(false),
+      fakeStorage(),
       log,
     );
 
@@ -189,8 +207,9 @@ describe("worker daemon egress", () => {
       {
         workerId: "worker-01",
         workspaceIds: ["8d6f5c43-0d3a-4f53-9d84-3f8c0f3e7a10"],
+        reason: "egress rules are not enforced",
       },
-      "stopped running Workspaces because egress rules are not enforced",
+      "stopped running Workspaces to fail closed",
     );
   });
 
@@ -201,6 +220,7 @@ describe("worker daemon egress", () => {
       runtime,
       { probe: vi.fn() },
       fakeEgress(true),
+      fakeStorage(),
       { info: vi.fn(), warn: vi.fn() },
     );
 
@@ -225,6 +245,7 @@ describe("worker daemon egress", () => {
       fakeRuntime(),
       { probe: vi.fn().mockResolvedValue(capabilities) },
       egress,
+      fakeStorage(),
       { info: vi.fn(), warn: vi.fn() },
     );
     const policy = {
@@ -246,7 +267,7 @@ describe("worker daemon egress", () => {
       ]) {
         workerSocket?.send(
           JSON.stringify({
-            version: 2,
+            version: 3,
             type: "worker.egress.apply",
             requestId,
             payload: policy,
@@ -256,7 +277,7 @@ describe("worker daemon egress", () => {
       await vi.waitFor(() => expect(received).toHaveLength(3));
       expect(egress.apply).toHaveBeenCalledWith(policy);
       expect(received[1]).toEqual({
-        version: 2,
+        version: 3,
         type: "response.ok",
         requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d01",
         payload: {
@@ -265,7 +286,7 @@ describe("worker daemon egress", () => {
         },
       });
       expect(received[2]).toEqual({
-        version: 2,
+        version: 3,
         type: "response.error",
         requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d02",
         payload: {
@@ -277,6 +298,85 @@ describe("worker daemon egress", () => {
       });
     } finally {
       daemon.stop();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+describe("worker daemon disk quotas", () => {
+  it("stops running Workspaces when quotas are not enforced, and only then", async () => {
+    for (const enforced of [false, true]) {
+      const runtime = fakeRuntime();
+      const daemon = new WorkerDaemon(
+        config,
+        runtime,
+        { probe: vi.fn() },
+        fakeEgress(true),
+        fakeStorage(enforced),
+        { info: vi.fn(), warn: vi.fn() },
+      );
+      await daemon.checkStorage();
+      expect(vi.mocked(runtime.stopRunningWorkspaces).mock.calls.length).toBe(enforced ? 0 : 1);
+    }
+  });
+
+  it("reports storage in hello and heartbeats and sends each usage sample once", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const { server, url } = await listen();
+    const runtime = fakeRuntime();
+    const sample = {
+      workspaceId: "8d6f5c43-0d3a-4f53-9d84-3f8c0f3e7a10",
+      dataUsedBytes: 1,
+      dataLimitBytes: 2,
+      dataUsedInodes: 3,
+      piUsedBytes: 4,
+      piLimitBytes: 5,
+    };
+    vi.mocked(runtime.diskUsage).mockResolvedValue([sample]);
+    vi.mocked(runtime.setDiskLimit).mockResolvedValue({ dataLimitBytes: 5 * 1024 ** 3, dataUsedBytes: 7 });
+    const received: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    let workerSocket: WebSocket | undefined;
+    server.on("connection", (socket) => {
+      workerSocket = socket;
+      socket.on("message", (data) => received.push(JSON.parse(data.toString())));
+    });
+    const daemon = new WorkerDaemon(
+      { ...config, CONTROL_PLANE_URL: url },
+      runtime,
+      { probe: vi.fn().mockResolvedValue(capabilities) },
+      fakeEgress(true),
+      fakeStorage(true),
+      { info: vi.fn(), warn: vi.fn() },
+    );
+    try {
+      daemon.start();
+      await vi.waitFor(() => expect(received).toHaveLength(1));
+      expect(received[0]?.payload.storage).toEqual(STORAGE_STATUS);
+      await daemon.sampleDiskUsage();
+      await vi.advanceTimersByTimeAsync(config.WORKER_HEARTBEAT_INTERVAL_MS);
+      await vi.waitFor(() => expect(received).toHaveLength(2));
+      expect(received[1]?.payload).toMatchObject({ storage: STORAGE_STATUS, workspaceDisk: [sample] });
+      await vi.advanceTimersByTimeAsync(config.WORKER_HEARTBEAT_INTERVAL_MS);
+      await vi.waitFor(() => expect(received).toHaveLength(3));
+      expect(received[2]?.payload.workspaceDisk).toBeUndefined();
+
+      workerSocket?.send(
+        JSON.stringify({
+          version: 3,
+          type: "workspace.storage.set",
+          requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d03",
+          payload: { workspaceId: sample.workspaceId, diskLimitBytes: 5 * 1024 ** 3 },
+        }),
+      );
+      await vi.waitFor(() => expect(received.some((entry) => entry.type === "response.ok")).toBe(true));
+      expect(runtime.setDiskLimit).toHaveBeenCalledWith(sample.workspaceId, 5 * 1024 ** 3);
+      expect(received.find((entry) => entry.type === "response.ok")?.payload).toEqual({
+        requestType: "workspace.storage.set",
+        storage: { workspaceId: sample.workspaceId, dataLimitBytes: 5 * 1024 ** 3, dataUsedBytes: 7 },
+      });
+    } finally {
+      daemon.stop();
+      vi.useRealTimers();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
