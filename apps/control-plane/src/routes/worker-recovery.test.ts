@@ -15,6 +15,7 @@ import {
   WORKER_1_TOKEN,
   WORKER_2_TOKEN,
   workerHello,
+  TEST_WORKSPACE_DISK,
 } from "./test-fixtures.js";
 
 describe("Phase 6 Worker recovery reconciliation", () => {
@@ -38,7 +39,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
       }
       firstWorker.send(
         JSON.stringify({
-          version: 2,
+          version: 3,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -164,7 +165,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
     }
     reconnectedWorker.send(
       JSON.stringify({
-        version: 2,
+        version: 3,
         type: "response.ok",
         requestId: reconcileCommand.requestId,
         payload: {
@@ -228,6 +229,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
           createdAt: NOW,
           updatedAt: NOW,
           lastActivityAt: NOW,
+          disk: TEST_WORKSPACE_DISK,
         },
       ]);
       dependencies.testState.setDesiredState(workspaceId, desiredState);
@@ -244,7 +246,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
         };
         worker.send(
           JSON.stringify({
-            version: 2,
+            version: 3,
             type: "response.ok",
             requestId: command.requestId,
             payload: {
@@ -305,6 +307,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
           createdAt: NOW,
           updatedAt: NOW,
           lastActivityAt: NOW,
+          disk: TEST_WORKSPACE_DISK,
         },
       ]);
       const app = buildControlPlane(dependencies);
@@ -320,7 +323,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
         };
         worker.send(
           JSON.stringify({
-            version: 2,
+            version: 3,
             type: "response.ok",
             requestId: command.requestId,
             payload: {
@@ -406,6 +409,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
         createdAt: NOW,
         updatedAt: NOW,
         lastActivityAt: NOW,
+        disk: TEST_WORKSPACE_DISK,
       },
     ]);
     const app = buildControlPlane(dependencies);
@@ -418,7 +422,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
       const command = JSON.parse(data.toString()) as { requestId: string };
       worker.send(
         JSON.stringify({
-          version: 2,
+          version: 3,
           type: "response.ok",
           requestId: command.requestId,
           payload: {

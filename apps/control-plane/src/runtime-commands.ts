@@ -15,7 +15,7 @@ import { type WorkerChannel, WorkerChannelError } from "./worker-channel.js";
 
 export type WorkspaceRuntimeCommand = Exclude<
   ControlToWorkerMessage,
-  { type: "worker.reconcile" | "worker.egress.apply" }
+  { type: "worker.reconcile" | "worker.egress.apply" | "workspace.storage.set" }
 >;
 
 export type DispatchResult =
@@ -51,10 +51,7 @@ export function createRuntimeCommands(
           message: response.payload.message,
         };
       }
-      if (
-        response.payload.requestType === "worker.reconcile" ||
-        response.payload.requestType === "worker.egress.apply"
-      ) {
+      if (!("workspace" in response.payload)) {
         return {
           ok: false,
           workerOffline: false,
@@ -161,6 +158,7 @@ export function createRuntimeCommands(
             workspaceId: workspace.id,
             runtimeImage: workspace.runtimeImage,
             desiredState: workspace.desiredState,
+            diskLimitBytes: workspace.disk.limitBytes,
           })),
         },
       });
@@ -244,6 +242,46 @@ export function createRuntimeCommands(
     }
   }
 
+  /**
+   * Applies a changed data-project limit on the assigned Worker. Returns false when the
+   * Worker is not connected or refuses; the stored limit is applied on the next start.
+   */
+  async function setWorkspaceDiskLimit(
+    workerId: string,
+    workspaceId: string,
+    diskLimitBytes: number,
+  ): Promise<boolean> {
+    if (!workerChannel.isConnected(workerId)) return false;
+    try {
+      const response = await workerChannel.dispatch(workerId, {
+        version: WORKER_PROTOCOL_VERSION,
+        type: "workspace.storage.set",
+        requestId: randomUUID(),
+        payload: { workspaceId, diskLimitBytes },
+      });
+      if (
+        response.type === "response.ok" &&
+        response.payload.requestType === "workspace.storage.set" &&
+        response.payload.storage.workspaceId === workspaceId &&
+        response.payload.storage.dataLimitBytes === diskLimitBytes
+      ) {
+        return true;
+      }
+      dependencies.log?.warn(
+        {
+          workerId,
+          workspaceId,
+          errorCode: response.type === "response.error" ? response.payload.code : null,
+        },
+        "worker did not apply the disk limit",
+      );
+      return false;
+    } catch (error) {
+      dependencies.log?.warn({ workerId, workspaceId, err: error }, "disk limit dispatch failed");
+      return false;
+    }
+  }
+
   async function markRuntimeFailure(
     workspaceId: string,
     workerId: string,
@@ -291,6 +329,7 @@ export function createRuntimeCommands(
     broadcastEgressPolicy,
     dispatchRuntimeCommand,
     reconcileWorkerWorkspaces,
+    setWorkspaceDiskLimit,
     markRuntimeFailure,
     sendDispatchFailure,
     validateRuntimeResult,

@@ -11,6 +11,8 @@ import { logEgressEnvironment } from "./egress/environment.js";
 import { ExecNftClient } from "./egress/nft.js";
 import { buildWorkerGateway } from "./gateway.js";
 import { DockerWorkspaceRuntime } from "./runtime.js";
+import { StorageController } from "./storage/controller.js";
+import { ExecXfsQuotaTool } from "./storage/quota.js";
 
 const config = loadWorkerConfig(process.env);
 const log = await createLogger("worker", LoggingConfigSchema.parse(process.env));
@@ -23,9 +25,20 @@ const egress = new EgressController({
   ),
   log,
 });
-const runtime = new DockerWorkspaceRuntime(config, undefined, undefined, egress);
+const storage = new StorageController({
+  managedRoot: resolve(config.WORKER_MANAGED_ROOT),
+  quota: new ExecXfsQuotaTool(config.WORKER_XFS_QUOTA_PATH, config.WORKER_LSATTR_PATH),
+  policy: {
+    projectIdMin: config.WORKER_QUOTA_PROJECT_ID_MIN,
+    dataInodeLimit: config.WORKSPACE_DATA_INODE_LIMIT,
+    piLimitBytes: config.WORKSPACE_PI_STATE_LIMIT_BYTES,
+    piInodeLimit: config.WORKSPACE_PI_INODE_LIMIT,
+  },
+  log,
+});
+const runtime = new DockerWorkspaceRuntime(config, undefined, undefined, egress, storage);
 const capabilityProbe = new DockerRuntimeCapabilityProbe(config);
-const daemon = new WorkerDaemon(config, runtime, capabilityProbe, egress, log);
+const daemon = new WorkerDaemon(config, runtime, capabilityProbe, egress, storage, log);
 const tls =
   config.WORKER_GATEWAY_TLS_CERT_PATH === undefined ||
   config.WORKER_GATEWAY_TLS_KEY_PATH === undefined
@@ -69,6 +82,8 @@ await new Promise<void>((resolve, reject) => {
 });
 await logEgressEnvironment(log);
 await egress.initialize();
-// Running Workspaces must not outlive unverifiable egress rules (fail closed).
+// Running Workspaces must not outlive unverifiable egress rules or quotas (fail closed).
 await daemon.checkEgress();
+await daemon.checkStorage();
+await daemon.sampleDiskUsage();
 daemon.start();

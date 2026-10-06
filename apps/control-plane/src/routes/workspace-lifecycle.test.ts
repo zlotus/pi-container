@@ -13,6 +13,7 @@ import {
   WORKER_1_TOKEN,
   WORKER_2_TOKEN,
   workerHello,
+  TEST_WORKSPACE_DISK,
 } from "./test-fixtures.js";
 
 describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
@@ -49,7 +50,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
             : "CREATED";
       worker.send(
         JSON.stringify({
-          version: 2,
+          version: 3,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -258,7 +259,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       worker1Commands.push(command.type);
       worker1.send(
         JSON.stringify({
-          version: 2,
+          version: 3,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -287,7 +288,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       worker2Commands.push(command.type);
       worker2.send(
         JSON.stringify({
-          version: 2,
+          version: 3,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -459,17 +460,19 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       createdAt: NOW,
       updatedAt: NOW,
       lastActivityAt: NOW,
+      disk: TEST_WORKSPACE_DISK,
     });
 
     worker.send(
       JSON.stringify({
-        version: 2,
+        version: 3,
         type: "worker.heartbeat",
         requestId: crypto.randomUUID(),
         payload: {
           workerId: "worker-01",
           allocatedWorkspaces: 1,
           egress: { enforced: false, revision: 0 },
+          storage: { enforced: true, fsType: "xfs", totalBytes: 2 ** 40, freeBytes: 2 ** 39 },
           observedAt: NOW.toISOString(),
         },
       }),
@@ -477,6 +480,78 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
     await expect
       .poll(() => dependencies.testState.workspaces.at(-1)?.state)
       .toBe("ERROR");
+    worker.terminate();
+    await app.close();
+  });
+
+  it("marks running Workspaces ERROR when the Worker loses disk quotas and keeps usage", async () => {
+    const dependencies = await createTestDependencies();
+    const app = buildControlPlane(dependencies);
+    await app.ready();
+    const worker = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    worker.on("message", (data) => {
+      if (answerEgressApply(worker, data)) return;
+      const command = JSON.parse(data.toString()) as { requestId: string; type: string };
+      if (command.type === "worker.reconcile") {
+        worker.send(JSON.stringify(emptyReconciliation(command.requestId)));
+      }
+    });
+    worker.send(JSON.stringify(workerHello("worker-01")));
+    await expect
+      .poll(() => dependencies.testState.workers[0]?.storage.enforced)
+      .toBe(true);
+    const ownId = "8d6f5c43-0d3a-4f53-9d84-3f8c0f3e7a11";
+    const foreignId = "8d6f5c43-0d3a-4f53-9d84-3f8c0f3e7a12";
+    for (const [id, workerId] of [
+      [ownId, "worker-01"],
+      [foreignId, "worker-02"],
+    ] as const) {
+      dependencies.testState.workspaces.push({
+        id,
+        userId: USER_A_ID,
+        name: id.slice(-4),
+        workerId,
+        state: "RUNNING",
+        runtimeImage: "agent-runtime:test-unassigned",
+        createdAt: NOW,
+        updatedAt: NOW,
+        lastActivityAt: NOW,
+        disk: TEST_WORKSPACE_DISK,
+      });
+    }
+    const usage = (workspaceId: string) => ({
+      workspaceId,
+      dataUsedBytes: 5 * 1024 ** 3,
+      dataLimitBytes: 20 * 1024 ** 3,
+      dataUsedInodes: 1234,
+      piUsedBytes: 1024 ** 2,
+      piLimitBytes: 2 * 1024 ** 3,
+    });
+
+    worker.send(
+      JSON.stringify({
+        version: 3,
+        type: "worker.heartbeat",
+        requestId: crypto.randomUUID(),
+        payload: {
+          workerId: "worker-01",
+          allocatedWorkspaces: 1,
+          egress: { enforced: true, revision: 0 },
+          storage: { enforced: false, fsType: "ext4", totalBytes: null, freeBytes: null },
+          workspaceDisk: [usage(ownId), usage(foreignId)],
+          observedAt: NOW.toISOString(),
+        },
+      }),
+    );
+    const own = () => dependencies.testState.workspaces.find((entry) => entry.id === ownId);
+    const foreign = () => dependencies.testState.workspaces.find((entry) => entry.id === foreignId);
+    await expect.poll(() => own()?.state).toBe("ERROR");
+    expect(own()?.disk).toMatchObject({ usedBytes: 5 * 1024 ** 3, usedInodes: 1234 });
+    // A Worker cannot report (or change) usage of a Workspace assigned elsewhere.
+    expect(foreign()?.state).toBe("RUNNING");
+    expect(foreign()?.disk.usedBytes).toBeNull();
     worker.terminate();
     await app.close();
   });

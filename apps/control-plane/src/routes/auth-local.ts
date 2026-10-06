@@ -25,6 +25,9 @@ export function registerLocalAuthRoutes(app: FastifyInstance, context: RouteCont
     cookieName,
     authenticationAudit,
     recordAuthenticationFailure,
+    clientAddress,
+    sendRateLimited,
+    sendThrottleUnavailable,
     validateOrigin,
     authenticate,
     validateCsrf,
@@ -34,8 +37,25 @@ export function registerLocalAuthRoutes(app: FastifyInstance, context: RouteCont
     if (!validateOrigin(request, reply)) {
       return reply;
     }
+    const guard = dependencies.loginGuard;
+    const address = clientAddress(request);
     const parsed = LoginBodySchema.safeParse(request.body);
     if (!parsed.success) {
+      try {
+        const lockedUntil = await dependencies.store.findAuthLock(
+          guard.addressKeys(address),
+          now(),
+        );
+        if (lockedUntil !== null) return sendRateLimited(reply, lockedUntil);
+        await dependencies.store.recordAuthThrottleHits({
+          hits: [guard.addressFailureHit(address)],
+          now: now(),
+          audit: authenticationAudit(request, "LOCAL", "local"),
+        });
+      } catch (error) {
+        request.log.error({ err: error }, "login throttle unavailable");
+        return sendThrottleUnavailable(reply);
+      }
       await recordAuthenticationFailure(
         request,
         "LOCAL",
@@ -48,11 +68,35 @@ export function registerLocalAuthRoutes(app: FastifyInstance, context: RouteCont
     }
 
     const user = await dependencies.store.findUserByLogin(parsed.data.login);
+    // Unknown logins are counted exactly like existing ones, so a lock reveals nothing.
+    const account = guard.accountKey(parsed.data.login, user?.id ?? null);
+    try {
+      const lockedUntil = await dependencies.store.findAuthLock(
+        guard.localLoginKeys(account, address),
+        now(),
+      );
+      // Locked attempts are answered before any password work and are not counted.
+      if (lockedUntil !== null) return sendRateLimited(reply, lockedUntil);
+    } catch (error) {
+      request.log.error({ err: error }, "login throttle unavailable");
+      return sendThrottleUnavailable(reply);
+    }
+
     const passwordMatches = await verifyPassword(
       parsed.data.password,
       user?.passwordHash ?? INVALID_LOGIN_HASH,
     );
     if (user === null || !passwordMatches || user.status !== "active") {
+      try {
+        await dependencies.store.recordAuthThrottleHits({
+          hits: guard.localLoginFailureHits(account, address, user?.id ?? null),
+          now: now(),
+          audit: authenticationAudit(request, "LOCAL", "local"),
+        });
+      } catch (error) {
+        request.log.error({ err: error }, "login throttle unavailable");
+        return sendThrottleUnavailable(reply);
+      }
       await recordAuthenticationFailure(
         request,
         "LOCAL",
@@ -85,6 +129,11 @@ export function registerLocalAuthRoutes(app: FastifyInstance, context: RouteCont
         .send(errorBody("INVALID_CREDENTIALS", "Invalid login or password"));
     }
 
+    // Only this account+address counter is forgiven; the address and account counters
+    // keep running so one legitimate login cannot reset an ongoing attack.
+    await dependencies.store.clearAuthThrottle([
+      guard.accountAddressKey(account, address),
+    ]);
     reply.header(
       "set-cookie",
       sessionCookie(

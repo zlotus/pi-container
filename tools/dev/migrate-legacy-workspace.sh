@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# One-off migration of a Workspace container created before Phase 15 (writable root,
+# home only in the container's writable layer) to the quota'd layout (specs.md Phase
+# 15.6, decision Q6 option B). Run on the Worker host as the Worker's user, with the
+# Workspace STOPPED. It copies /home/agent out of the old container into the managed
+# home directory and then removes the old container; the next start recreates it with
+# the current configuration. /tmp and any other writable-layer content are NOT kept.
+#
+# Usage: WORKER_ID=<id> [WORKER_MANAGED_ROOT=/var/lib/agent-runtime] \
+#          tools/dev/migrate-legacy-workspace.sh <workspace-id>
+set -euo pipefail
+
+workspace_id="${1:?usage: migrate-legacy-workspace.sh <workspace-id>}"
+worker_id="${WORKER_ID:?WORKER_ID must name this Worker}"
+managed_root="${WORKER_MANAGED_ROOT:-/var/lib/agent-runtime}"
+
+fail() {
+  echo "migrate-legacy-workspace: $*" >&2
+  exit 1
+}
+
+[[ "$workspace_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
+  fail "not a Workspace ID: $workspace_id"
+
+name="agent-runtime-${workspace_id}"
+workspace_root="${managed_root}/workspaces/${workspace_id}"
+home="${workspace_root}/home"
+
+# 1. Only a managed container of this Worker, for exactly this Workspace.
+labels="$(docker inspect --format \
+  '{{index .Config.Labels "app"}} {{index .Config.Labels "managed_by"}} {{index .Config.Labels "worker_id"}} {{index .Config.Labels "workspace_id"}}' \
+  "$name")" || fail "container $name not found"
+[[ "$labels" == "agent-runtime-platform worker ${worker_id} ${workspace_id}" ]] ||
+  fail "container $name is not managed by Worker ${worker_id}"
+
+# 2. It must be stopped and of the old shape (writable root, no /home/agent mount).
+[[ "$(docker inspect --format '{{.State.Running}}' "$name")" == "false" ]] ||
+  fail "stop the Workspace first"
+[[ "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$name")" == "false" ]] ||
+  fail "container $name already uses the current layout"
+if docker inspect --format '{{range .Mounts}}{{.Destination}} {{end}}' "$name" | grep -qw '/home/agent'; then
+  fail "container $name already mounts /home/agent"
+fi
+
+# 3. The managed directory must be real; an existing home must be empty (never overwrite).
+[[ -d "$workspace_root" && ! -L "$workspace_root" ]] || fail "missing managed directory $workspace_root"
+if [[ -e "$home" || -L "$home" ]]; then
+  [[ -d "$home" && ! -L "$home" ]] || fail "$home is not a directory"
+  [[ -z "$(ls -A "$home")" ]] || fail "$home is not empty; refusing to overwrite it"
+else
+  mkdir -m 0700 "$home"
+fi
+
+# 4. Copy, and only then remove the old container.
+docker cp "${name}:/home/agent/." "${home}/"
+echo "copied $(du -sh "$home" | cut -f1) of /home/agent into $home"
+docker rm "$name" >/dev/null
+echo "removed $name; start the Workspace from the Portal to recreate it"

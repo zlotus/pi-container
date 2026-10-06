@@ -2,11 +2,14 @@ import type {
   Architecture,
   WorkerCapabilities,
   WorkerEgressStatus,
+  WorkerStorageStatus,
   WorkerSystemResources,
+  WorkspaceDiskUsage,
 } from "@agent-runtime/protocol";
 
 import { createEgressRepository } from "./egress.js";
 import type { DatabaseClient } from "./index.js";
+import { createStorageRepository } from "./storage.js";
 
 export type WorkerStatus = "REGISTERED" | "ONLINE" | "OFFLINE" | "DISABLED";
 
@@ -34,6 +37,8 @@ export interface WorkerRecord {
     revision: number | null;
     checkedAt: Date | null;
   };
+  /** Last reported quota filesystem state (specs.md Phase 15). */
+  storage: WorkerStorageStatus & { checkedAt: Date | null };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -61,6 +66,11 @@ interface WorkerRow {
   egress_enforced: boolean;
   egress_revision: string | null;
   egress_checked_at: Date | null;
+  storage_enforced: boolean;
+  storage_fs_type: string | null;
+  storage_total_bytes: string | null;
+  storage_free_bytes: string | null;
+  storage_checked_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -89,6 +99,13 @@ function mapWorker(row: WorkerRow): WorkerRecord {
       revision: row.egress_revision === null ? null : Number(row.egress_revision),
       checkedAt: row.egress_checked_at,
     },
+    storage: {
+      enforced: row.storage_enforced,
+      fsType: row.storage_fs_type,
+      totalBytes: row.storage_total_bytes === null ? null : Number(row.storage_total_bytes),
+      freeBytes: row.storage_free_bytes === null ? null : Number(row.storage_free_bytes),
+      checkedAt: row.storage_checked_at,
+    },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -101,6 +118,7 @@ export interface WorkerGatewayRoute {
 
 export function createWorkerRepository(database: DatabaseClient) {
   const egress = createEgressRepository(database);
+  const storage = createStorageRepository(database);
   return {
     async rotateWorkerCredential(input: {
       workerId: string;
@@ -146,6 +164,7 @@ export function createWorkerRepository(database: DatabaseClient) {
       allocatedWorkspaces: number;
       systemResources: WorkerSystemResources;
       egress: WorkerEgressStatus;
+      storage: WorkerStorageStatus;
       receivedAt: Date;
     }): Promise<boolean> {
       const capabilities = database.json(input.capabilities);
@@ -175,17 +194,24 @@ export function createWorkerRepository(database: DatabaseClient) {
         `;
         if (rows.length !== 1) return false;
         await egress.recordWorkerEgressInTransaction(transaction, input);
+        await storage.recordWorkerStorageInTransaction(transaction, input);
         return true;
       });
     },
 
+    /**
+     * Returns null when the Worker is not (or no longer) allowed to report; otherwise the
+     * number of disk samples ignored because they named Workspaces assigned elsewhere.
+     */
     async recordWorkerHeartbeat(input: {
       credentialHash: string;
       workerId: string;
       allocatedWorkspaces: number;
       egress: WorkerEgressStatus;
+      storage: WorkerStorageStatus;
+      workspaceDisk: readonly WorkspaceDiskUsage[];
       receivedAt: Date;
-    }): Promise<boolean> {
+    }): Promise<{ ignoredDiskSamples: number } | null> {
       return database.begin(async (transaction) => {
         const rows = await transaction<{ id: string }[]>`
           update workers
@@ -199,9 +225,14 @@ export function createWorkerRepository(database: DatabaseClient) {
             and enabled
           returning id
         `;
-        if (rows.length !== 1) return false;
+        if (rows.length !== 1) return null;
         await egress.recordWorkerEgressInTransaction(transaction, input);
-        return true;
+        await storage.recordWorkerStorageInTransaction(transaction, input);
+        const ignoredDiskSamples = await storage.recordWorkspaceDiskUsageInTransaction(
+          transaction,
+          { workerId: input.workerId, usage: input.workspaceDisk, receivedAt: input.receivedAt },
+        );
+        return { ignoredDiskSamples };
       });
     },
 
@@ -212,7 +243,10 @@ export function createWorkerRepository(database: DatabaseClient) {
           runtime_version, capabilities, max_workspaces,
           allocated_workspaces, cpu_capacity, memory_bytes,
           last_heartbeat_at, egress_enforced, egress_revision::text,
-          egress_checked_at, created_at, updated_at
+          egress_checked_at, storage_enforced, storage_fs_type,
+          storage_total_bytes::text as storage_total_bytes,
+          storage_free_bytes::text as storage_free_bytes, storage_checked_at,
+          created_at, updated_at
         from workers
         order by id asc
       `;

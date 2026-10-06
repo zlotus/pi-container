@@ -4,7 +4,7 @@ import { EgressPolicySchema, WorkerEgressStatusSchema } from "./egress.js";
 
 export * from "./egress.js";
 
-export const WORKER_PROTOCOL_VERSION = 2 as const;
+export const WORKER_PROTOCOL_VERSION = 3 as const;
 
 export const WorkspaceIdSchema = z.string().uuid();
 
@@ -67,6 +67,39 @@ export const WorkspaceResourcesSchema = z
   })
   .strict();
 
+const GIB = 1024 ** 3;
+
+/** The data-project limit of one Workspace (specs.md Phase 15.3). */
+export const DiskLimitBytesSchema = z
+  .number()
+  .int()
+  .min(GIB)
+  .max(2 ** 50);
+
+const ByteCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+
+/** Whether the Worker's managed root is a quota-enforcing filesystem (Phase 15.6). */
+export const WorkerStorageStatusSchema = z
+  .object({
+    enforced: z.boolean(),
+    fsType: z.string().min(1).max(32).regex(/^[a-z0-9_.-]+$/).nullable(),
+    totalBytes: ByteCountSchema.nullable(),
+    freeBytes: ByteCountSchema.nullable(),
+  })
+  .strict();
+
+/** One Workspace's sampled project usage, as `statfs` reports it. */
+export const WorkspaceDiskUsageSchema = z
+  .object({
+    workspaceId: z.string().uuid(),
+    dataUsedBytes: ByteCountSchema,
+    dataLimitBytes: ByteCountSchema,
+    dataUsedInodes: ByteCountSchema,
+    piUsedBytes: ByteCountSchema,
+    piLimitBytes: ByteCountSchema,
+  })
+  .strict();
+
 const RequestEnvelopeSchema = z
   .object({
     version: z.literal(WORKER_PROTOCOL_VERSION),
@@ -88,6 +121,7 @@ export const WorkerHelloMessageSchema = RequestEnvelopeSchema.extend({
       allocatedWorkspaces: z.number().int().nonnegative().max(10_000),
       systemResources: WorkerSystemResourcesSchema,
       egress: WorkerEgressStatusSchema,
+      storage: WorkerStorageStatusSchema,
     })
     .strict()
     .refine(
@@ -103,6 +137,8 @@ export const WorkerHeartbeatMessageSchema = RequestEnvelopeSchema.extend({
       workerId: WorkerIdSchema,
       allocatedWorkspaces: z.number().int().nonnegative().max(10_000),
       egress: WorkerEgressStatusSchema,
+      storage: WorkerStorageStatusSchema,
+      workspaceDisk: z.array(WorkspaceDiskUsageSchema).max(10_000).optional(),
       observedAt: z.string().datetime({ offset: true }),
     })
     .strict(),
@@ -136,6 +172,7 @@ export const WorkerReconcileAssignmentSchema = z
     workspaceId: WorkspaceIdSchema,
     runtimeImage: z.string().min(1).max(255),
     desiredState: WorkspaceDesiredStateSchema,
+    diskLimitBytes: DiskLimitBytesSchema,
   })
   .strict();
 
@@ -227,6 +264,7 @@ export const ControlCommandTypeSchema = z.union([
   WorkspaceCommandTypeSchema,
   z.literal("worker.reconcile"),
   z.literal("worker.egress.apply"),
+  z.literal("workspace.storage.set"),
 ]);
 
 export const WorkspaceEnsureMessageSchema = RequestEnvelopeSchema.extend({
@@ -236,6 +274,18 @@ export const WorkspaceEnsureMessageSchema = RequestEnvelopeSchema.extend({
       workspaceId: WorkspaceIdSchema,
       runtimeImage: z.string().min(1).max(255),
       resources: WorkspaceResourcesSchema,
+      storage: z.object({ diskLimitBytes: DiskLimitBytesSchema }).strict(),
+    })
+    .strict(),
+}).strict();
+
+/** Changes a Workspace's data-project limit in place; no restart (Phase 15.7). */
+export const WorkspaceStorageSetMessageSchema = RequestEnvelopeSchema.extend({
+  type: z.literal("workspace.storage.set"),
+  payload: z
+    .object({
+      workspaceId: WorkspaceIdSchema,
+      diskLimitBytes: DiskLimitBytesSchema,
     })
     .strict(),
 }).strict();
@@ -274,6 +324,19 @@ const WorkerReconcileResponseOkPayloadSchema = z
   })
   .strict();
 
+const WorkspaceStorageSetResponseOkPayloadSchema = z
+  .object({
+    requestType: z.literal("workspace.storage.set"),
+    storage: z
+      .object({
+        workspaceId: WorkspaceIdSchema,
+        dataLimitBytes: ByteCountSchema,
+        dataUsedBytes: ByteCountSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
 const WorkerEgressApplyResponseOkPayloadSchema = z
   .object({
     requestType: z.literal("worker.egress.apply"),
@@ -287,6 +350,7 @@ export const ResponseOkMessageSchema = RequestEnvelopeSchema.extend({
     WorkspaceResponseOkPayloadSchema,
     WorkerReconcileResponseOkPayloadSchema,
     WorkerEgressApplyResponseOkPayloadSchema,
+    WorkspaceStorageSetResponseOkPayloadSchema,
   ]),
 }).strict();
 
@@ -349,6 +413,7 @@ export const ControlToWorkerMessageSchema = z.discriminatedUnion("type", [
   WorkspaceStopMessageSchema,
   WorkspaceDeleteMessageSchema,
   WorkspaceInspectMessageSchema,
+  WorkspaceStorageSetMessageSchema,
 ]);
 
 export type Architecture = z.infer<typeof ArchitectureSchema>;
@@ -363,6 +428,8 @@ export type WorkerToControlMessage = z.infer<
   typeof WorkerToControlMessageSchema
 >;
 export type WorkspaceResources = z.infer<typeof WorkspaceResourcesSchema>;
+export type WorkerStorageStatus = z.infer<typeof WorkerStorageStatusSchema>;
+export type WorkspaceDiskUsage = z.infer<typeof WorkspaceDiskUsageSchema>;
 export type WorkspaceState = z.infer<typeof WorkspaceStateSchema>;
 export type WorkspaceObservation = z.infer<typeof WorkspaceObservationSchema>;
 export type WorkspaceDesiredState = z.infer<typeof WorkspaceDesiredStateSchema>;

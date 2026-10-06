@@ -18,6 +18,12 @@ import type {
 import type { FastifyReply, FastifyRequest } from "fastify";
 
 import { errorBody, parseCookie } from "./http.js";
+import {
+  type AddressSet,
+  type LoginGuard,
+  resolveClientAddress,
+  retryAfterSeconds,
+} from "./login-guard.js";
 import type { OAuth2Runtime } from "./oauth2.js";
 import type { OidcRuntime } from "./oidc.js";
 import type { SessionConnectionRegistry } from "./session-connections.js";
@@ -58,6 +64,12 @@ type Phase1Store = Pick<
   | "unbindExternalIdentity"
   | "completeExternalLogin"
   | "recordAuthenticationFailure"
+  | "findAuthLock"
+  | "recordAuthThrottleHits"
+  | "clearAuthThrottle"
+  | "listAuthLocks"
+  | "clearAuthLocks"
+  | "updateWorkspaceDiskLimit"
 >;
 
 type WorkerAdminStore = Pick<
@@ -83,11 +95,18 @@ export interface ControlPlaneDependencies {
   workerOfflineAfterMs: number;
   workerCommandTimeoutMs: number;
   workspaceResources: WorkspaceResources;
+  /** Data-project limit for new Workspaces, and the most an administrator may set. */
+  workspaceDiskLimitBytes: number;
+  workspaceDiskLimitMaxBytes: number;
   workspaceBaseUrl: string;
   sessionExchanges: WorkspaceSessionExchange;
   sessionConnections?: SessionConnectionRegistry;
   oidc?: OidcRuntime;
   oauth2?: OAuth2Runtime;
+  /** Login throttling counters and policies (specs.md Phase 15.9). */
+  loginGuard: LoginGuard;
+  /** Peers whose `X-Forwarded-For` is believed; empty means the TCP peer is the client. */
+  trustedProxies: AddressSet;
   /** Platform addresses no egress whitelist may open; defaults to none. */
   egressProtected?: () => Promise<string[]>;
   reportRecoveryIssue?: (
@@ -125,6 +144,32 @@ export function createRouteContext(dependencies: ControlPlaneDependencies) {
     ),
   );
 
+  /** The client address used for throttling and Audit; see `resolveClientAddress`. */
+  function clientAddress(request: FastifyRequest): string {
+    return resolveClientAddress(
+      request.socket.remoteAddress ?? request.ip,
+      request.headers["x-forwarded-for"],
+      dependencies.trustedProxies,
+    ).slice(0, 128);
+  }
+
+  /** One response for every kind of lock, so it does not tell which counter tripped. */
+  function sendRateLimited(reply: FastifyReply, lockedUntil: Date): FastifyReply {
+    return reply
+      .code(429)
+      .header("retry-after", String(retryAfterSeconds(lockedUntil, now())))
+      .header("cache-control", "no-store")
+      .send(
+        errorBody("AUTH_RATE_LIMITED", "Too many login attempts; try again later"),
+      );
+  }
+
+  function sendThrottleUnavailable(reply: FastifyReply): FastifyReply {
+    return reply
+      .code(503)
+      .send(errorBody("AUTH_UNAVAILABLE", "Login is temporarily unavailable"));
+  }
+
   function authenticationAudit(
     request: FastifyRequest,
     protocol: AuthenticationAuditMetadata["protocol"],
@@ -135,7 +180,7 @@ export function createRouteContext(dependencies: ControlPlaneDependencies) {
       protocol,
       providerId,
       requestId: String(request.id).slice(0, 128),
-      ipAddress: request.ip.slice(0, 128),
+      ipAddress: clientAddress(request),
       userAgent:
         typeof userAgent === "string" ? userAgent.slice(0, 512) : null,
     };
@@ -238,6 +283,9 @@ export function createRouteContext(dependencies: ControlPlaneDependencies) {
     externalProviderIds,
     authenticationAudit,
     recordAuthenticationFailure,
+    clientAddress,
+    sendRateLimited,
+    sendThrottleUnavailable,
     validateOrigin,
     authenticate,
     authenticateAdmin,

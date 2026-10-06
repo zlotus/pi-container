@@ -1,9 +1,11 @@
 import { createAuditRepository } from "./audit.js";
+import { createAuthThrottleRepository } from "./auth-throttle.js";
 import { createEgressRepository } from "./egress.js";
 import { createIdentityRepository } from "./identities.js";
 import type { DatabaseClient } from "./index.js";
 import { createRecoveryRepository } from "./recovery.js";
 import { createSchedulingRepository, type WorkerSelector } from "./scheduling.js";
+import { createStorageRepository } from "./storage.js";
 import { createUserRepository } from "./users.js";
 import { createWorkerRepository } from "./workers.js";
 import { createWorkspaceLifecycleRepository } from "./workspace-lifecycle.js";
@@ -24,6 +26,8 @@ export function createRepository(database: DatabaseClient, selectWorker: WorkerS
     ...createAuditRepository(database),
     ...createIdentityRepository(database),
     ...createEgressRepository(database),
+    ...createAuthThrottleRepository(database),
+    ...createStorageRepository(database),
   };
 }
 

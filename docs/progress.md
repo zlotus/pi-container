@@ -1,6 +1,6 @@
 # Project Progress
 
-Last reviewed: 2026-10-05
+Last reviewed: 2026-10-06
 
 ## Current Milestone
 
@@ -16,6 +16,19 @@ API error code 中文化。
 Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立可用。
 
 ## Current Baseline
+
+- Phase 15（已验收，`v1.0.0-alpha.3`）：资源与认证防护。
+  **磁盘配额**：`WORKER_MANAGED_ROOT` 必须是以 `prjquota` 挂载的独立 XFS；每个 Workspace 一个 data project
+  （`/workspace`、`/home/agent`、`/tmp`，默认 20 GiB，admin 可按 Workspace 即时调整）与一个 Pi 状态 project
+  （2 GiB）。Worker 以 `CAP_SYS_ADMIN` 经固定 argv 调用 `xfs_quota`，创建/启动前设置并经 `statfs` 读回；无法确认
+  时 fail-closed（不调度、不启动、停止运行中的 Workspace）。容器改为只读根 + bind `Mounts`（源缺失则启动失败）
+  + 有界 tmpfs、`nofile` 65536、`core` 0、日志 10 MiB × 3；home 持久化并在沙箱中以 `/etc/skel` 初始化。
+  Phase 15 之前的容器不再启动，由 `tools/dev/migrate-legacy-workspace.sh` 迁移 home。Worker 协议 v3（storage
+  状态、用量采样、`workspace.storage.set`），migration `0011_storage_and_login_guard`，Portal 显示已用/上限。
+  **登录防护**：`AUTH_TRUSTED_PROXIES` 下解析客户端地址；本地登录按账户+地址、地址、账户三维计数临时锁定
+  （PostgreSQL，HMAC 键，锁定时不跑 scrypt），账户维度对 `AUTH_TRUSTED_NETWORKS` 不生效（break-glass）；SSO
+  发起按地址限速、callback 失败计入地址；`auth.login_locked` / `auth.lock_cleared` Audit；Admin 解锁与
+  `pnpm auth:unlock`。真实内核配额测试 `pnpm test:quota` 在 CI 的 loop 设备上运行。
 
 - Phase 14（已验收，`v1.0.0-alpha.2`）：Workspace 出口控制。Worker 在平台独占的
   nftables 表 `inet agent_runtime` 中按 `arw-*` bridge 名过滤出站流量：拒绝 Worker 宿主机全部地址

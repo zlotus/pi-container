@@ -74,7 +74,7 @@ CapabilityBoundingSet=CAP_NET_ADMIN
 开发：
 
 ```bash
-tools/dev/run-worker-with-egress.sh .data/worker-a.env
+tools/dev/run-worker-privileged.sh .data/worker-a.env
 # 确认 capability 已生效（CapAmb 应包含 0x1000，即 cap_net_admin）：
 grep CapAmb /proc/$(pgrep -f 'apps/worker.*src/server.ts' | head -1)/status
 ```

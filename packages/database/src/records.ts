@@ -49,6 +49,17 @@ export interface WorkspaceRecord {
   createdAt: Date;
   updatedAt: Date;
   lastActivityAt: Date;
+  disk: WorkspaceDiskRecord;
+}
+
+/** The data-project limit and the Worker's latest usage sample (null until sampled). */
+export interface WorkspaceDiskRecord {
+  limitBytes: number;
+  usedBytes: number | null;
+  usedInodes: number | null;
+  piUsedBytes: number | null;
+  piLimitBytes: number | null;
+  sampledAt: Date | null;
 }
 
 export interface UserRow {
@@ -73,6 +84,16 @@ export interface WorkspaceRow {
   created_at: Date;
   updated_at: Date;
   last_activity_at: Date;
+  disk_limit_bytes: string;
+  disk_used_bytes: string | null;
+  disk_used_inodes: string | null;
+  pi_used_bytes: string | null;
+  pi_limit_bytes: string | null;
+  disk_usage_at: Date | null;
+}
+
+function optionalNumber(value: string | null): number | null {
+  return value === null ? null : Number(value);
 }
 
 export function mapUser(row: UserRow): UserRecord {
@@ -100,5 +121,13 @@ export function mapWorkspace(row: WorkspaceRow): WorkspaceRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastActivityAt: row.last_activity_at,
+    disk: {
+      limitBytes: Number(row.disk_limit_bytes),
+      usedBytes: optionalNumber(row.disk_used_bytes),
+      usedInodes: optionalNumber(row.disk_used_inodes),
+      piUsedBytes: optionalNumber(row.pi_used_bytes),
+      piLimitBytes: optionalNumber(row.pi_limit_bytes),
+      sampledAt: row.disk_usage_at,
+    },
   };
 }

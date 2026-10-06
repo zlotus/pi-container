@@ -287,6 +287,7 @@ describe("Activity event display", () => {
         workerId: "worker-a",
         state: "RUNNING",
         createdAt: "2026-09-28T07:00:00.000Z",
+        disk: { limitBytes: 20 * 1024 ** 3, usedBytes: null, usedInodes: null, piUsedBytes: null, piLimitBytes: null, sampledAt: null },
       }],
       isAdmin: false,
       loading: false,

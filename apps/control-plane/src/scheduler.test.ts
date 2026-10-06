@@ -32,6 +32,7 @@ function candidate(
     lastHeartbeatAt: NOW,
     egressEnforced: true,
     egressRevision: 3,
+    storageEnforced: true,
     ...overrides,
   };
 }
@@ -182,5 +183,14 @@ describe("Phase 5 Worker selection", () => {
     ];
     expect(selectWorker(selectionInput(candidates))?.id).toBe("d-current");
     expect(selectWorker(selectionInput(candidates.slice(0, 3)))).toBeNull();
+  });
+
+  it("places only on Workers that enforce disk quotas", () => {
+    const candidates = [
+      candidate({ id: "a-no-quota", storageEnforced: false }),
+      candidate({ id: "b-quota" }),
+    ];
+    expect(selectWorker(selectionInput(candidates))?.id).toBe("b-quota");
+    expect(selectWorker(selectionInput(candidates.slice(0, 1)))).toBeNull();
   });
 });

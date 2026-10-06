@@ -322,6 +322,14 @@ export function registerAdminUserRoutes(app: FastifyInstance, context: RouteCont
         .code(404)
         .send(errorBody("LOCAL_USER_NOT_FOUND", "Local User was not found"));
     }
+    // A new password ends the reason for an account lock (specs.md Phase 15.9).
+    await dependencies.store.clearAuthLocks({
+      target: { kind: "user", userId: params.data.id },
+      now: context.now(),
+      source: "password_reset",
+      actorUserId: auth.session.user.id,
+      requestId: String(request.id).slice(0, 128),
+    });
     return reply.code(204).send();
   });
 

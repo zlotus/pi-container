@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
+    "auth:unlock": "tsx src/unlock-auth.ts",
     "user:create": "tsx src/create-user.ts",
     "worker:provision": "tsx src/provision-worker.ts create",
     "worker:rotate": "tsx src/provision-worker.ts rotate",

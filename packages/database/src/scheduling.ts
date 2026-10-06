@@ -1,12 +1,11 @@
 import type {
   Architecture,
   WorkerCapabilities,
-  WorkspaceState,
 } from "@agent-runtime/protocol";
 
 import type { DatabaseClient } from "./index.js";
 import { createWorkerRepository } from "./workers.js";
-import type { WorkspaceRecord } from "./records.js";
+import { mapWorkspace, type WorkspaceRecord, type WorkspaceRow } from "./records.js";
 import type { WorkerRecord, WorkerStatus } from "./workers.js";
 
 const SCHEDULER_ADVISORY_LOCK_ID = 708_913_425;
@@ -31,10 +30,14 @@ export interface WorkerScheduleCandidate {
   lastHeartbeatAt: Date | null;
   egressEnforced: boolean;
   egressRevision: number | null;
+  /** Whether the Worker last reported enforced disk quotas (specs.md Phase 15.6). */
+  storageEnforced: boolean;
 }
 
 export interface WorkerPlacementRecord extends WorkerRecord {
   assignedWorkspaces: number;
+  /** Sum of the disk limits of every Workspace assigned here (may exceed capacity). */
+  allocatedDiskLimitBytes: number;
 }
 
 export interface WorkerSelectionInput {
@@ -66,19 +69,10 @@ export type ScheduleWorkspaceStartResult =
   | { outcome: "NO_ELIGIBLE_WORKER" }
   | { outcome: "WORKSPACE_CHANGED" };
 
-interface SchedulingWorkspaceRow {
-  id: string;
-  user_id: string;
-  name: string;
-  worker_id: string | null;
-  state: WorkspaceState;
-  runtime_image: string;
+type SchedulingWorkspaceRow = WorkspaceRow & {
   required_architecture: Architecture | null;
   required_capabilities: Partial<WorkerCapabilities>;
-  created_at: Date;
-  updated_at: Date;
-  last_activity_at: Date;
-}
+};
 
 interface CandidateRow {
   id: string;
@@ -94,20 +88,7 @@ interface CandidateRow {
   last_heartbeat_at: Date | null;
   egress_enforced: boolean;
   egress_revision: string | null;
-}
-
-function mapWorkspace(row: SchedulingWorkspaceRow): WorkspaceRecord {
-  return {
-    id: row.id,
-    userId: row.user_id,
-    name: row.name,
-    workerId: row.worker_id,
-    state: row.state,
-    runtimeImage: row.runtime_image,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    lastActivityAt: row.last_activity_at,
-  };
+  storage_enforced: boolean;
 }
 
 function mapCandidate(row: CandidateRow): WorkerScheduleCandidate {
@@ -125,6 +106,7 @@ function mapCandidate(row: CandidateRow): WorkerScheduleCandidate {
     lastHeartbeatAt: row.last_heartbeat_at,
     egressEnforced: row.egress_enforced,
     egressRevision: row.egress_revision === null ? null : Number(row.egress_revision),
+    storageEnforced: row.storage_enforced,
   };
 }
 
@@ -137,19 +119,22 @@ export function createSchedulingRepository(
   async function listWorkersWithAssignments(): Promise<WorkerPlacementRecord[]> {
     const [workers, counts] = await Promise.all([
       workerRepository.listWorkers(),
-      database<Array<{ worker_id: string; assigned_workspaces: number }>>`
-        select worker_id, count(*)::integer as assigned_workspaces
+      database<
+        Array<{ worker_id: string; assigned_workspaces: number; disk_limit_bytes: string }>
+      >`
+        select
+          worker_id, count(*)::integer as assigned_workspaces,
+          sum(disk_limit_bytes)::text as disk_limit_bytes
         from workspaces
         where worker_id is not null
         group by worker_id
       `,
     ]);
-    const assignedByWorker = new Map(
-      counts.map((row) => [row.worker_id, row.assigned_workspaces]),
-    );
+    const assignedByWorker = new Map(counts.map((row) => [row.worker_id, row]));
     return workers.map((worker) => ({
       ...worker,
-      assignedWorkspaces: assignedByWorker.get(worker.id) ?? 0,
+      assignedWorkspaces: assignedByWorker.get(worker.id)?.assigned_workspaces ?? 0,
+      allocatedDiskLimitBytes: Number(assignedByWorker.get(worker.id)?.disk_limit_bytes ?? 0),
     }));
   }
 
@@ -213,7 +198,10 @@ export function createSchedulingRepository(
           select
             id, user_id, name, worker_id, state, runtime_image,
             required_architecture, required_capabilities,
-            created_at, updated_at, last_activity_at
+            created_at, updated_at, last_activity_at,
+            disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
+            disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
+            pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
           from workspaces
           where id = ${input.workspaceId} and user_id = ${input.userId}
           for update
@@ -248,7 +236,8 @@ export function createSchedulingRepository(
               count(assigned.id)::integer as assigned_workspaces,
               workers.last_heartbeat_at,
               workers.egress_enforced,
-              workers.egress_revision::text as egress_revision
+              workers.egress_revision::text as egress_revision,
+              workers.storage_enforced
             from workers
             left join workspaces assigned on assigned.worker_id = workers.id
             group by workers.id
@@ -284,7 +273,10 @@ export function createSchedulingRepository(
           returning
             id, user_id, name, worker_id, state, runtime_image,
             required_architecture, required_capabilities,
-            created_at, updated_at, last_activity_at
+            created_at, updated_at, last_activity_at,
+            disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
+            disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
+            pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
         `;
         const starting = updated[0];
         return starting === undefined

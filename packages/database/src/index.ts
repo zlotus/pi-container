@@ -34,6 +34,15 @@ export {
   type PlatformAuditEvent,
 } from "./audit.js";
 export {
+  nextAuthThrottleState,
+  type AuthLockRecord,
+  type AuthThrottleHit,
+  type AuthThrottleKey,
+  type AuthThrottlePolicy,
+  type AuthThrottleScope,
+  type AuthThrottleState,
+} from "./auth-throttle.js";
+export {
   type CreateEgressRuleResult,
   type DeleteEgressRuleResult,
   type EgressAuditMetadata,
@@ -68,6 +77,10 @@ export {
   type WorkerSelector,
   type WorkspaceSchedulingRequirements,
 } from "./scheduling.js";
+export {
+  type StorageAuditMetadata,
+  type UpdateWorkspaceDiskLimitResult,
+} from "./storage.js";
 export {
   type AdminUserRecord,
   type UpdateManagedUserResult,

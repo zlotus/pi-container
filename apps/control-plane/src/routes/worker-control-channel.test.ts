@@ -15,6 +15,7 @@ import {
   WORKER_1_TOKEN,
   WORKER_2_TOKEN,
   workerHello,
+  TEST_WORKSPACE_DISK,
 } from "./test-fixtures.js";
 
 describe("Phase 2 worker control channel", () => {
@@ -98,7 +99,7 @@ describe("Phase 2 worker control channel", () => {
     const closed = once(worker, "close");
     worker.send(
       JSON.stringify({
-        version: 2,
+        version: 3,
         type: "worker.heartbeat",
         requestId: randomUUID(),
         payload: {
@@ -233,6 +234,7 @@ describe("Phase 2 worker control channel", () => {
         createdAt: NOW,
         updatedAt: NOW,
         lastActivityAt: NOW,
+        disk: TEST_WORKSPACE_DISK,
       },
     
       {
@@ -246,6 +248,7 @@ describe("Phase 2 worker control channel", () => {
         createdAt: NOW,
         updatedAt: NOW,
         lastActivityAt: NOW,
+        disk: TEST_WORKSPACE_DISK,
       },
     ]);
     const app = buildControlPlane(dependencies);
@@ -268,7 +271,7 @@ describe("Phase 2 worker control channel", () => {
         }
         commands[workerId]?.push(`${command.type}:${command.payload.workspaceId}`);
         socket.send(JSON.stringify({
-          version: 2,
+          version: 3,
           type: "response.ok",
           requestId: command.requestId,
           payload: {

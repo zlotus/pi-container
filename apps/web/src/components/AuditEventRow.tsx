@@ -1,4 +1,9 @@
-import { authProtocolLabel, transitionValueLabel } from "../labels.js";
+import {
+  authProtocolLabel,
+  formatBytes,
+  lockScopeLabel,
+  transitionValueLabel,
+} from "../labels.js";
 import type { AuditEvent, User, Workspace } from "../types.js";
 import { AbsoluteTime } from "./RelativeTime.js";
 
@@ -36,6 +41,11 @@ const AUDIT_LABELS: Record<string, string> = {
   "user.disabled": "用户已禁用",
   "user.role_changed": "用户角色已变更",
   "user.password_reset": "本地密码已重置",
+  "auth.login_locked": "登录已临时锁定",
+  "auth.lock_cleared": "登录锁定已解除",
+  "worker.storage_enforced": "Worker 磁盘配额已生效",
+  "worker.storage_unenforced": "Worker 磁盘配额未生效",
+  "workspace.storage_limit_changed": "Workspace 磁盘上限已调整",
 };
 
 export type AuditSeverity = "success" | "info" | "warning" | "danger";
@@ -47,6 +57,11 @@ const AUDIT_SEVERITY: Record<string, AuditSeverity> = {
   "worker.scheduling_resumed": "success",
   "worker.egress_enforced": "success",
   "worker.egress_unenforced": "danger",
+  "worker.storage_enforced": "success",
+  "worker.storage_unenforced": "danger",
+  "auth.login_locked": "danger",
+  "auth.lock_cleared": "warning",
+  "workspace.storage_limit_changed": "warning",
   "egress.rule_created": "warning",
   "egress.rule_deleted": "warning",
   "user.enabled": "success",
@@ -89,6 +104,15 @@ export function egressRuleText(details: Record<string, unknown>): string | null 
 function auditDetail(details: Record<string, unknown>): string | null {
   const egressRule = egressRuleText(details);
   if (egressRule !== null) return egressRule;
+  const { previousLimitBytes, limitBytes, scope, ipAddress } = details;
+  if (typeof previousLimitBytes === "number" && typeof limitBytes === "number") {
+    return `${formatBytes(previousLimitBytes)} → ${formatBytes(limitBytes)}`;
+  }
+  if (typeof scope === "string") {
+    return [lockScopeLabel(scope), typeof ipAddress === "string" ? ipAddress : null]
+      .filter((part) => part !== null)
+      .join(" · ");
+  }
   const fromState = details.fromState;
   const toState = details.toState;
   if (typeof fromState === "string" && typeof toState === "string") {

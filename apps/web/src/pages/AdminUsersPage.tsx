@@ -1,6 +1,7 @@
 import { Fragment, type FormEvent, useCallback, useEffect, useState } from "react";
 
 import { api, ApiError, apiErrorText } from "../api.js";
+import { AuthLocksPanel } from "../components/AuthLocksPanel.js";
 import { Modal, useConfirm, useTextPrompt } from "../components/Modal.js";
 import { RelativeTime } from "../components/RelativeTime.js";
 import { formatAbsoluteTime, roleLabel, userStatusLabel, workspaceStateLabel } from "../labels.js";
@@ -502,6 +503,7 @@ export function AdminUsersPage({
           </div>
         )}
       </section>
+      <AuthLocksPanel session={session} />
     </>
   );
 }

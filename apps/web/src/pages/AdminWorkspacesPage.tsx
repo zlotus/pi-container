@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api } from "../api.js";
+import { DiskUsage } from "../components/DiskUsage.js";
+import { useTextPrompt } from "../components/Modal.js";
 import { RelativeTime } from "../components/RelativeTime.js";
-import { workspaceStateLabel } from "../labels.js";
-import type { AdminWorkspace } from "../types.js";
+import { formatBytes, parseGibInput, workspaceStateLabel } from "../labels.js";
+import type { AdminWorkspace, SessionResponse } from "../types.js";
 
 export interface AdminWorkspaceFilter {
   query: string;
@@ -32,8 +34,11 @@ export function filterAdminWorkspaces(
   });
 }
 
-export function AdminWorkspacesPage() {
+export function AdminWorkspacesPage({ session }: { session: SessionResponse }) {
   const [workspaces, setWorkspaces] = useState<AdminWorkspace[]>([]);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [prompt, promptDialog] = useTextPrompt();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<AdminWorkspaceFilter>({ query: "", state: "", workerId: "" });
@@ -64,16 +69,61 @@ export function AdminWorkspacesPage() {
   );
   const visible = filterAdminWorkspaces(workspaces, filter);
 
+  async function changeDiskLimit(workspace: AdminWorkspace) {
+    const answer = await prompt({
+      title: "调整磁盘上限",
+      label: "新的上限（GiB，1～1024）",
+      confirmLabel: "保存",
+      maxLength: 12,
+      description: (
+        <>
+          <p>
+            Workspace <strong>{workspace.name}</strong> 当前上限 {formatBytes(workspace.disk.limitBytes)}，
+            已用 {formatBytes(workspace.disk.usedBytes)}。调整立即生效，无需重启。
+          </p>
+          <p className="muted">低于当前用量时，该 Workspace 的写入会立即失败，直到用户删除文件。</p>
+        </>
+      ),
+    });
+    if (answer === null) return;
+    const diskLimitBytes = parseGibInput(answer);
+    if (diskLimitBytes === null) {
+      setError("请输入以 GiB 为单位的正数，例如 20 或 1.5");
+      return;
+    }
+    setPendingId(workspace.id);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api<{ applied: boolean }>(`/api/admin/workspaces/${workspace.id}`, {
+        method: "PATCH",
+        headers: { "x-csrf-token": session.csrfToken },
+        body: JSON.stringify({ diskLimitBytes }),
+      });
+      setNotice(
+        result.applied
+          ? `已将 ${workspace.name} 的磁盘上限调整为 ${formatBytes(diskLimitBytes)}，已立即生效。`
+          : `已将 ${workspace.name} 的磁盘上限调整为 ${formatBytes(diskLimitBytes)}；所在 Worker 当前未连接，将在下次启动时生效。`,
+      );
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "调整失败");
+    } finally {
+      setPendingId(null);
+    }
+  }
+
   return (
     <>
       <div className="page-heading">
         <div>
           <h1>全部 Workspace</h1>
-          <p>平台所有用户的 Workspace 元数据，只读。管理员不因此获得 Workspace 内容访问权。</p>
+          <p>平台所有用户的 Workspace 元数据与磁盘上限。管理员不因此获得 Workspace 内容访问权。</p>
         </div>
         <button className="secondary" onClick={() => void refresh()}>刷新</button>
       </div>
       {error === null ? null : <p className="error banner" role="alert">{error}</p>}
+      {notice === null ? null : <p className="notice banner" role="status">{notice}</p>}
       <section className="user-panel" aria-label="全部 Workspace">
         <div className="filter-bar">
           <input
@@ -110,7 +160,7 @@ export function AdminWorkspacesPage() {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>Workspace</th><th>所有者</th><th>状态</th><th>Worker</th><th>创建于</th><th>最近活动</th></tr>
+                <tr><th>Workspace</th><th>所有者</th><th>状态</th><th>Worker</th><th>磁盘</th><th>创建于</th><th>最近活动</th><th>操作</th></tr>
               </thead>
               <tbody>
                 {visible.map((workspace) => (
@@ -119,8 +169,16 @@ export function AdminWorkspacesPage() {
                     <td><strong>{ownerName(workspace.owner)}</strong>{workspace.owner.email === null || workspace.owner.username === null ? null : <small>{workspace.owner.email}</small>}</td>
                     <td><span className={`state state-${workspace.state.toLowerCase()}`}>{workspaceStateLabel(workspace.state)}</span></td>
                     <td>{workspace.workerId ?? "未分配"}</td>
+                    <td><DiskUsage disk={workspace.disk} /></td>
                     <td><RelativeTime value={workspace.createdAt} /></td>
                     <td><RelativeTime value={workspace.lastActivityAt} /></td>
+                    <td>
+                      <button
+                        className="secondary"
+                        disabled={pendingId === workspace.id || workspace.state === "DELETING"}
+                        onClick={() => void changeDiskLimit(workspace)}
+                      >调整上限</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -128,6 +186,7 @@ export function AdminWorkspacesPage() {
           </div>
         )}
       </section>
+      {promptDialog}
     </>
   );
 }

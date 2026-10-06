@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { hashOpaqueToken, hashPassword } from "@agent-runtime/auth";
+import {
+  nextAuthThrottleState,
+  type AuthThrottleScope,
+  type AuthThrottleState,
+} from "@agent-runtime/database";
 import type {
   AuthenticatedSessionRecord,
   EgressRuleRecord,
@@ -20,6 +25,7 @@ import { selectWorker } from "../scheduler.js";
 import { WorkspaceSessionExchange } from "../session-exchange.js";
 import { type OidcRuntime, OidcTransactionStore } from "../oidc.js";
 import { type OAuth2Runtime, OAuth2TransactionStore } from "../oauth2.js";
+import { AddressSet, DEFAULT_LOGIN_GUARD_POLICIES, LoginGuard } from "../login-guard.js";
 
 // Shared in-memory fixtures for the Control Plane route tests.
 
@@ -37,6 +43,24 @@ export const WORKER_1_TOKEN = "worker1token0123456789abcdef0123456789abcdef";
 
 export const WORKER_2_TOKEN = "worker2token0123456789abcdef0123456789abcdef";
 
+/** A Workspace with the default limit that the Worker has not sampled yet. */
+export const TEST_WORKSPACE_DISK: WorkspaceRecord["disk"] = {
+  limitBytes: 20 * 1024 ** 3,
+  usedBytes: null,
+  usedInodes: null,
+  piUsedBytes: null,
+  piLimitBytes: null,
+  sampledAt: null,
+};
+
+export interface TestAuthThrottleRow extends AuthThrottleState {
+  id: string;
+  scope: AuthThrottleScope;
+  keyHash: string;
+  ipAddress: string | null;
+  userId: string | null;
+}
+
 export interface TestControlPlaneDependencies extends ControlPlaneDependencies {
   testState: {
     workspaces: WorkspaceRecord[];
@@ -44,6 +68,9 @@ export interface TestControlPlaneDependencies extends ControlPlaneDependencies {
     users: UserRecord[];
     markWorkersOffline(cutoff: Date): number;
     setDesiredState(workspaceId: string, state: WorkspaceDesiredState): void;
+    authThrottle: Map<string, TestAuthThrottleRow>;
+    /** When set, every throttle store call rejects (fail-closed tests). */
+    failAuthThrottle: boolean;
   };
 }
 
@@ -141,10 +168,54 @@ export async function createTestDependencies(
       systemResources: { logicalCpuCount: null, memoryBytes: null },
       lastHeartbeatAt: null,
       egress: { enforced: false, revision: null, checkedAt: null },
+      storage: {
+        enforced: false,
+        fsType: null,
+        totalBytes: null,
+        freeBytes: null,
+        checkedAt: null,
+      },
       createdAt: NOW,
       updatedAt: NOW,
     }),
   );
+  const recordStorage = (
+    worker: WorkerRecord,
+    storage: Omit<WorkerRecord["storage"], "checkedAt">,
+    receivedAt: Date,
+  ): void => {
+    if (worker.storage.enforced !== storage.enforced) {
+      auditEvents.unshift({
+        id: String(auditEvents.length + 1),
+        eventType: storage.enforced ? "worker.storage_enforced" : "worker.storage_unenforced",
+        actorUserId: null,
+        ownerUserId: null,
+        workspaceId: null,
+        workerId: worker.id,
+        details: { fsType: storage.fsType },
+        createdAt: NOW,
+      });
+    }
+    worker.storage = { ...storage, checkedAt: receivedAt };
+    if (!storage.enforced) {
+      for (const workspace of workspaces) {
+        if (workspace.workerId === worker.id && workspace.state === "RUNNING") {
+          workspace.state = "ERROR";
+        }
+      }
+    }
+  };
+  const placement = (worker: WorkerRecord) => {
+    const assigned = workspaces.filter((workspace) => workspace.workerId === worker.id);
+    return {
+      ...worker,
+      assignedWorkspaces: assigned.length,
+      allocatedDiskLimitBytes: assigned.reduce(
+        (total, workspace) => total + workspace.disk.limitBytes,
+        0,
+      ),
+    };
+  };
   const egressRules: EgressRuleRecord[] = [];
   const egressPolicy = { revision: 0 };
   const recordEgress = (
@@ -159,6 +230,11 @@ export async function createTestDependencies(
         workspace.state = "ERROR";
       }
     }
+  };
+  const authThrottle = new Map<string, TestAuthThrottleRow>();
+  const throttleState = { failAuthThrottle: false };
+  const assertThrottleAvailable = (): void => {
+    if (throttleState.failAuthThrottle) throw new Error("throttle store unavailable");
   };
   const credentials = new Map([
     [hashOpaqueToken(WORKER_1_TOKEN), "worker-01"],
@@ -201,6 +277,13 @@ export async function createTestDependencies(
       setDesiredState(workspaceId, state) {
         desiredStates.set(workspaceId, state);
       },
+      authThrottle,
+      get failAuthThrottle() {
+        return throttleState.failAuthThrottle;
+      },
+      set failAuthThrottle(value: boolean) {
+        throttleState.failAuthThrottle = value;
+      },
     },
     checkDatabase: vi.fn<() => Promise<void>>(),
     sessionSecret: "test-session-secret-that-is-at-least-32-characters",
@@ -212,6 +295,14 @@ export async function createTestDependencies(
     defaultRuntimeImage: "agent-runtime:test-unassigned",
     workerOfflineAfterMs: 35_000,
     workerCommandTimeoutMs: 1_000,
+    workspaceDiskLimitBytes: 20 * 1024 ** 3,
+    workspaceDiskLimitMaxBytes: 1024 * 1024 ** 3,
+    loginGuard: new LoginGuard(
+      "test-session-secret-that-is-at-least-32-characters",
+      DEFAULT_LOGIN_GUARD_POLICIES,
+      new AddressSet(["127.0.0.1/32", "::1/128"]),
+    ),
+    trustedProxies: new AddressSet([]),
     now: () => NOW,
     workerStore: {
       async findWorkerByCredentialHash(credentialHash) {
@@ -240,18 +331,39 @@ export async function createTestDependencies(
           updatedAt: input.receivedAt,
         });
         recordEgress(worker, input.egress, input.receivedAt);
+        recordStorage(worker, input.storage, input.receivedAt);
         return true;
       },
       async recordWorkerHeartbeat(input) {
-        if (credentials.get(input.credentialHash) !== input.workerId) return false;
+        if (credentials.get(input.credentialHash) !== input.workerId) return null;
         const worker = workers.find((candidate) => candidate.id === input.workerId);
-        if (worker === undefined || !worker.enabled) return false;
+        if (worker === undefined || !worker.enabled) return null;
         worker.allocatedWorkspaces = input.allocatedWorkspaces;
         worker.lastHeartbeatAt = input.receivedAt;
         worker.updatedAt = input.receivedAt;
         worker.status = "ONLINE";
         recordEgress(worker, input.egress, input.receivedAt);
-        return true;
+        recordStorage(worker, input.storage, input.receivedAt);
+        let ignoredDiskSamples = 0;
+        for (const usage of input.workspaceDisk) {
+          const workspace = workspaces.find(
+            (candidate) =>
+              candidate.id === usage.workspaceId && candidate.workerId === input.workerId,
+          );
+          if (workspace === undefined) {
+            ignoredDiskSamples += 1;
+            continue;
+          }
+          workspace.disk = {
+            ...workspace.disk,
+            usedBytes: usage.dataUsedBytes,
+            usedInodes: usage.dataUsedInodes,
+            piUsedBytes: usage.piUsedBytes,
+            piLimitBytes: usage.piLimitBytes,
+            sampledAt: input.receivedAt,
+          };
+        }
+        return { ignoredDiskSamples };
       },
       async recordWorkerEgress(input) {
         const worker = workers.find((candidate) => candidate.id === input.workerId);
@@ -309,12 +421,7 @@ export async function createTestDependencies(
         return { outcome: "DELETED", revision: egressPolicy.revision };
       },
       async listWorkersWithAssignments() {
-        return workers.map((worker) => ({
-          ...worker,
-          assignedWorkspaces: workspaces.filter(
-            (workspace) => workspace.workerId === worker.id,
-          ).length,
-        }));
+        return workers.map(placement);
       },
       async setWorkerSchedulable(input) {
         const worker = workers.find((candidate) => candidate.id === input.workerId);
@@ -335,15 +442,7 @@ export async function createTestDependencies(
             createdAt: NOW,
           });
         }
-        return {
-          outcome: "UPDATED",
-          worker: {
-            ...worker,
-            assignedWorkspaces: workspaces.filter(
-              (workspace) => workspace.workerId === worker.id,
-            ).length,
-          },
-        };
+        return { outcome: "UPDATED", worker: placement(worker) };
       },
     },
     store: {
@@ -386,6 +485,119 @@ export async function createTestDependencies(
             );
           })
           .slice(0, input.limit);
+      },
+      async updateWorkspaceDiskLimit(input) {
+        const workspace = workspaces.find(
+          (candidate) => candidate.id === input.workspaceId && candidate.state !== "DELETING",
+        );
+        if (workspace === undefined) return { outcome: "NOT_FOUND" };
+        const previousLimitBytes = workspace.disk.limitBytes;
+        workspace.disk = { ...workspace.disk, limitBytes: input.diskLimitBytes };
+        const { actorUserId, ...request } = input.audit;
+        auditEvents.unshift({
+          id: String(auditEvents.length + 1),
+          eventType: "workspace.storage_limit_changed",
+          actorUserId,
+          ownerUserId: workspace.userId,
+          workspaceId: workspace.id,
+          workerId: workspace.workerId,
+          details: { ...request, previousLimitBytes, limitBytes: input.diskLimitBytes },
+          createdAt: NOW,
+        });
+        return { outcome: "UPDATED", workspace: { ...workspace }, previousLimitBytes };
+      },
+      async findAuthLock(keys, now) {
+        assertThrottleAvailable();
+        let latest: Date | null = null;
+        for (const key of keys) {
+          const row = authThrottle.get(`${key.scope}|${key.keyHash}`);
+          if (
+            row?.lockedUntil != null &&
+            row.lockedUntil > now &&
+            (latest === null || row.lockedUntil > latest)
+          ) {
+            latest = row.lockedUntil;
+          }
+        }
+        return latest;
+      },
+      async recordAuthThrottleHits(input) {
+        assertThrottleAvailable();
+        const locked: AuthThrottleScope[] = [];
+        for (const hit of input.hits) {
+          const id = `${hit.scope}|${hit.keyHash}`;
+          const previous = authThrottle.get(id) ?? null;
+          const next = nextAuthThrottleState(previous, hit.policy, input.now);
+          authThrottle.set(id, {
+            ...next,
+            id: previous?.id ?? randomUUID(),
+            scope: hit.scope,
+            keyHash: hit.keyHash,
+            ipAddress: hit.ipAddress,
+            userId: hit.userId,
+          });
+          if (next.failures === hit.policy.threshold) {
+            locked.push(hit.scope);
+            addAuditEvent("auth.login_locked", {
+              ownerUserId: hit.userId,
+              details: {
+                ...input.audit,
+                scope: hit.scope,
+                lockedUntil: next.lockedUntil?.toISOString() ?? null,
+              },
+            });
+          }
+        }
+        return locked;
+      },
+      async clearAuthThrottle(keys) {
+        assertThrottleAvailable();
+        for (const key of keys) authThrottle.delete(`${key.scope}|${key.keyHash}`);
+      },
+      async listAuthLocks(now) {
+        return [...authThrottle.values()]
+          .filter((row) => row.lockedUntil !== null && row.lockedUntil > now)
+          .map((row) => ({
+            id: row.id,
+            scope: row.scope,
+            ipAddress: row.ipAddress,
+            userId: row.userId,
+            userEmail: users.find((user) => user.id === row.userId)?.email ?? null,
+            failures: row.failures,
+            lockedUntil: row.lockedUntil as Date,
+          }));
+      },
+      async clearAuthLocks(input) {
+        const target = input.target;
+        const keyIds =
+          target.kind === "keys"
+            ? new Set(target.keys.map((key) => `${key.scope}|${key.keyHash}`))
+            : null;
+        let cleared = 0;
+        for (const [key, row] of [...authThrottle.entries()]) {
+          const matches =
+            target.kind === "all" ||
+            (target.kind === "id" && row.id === target.id) ||
+            (target.kind === "user" && row.userId === target.userId) ||
+            (target.kind === "ip" && row.ipAddress === target.ipAddress) ||
+            (keyIds?.has(key) ?? false);
+          if (!matches) continue;
+          authThrottle.delete(key);
+          if (row.lockedUntil !== null && row.lockedUntil > input.now) {
+            cleared += 1;
+            addAuditEvent("auth.lock_cleared", {
+              actorUserId: input.actorUserId,
+              ownerUserId: row.userId,
+              details: {
+                scope: row.scope,
+                ipAddress: row.ipAddress,
+                source: input.source,
+                requestId: input.requestId,
+              },
+            });
+          }
+        }
+        return cleared;
       },
       async recordAuthenticationFailure(input) {
         addAuditEvent("auth.login_failed", {
@@ -852,6 +1064,7 @@ export async function createTestDependencies(
           createdAt: NOW,
           updatedAt: NOW,
           lastActivityAt: NOW,
+          disk: { ...TEST_WORKSPACE_DISK, limitBytes: input.diskLimitBytes },
         };
         workspaces.push(workspace);
         desiredStates.set(workspace.id, "STOPPED");
@@ -911,6 +1124,7 @@ export async function createTestDependencies(
               lastHeartbeatAt: worker.lastHeartbeatAt,
               egressEnforced: worker.egress.enforced,
               egressRevision: worker.egress.revision,
+              storageEnforced: worker.storage.enforced,
             })),
             connectedWorkerIds: input.connectedWorkerIds,
             heartbeatCutoff: input.heartbeatCutoff,
@@ -1142,7 +1356,7 @@ export async function beginOAuth2Login(app: ReturnType<typeof buildControlPlane>
 
 export function workerHello(workerId: string) {
   return {
-    version: 2,
+    version: 3,
     type: "worker.hello",
     requestId: randomUUID(),
     payload: {
@@ -1166,6 +1380,7 @@ export function workerHello(workerId: string) {
         memoryBytes: 16 * 1024 ** 3,
       },
       egress: { enforced: true, revision: 0 },
+      storage: { enforced: true, fsType: "xfs", totalBytes: 2 ** 40, freeBytes: 2 ** 39 },
     },
   };
 }
@@ -1187,7 +1402,7 @@ export function answerEgressApply(
   if (command.type !== "worker.egress.apply") return false;
   socket.send(
     JSON.stringify({
-      version: 2,
+      version: 3,
       type: "response.ok",
       requestId: command.requestId,
       payload: {
@@ -1213,7 +1428,7 @@ export type ReconcileOkResponse = Omit<WorkerOkResponse, "payload"> & {
 
 export function emptyReconciliation(requestId: string): ReconcileOkResponse {
   return {
-    version: 2,
+    version: 3,
     type: "response.ok",
     requestId,
     payload: {

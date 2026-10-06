@@ -6,6 +6,8 @@ import {
 } from "@agent-runtime/protocol";
 import { z } from "zod";
 
+import { parseAddressRange } from "./login-guard.js";
+
 function parseHttpOrigin(
   value: string,
   context: z.RefinementCtx,
@@ -185,6 +187,32 @@ const AllowedDomainsSchema = z
     return [...new Set(domains)];
   });
 
+/** Comma-separated IPv4/IPv6 addresses or CIDRs, e.g. `127.0.0.1/32,::1/128`. */
+function addressRangeListSchema(defaultValue: string) {
+  return z
+    .string()
+    .default(defaultValue)
+    .transform((value, context) => {
+      const entries = value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
+      for (const entry of entries) {
+        if (parseAddressRange(entry) === null) {
+          context.addIssue({ code: "custom", message: `invalid address range: ${entry}` });
+          return z.NEVER;
+        }
+      }
+      return entries;
+    });
+}
+
+const GIB = 1024 ** 3;
+
+function thresholdSchema(defaultValue: number) {
+  return z.coerce.number().int().min(1).max(10_000).default(defaultValue);
+}
+
 export const ServerConfigSchema = z
   .object({
     DATABASE_URL: z.string().min(1),
@@ -295,6 +323,28 @@ export const ServerConfigSchema = z
       .max(Number.MAX_SAFE_INTEGER)
       .default(4 * 1024 ** 3),
     WORKSPACE_PIDS_LIMIT: z.coerce.number().int().positive().default(512),
+    /** Data-project limit given to new Workspaces (specs.md Phase 15.7). */
+    WORKSPACE_DISK_LIMIT_BYTES: z.coerce
+      .number()
+      .int()
+      .min(GIB)
+      .max(2 ** 50)
+      .default(20 * GIB),
+    /** The most an administrator may give one Workspace. */
+    WORKSPACE_DISK_LIMIT_MAX_BYTES: z.coerce
+      .number()
+      .int()
+      .min(GIB)
+      .max(2 ** 50)
+      .default(1024 * GIB),
+    /** Reverse proxies whose X-Forwarded-For is believed; empty = the TCP peer is the client. */
+    AUTH_TRUSTED_PROXIES: addressRangeListSchema(""),
+    /** Management networks exempt from the account-wide lock (break-glass). */
+    AUTH_TRUSTED_NETWORKS: addressRangeListSchema("127.0.0.1/32,::1/128"),
+    AUTH_LOCKOUT_ACCOUNT_IP_THRESHOLD: thresholdSchema(5),
+    AUTH_LOCKOUT_IP_THRESHOLD: thresholdSchema(20),
+    AUTH_LOCKOUT_ACCOUNT_THRESHOLD: thresholdSchema(50),
+    AUTH_SSO_START_LIMIT: thresholdSchema(30),
   })
   .passthrough()
   .superRefine((config, context) => {
@@ -344,6 +394,13 @@ export const ServerConfigSchema = z
           });
         }
       }
+    }
+    if (config.WORKSPACE_DISK_LIMIT_BYTES > config.WORKSPACE_DISK_LIMIT_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        path: ["WORKSPACE_DISK_LIMIT_BYTES"],
+        message: "WORKSPACE_DISK_LIMIT_BYTES cannot exceed WORKSPACE_DISK_LIMIT_MAX_BYTES",
+      });
     }
     if (
       config.AUTH_OIDC_ENABLED &&

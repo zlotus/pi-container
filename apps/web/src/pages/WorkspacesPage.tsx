@@ -1,6 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { api } from "../api.js";
+import { DiskUsage } from "../components/DiskUsage.js";
 import { ConfirmDialog } from "../components/Modal.js";
 import { RelativeTime } from "../components/RelativeTime.js";
 import {
@@ -226,6 +227,7 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
               <dl>
                 <div><dt>运行节点</dt><dd>{workspace.workerId ?? "等待分配"}</dd></div>
                 <div><dt>创建于</dt><dd><RelativeTime value={workspace.createdAt} /></dd></div>
+                <div><dt>磁盘</dt><dd><DiskUsage disk={workspace.disk} /></dd></div>
               </dl>
               <div className="card-actions">
                 {actionButtons(workspace)}

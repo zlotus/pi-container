@@ -7,8 +7,14 @@ import type Docker from "dockerode";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { loadWorkerConfig } from "./config.js";
-import { DockerWorkspaceRuntime, type EgressGate } from "./runtime.js";
+import { DockerWorkspaceRuntime, type EgressGate, type StorageGate } from "./runtime.js";
 import type { WorkspaceRuntimeError } from "./runtime.js";
+import {
+  type ProjectUsage,
+  StorageQuotaError,
+  type WorkspaceQuota,
+  type WorkspaceQuotaDirectories,
+} from "./storage/controller.js";
 
 const WORKSPACE_ID = "90b38efc-aa9a-4bc6-8eee-528b4e0c7c60";
 const RESOURCES = {
@@ -16,6 +22,8 @@ const RESOURCES = {
   memoryBytes: 4 * 1024 ** 3,
   pidsLimit: 512,
 };
+const GIB = 1024 ** 3;
+const STORAGE = { diskLimitBytes: 20 * GIB };
 
 interface FakeContainerInspection {
   Name: string;
@@ -34,6 +42,8 @@ interface FakeContainerInspection {
     Destination: string;
     RW: boolean;
   }>;
+  /** Exit status a helper container reports from `wait()`. */
+  ExitCode?: number;
   NetworkSettings: {
     Ports: Record<string, Array<{ HostIp: string; HostPort: string }>>;
     Networks: Record<string, { NetworkID: string }>;
@@ -44,16 +54,22 @@ class FakeDocker {
   readonly containers = new Map<string, FakeContainer>();
   readonly networks = new Map<string, FakeNetwork>();
   createdOptions: Docker.ContainerCreateOptions | null = null;
+  readonly allCreated: Docker.ContainerCreateOptions[] = [];
+  helperExitCode = 0;
   omitDefaultCwdOnCreate = false;
   hostPort = "1";
   networkSequence = 0;
+  containerSequence = 0;
 
   async createContainer(options: Docker.ContainerCreateOptions) {
-    this.createdOptions = options;
+    this.allCreated.push(options);
     const name = options.name ?? "";
+    const helper = name.startsWith("agent-runtime-home-init-");
+    if (!helper) this.createdOptions = options;
     const binds = options.HostConfig?.Binds ?? [];
+    this.containerSequence += 1;
     const container = new FakeContainer(
-      `container-${this.containers.size}`,
+      `container-${this.containerSequence}`,
       {
         Name: `/${name}`,
         State: { Running: false },
@@ -69,15 +85,24 @@ class FakeDocker {
             : (options.Env ?? []),
         },
         HostConfig: options.HostConfig ?? {},
-        Mounts: binds.map((bind) => {
-          const [source, destination] = bind.split(":");
-          return {
+        Mounts: [
+          ...binds.map((bind) => {
+            const [source, destination] = bind.split(":");
+            return {
+              Type: "bind" as const,
+              Source: source ?? "",
+              Destination: destination ?? "",
+              RW: true,
+            };
+          }),
+          ...(options.HostConfig?.Mounts ?? []).map((mount) => ({
             Type: "bind" as const,
-            Source: source ?? "",
-            Destination: destination ?? "",
-            RW: true,
-          };
-        }),
+            Source: mount.Source,
+            Destination: mount.Target,
+            RW: mount.ReadOnly !== true,
+          })),
+        ],
+        ExitCode: helper ? this.helperExitCode : 0,
         NetworkSettings: {
           Ports: {},
           Networks: (() => {
@@ -165,6 +190,11 @@ class FakeContainer {
     this.inspection.State.Running = false;
   }
 
+  async wait() {
+    this.inspection.State.Running = false;
+    return { StatusCode: this.inspection.ExitCode ?? 0 };
+  }
+
   async remove() {
     const entry = [...this.docker.containers.entries()].find(
       ([, candidate]) => candidate === this,
@@ -226,6 +256,82 @@ class FakeEgress implements EgressGate {
   }
 }
 
+class FakeStorage implements StorageGate {
+  readonly policy = {
+    projectIdMin: 1_000_000,
+    dataInodeLimit: 2_000_000,
+    piLimitBytes: 2 * GIB,
+    piInodeLimit: 200_000,
+  };
+  enforced = true;
+  failApply = false;
+  readonly prepared: Array<{
+    directories: WorkspaceQuotaDirectories;
+    quota: WorkspaceQuota;
+    dataLimitBytes: number;
+  }> = [];
+  readonly released: WorkspaceQuota[] = [];
+
+  isEnforced(): boolean {
+    return this.enforced;
+  }
+
+  status() {
+    return { enforced: this.enforced, fsType: "xfs", totalBytes: 100 * GIB, freeBytes: 50 * GIB };
+  }
+
+  async prepareWorkspace(
+    directories: WorkspaceQuotaDirectories,
+    quota: WorkspaceQuota,
+    dataLimitBytes: number,
+  ): Promise<void> {
+    if (!this.enforced) {
+      throw new StorageQuotaError("STORAGE_QUOTA_UNENFORCED", "not enforced");
+    }
+    if (this.failApply) {
+      throw new StorageQuotaError("STORAGE_QUOTA_APPLY_FAILED", "apply failed", true);
+    }
+    this.prepared.push({ directories, quota, dataLimitBytes });
+  }
+
+  async setDataLimit(
+    directories: WorkspaceQuotaDirectories,
+    quota: WorkspaceQuota,
+    dataLimitBytes: number,
+  ): Promise<ProjectUsage> {
+    await this.prepareWorkspace(directories, quota, dataLimitBytes);
+    return { usedBytes: GIB, limitBytes: dataLimitBytes, usedInodes: 10, limitInodes: 2_000_000 };
+  }
+
+  async releaseWorkspace(quota: WorkspaceQuota): Promise<void> {
+    this.released.push(quota);
+  }
+
+  async usage(directory: string): Promise<ProjectUsage> {
+    const pi = directory.endsWith("/pi");
+    return {
+      usedBytes: pi ? 1024 : 3 * GIB,
+      limitBytes: pi ? 2 * GIB : 20 * GIB,
+      usedInodes: 42,
+      limitInodes: 2_000_000,
+    };
+  }
+}
+
+/** Turns a current container into the pre-Phase-15 shape: writable root, two binds. */
+function makeLegacyContainer(container: FakeContainer | undefined): void {
+  if (container === undefined) throw new Error("container fixture missing");
+  container.inspection.Mounts = container.inspection.Mounts.filter(
+    (mount) => mount.Destination === "/workspace" || mount.Destination === "/agent/pi",
+  );
+  container.inspection.HostConfig = {
+    ...container.inspection.HostConfig,
+    ReadonlyRootfs: false,
+    Mounts: [],
+    Binds: container.inspection.Mounts.map((mount) => `${mount.Source}:${mount.Destination}:rw`),
+  };
+}
+
 const temporaryRoots: string[] = [];
 
 // The fake-Docker tests exercise real chown calls on a temporary root. A non-root test
@@ -259,13 +365,15 @@ async function fixture() {
   });
   const docker = new FakeDocker();
   const egress = new FakeEgress();
+  const storage = new FakeStorage();
   const runtime = new DockerWorkspaceRuntime(
     config,
     docker as unknown as Docker,
     async () => true,
     egress,
+    storage,
   );
-  return { root, config, docker, runtime, egress };
+  return { root, config, docker, runtime, egress, storage };
 }
 
 describe("Docker Workspace Runtime", () => {
@@ -276,12 +384,12 @@ describe("Docker Workspace Runtime", () => {
     const first = await runtime.ensure(
       WORKSPACE_ID,
       config.RUNTIME_IMAGE,
-      RESOURCES,
+      RESOURCES, STORAGE,
     );
     const second = await runtime.ensure(
       WORKSPACE_ID,
       config.RUNTIME_IMAGE,
-      RESOURCES,
+      RESOURCES, STORAGE,
     );
     expect(first.state).toBe("STOPPED");
     expect(second.state).toBe("STOPPED");
@@ -386,7 +494,7 @@ describe("Docker Workspace Runtime", () => {
     );
 
     await expect(
-      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES),
+      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE),
     ).rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({
       code: "UNMANAGED_CONTAINER_CONFLICT",
     });
@@ -405,6 +513,7 @@ describe("Docker Workspace Runtime", () => {
           workspaceId: WORKSPACE_ID,
           runtimeImage: config.RUNTIME_IMAGE,
           desiredState: "DELETED",
+          diskLimitBytes: STORAGE.diskLimitBytes,
         },
       ]),
     ).resolves.toMatchObject({
@@ -423,7 +532,7 @@ describe("Docker Workspace Runtime", () => {
   it("keeps a pre-default-cwd managed container inspectable, stoppable, startable, and deletable", async () => {
     const { root, config, docker, runtime } = await fixture();
     docker.hostPort = "30200";
-    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
 
     const name = `agent-runtime-${WORKSPACE_ID}`;
     const legacyContainer = docker.containers.get(name);
@@ -438,7 +547,7 @@ describe("Docker Workspace Runtime", () => {
     await writeFile(workspaceFile, "legacy", "utf8");
 
     await expect(
-      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES),
+      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE),
     ).resolves.toMatchObject({ state: "STOPPED" });
     await expect(runtime.start(WORKSPACE_ID)).resolves.toMatchObject({
       state: "RUNNING",
@@ -463,15 +572,16 @@ describe("Docker Workspace Runtime", () => {
   });
 
   it("safely stops and deletes a Workspace whose recorded image predates the Worker image upgrade", async () => {
-    const { root, config, docker, runtime, egress } = await fixture();
+    const { root, config, docker, runtime, egress, storage } = await fixture();
     const historicalImage = "agent-runtime:phase4-legacy";
     const legacyRuntime = new DockerWorkspaceRuntime(
       { ...config, RUNTIME_IMAGE: historicalImage },
       docker as unknown as Docker,
       async () => true,
       egress,
+      storage,
     );
-    await legacyRuntime.ensure(WORKSPACE_ID, historicalImage, RESOURCES);
+    await legacyRuntime.ensure(WORKSPACE_ID, historicalImage, RESOURCES, STORAGE);
     await legacyRuntime.start(WORKSPACE_ID);
 
     const workspaceRoot = join(root, "workspaces", WORKSPACE_ID);
@@ -493,7 +603,7 @@ describe("Docker Workspace Runtime", () => {
       state: "STOPPED",
       runtimeImage: historicalImage,
     });
-    await expect(runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES))
+    await expect(runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE))
       .rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({
         code: "RUNTIME_CONFIGURATION_MISMATCH",
       });
@@ -507,6 +617,7 @@ describe("Docker Workspace Runtime", () => {
       workspaceId: WORKSPACE_ID,
       runtimeImage: config.RUNTIME_IMAGE,
       desiredState: "STOPPED",
+      diskLimitBytes: STORAGE.diskLimitBytes,
     }])).resolves.toMatchObject({
       workspaces: [{
         status: "INVALID",
@@ -558,7 +669,7 @@ describe("Docker Workspace Runtime", () => {
 
   it("rejects a symlinked metadata file before destructive cleanup", async () => {
     const { root, config, docker, runtime } = await fixture();
-    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
     const metadataPath = join(root, "workspaces", WORKSPACE_ID, "metadata", "managed.json");
     const contents = await readFile(metadataPath, "utf8");
     await rm(metadataPath);
@@ -578,7 +689,7 @@ describe("Docker Workspace Runtime", () => {
     docker.omitDefaultCwdOnCreate = true;
 
     await expect(
-      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES),
+      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE),
     ).rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({
       code: "RUNTIME_CONFIGURATION_MISMATCH",
     });
@@ -587,18 +698,20 @@ describe("Docker Workspace Runtime", () => {
   it("inventories authoritative assignments without creating or deleting resources", async () => {
     const { config, docker, runtime } = await fixture();
     const missingId = "0c0c7ff9-5679-4543-b561-1eb492719b77";
-    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
 
     const report = await runtime.reconcile([
       {
         workspaceId: WORKSPACE_ID,
         runtimeImage: config.RUNTIME_IMAGE,
         desiredState: "STOPPED",
+        diskLimitBytes: STORAGE.diskLimitBytes,
       },
       {
         workspaceId: missingId,
         runtimeImage: config.RUNTIME_IMAGE,
         desiredState: "RUNNING",
+        diskLimitBytes: STORAGE.diskLimitBytes,
       },
     ]);
 
@@ -619,7 +732,7 @@ describe("Docker Workspace Runtime", () => {
 
   it("classifies unassigned managed resources as orphans and leaves them intact", async () => {
     const { config, docker, runtime } = await fixture();
-    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
 
     const report = await runtime.reconcile([]);
 
@@ -649,7 +762,7 @@ describe("Docker Workspace Runtime", () => {
 
   it("blocks an explicitly conflicting default cwd from start but still permits safe deletion", async () => {
     const { root, config, docker, runtime } = await fixture();
-    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
 
     const name = `agent-runtime-${WORKSPACE_ID}`;
     const container = docker.containers.get(name);
@@ -662,7 +775,7 @@ describe("Docker Workspace Runtime", () => {
     );
 
     await expect(
-      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES),
+      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE),
     ).rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({
       code: "RUNTIME_CONFIGURATION_MISMATCH",
     });
@@ -686,7 +799,7 @@ describe("Docker Workspace Runtime egress", () => {
   async function legacyNetworkFixture(running: boolean) {
     const context = await fixture();
     const { config, docker, runtime } = context;
-    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
     const legacy = docker.networks.get(networkName);
     if (legacy === undefined) throw new Error("network fixture missing");
     delete legacy.options["com.docker.network.bridge.name"];
@@ -696,7 +809,7 @@ describe("Docker Workspace Runtime egress", () => {
 
   it("names the Workspace bridge arw-<id> so the egress rules match it, without IPv6", async () => {
     const { config, docker, runtime } = await fixture();
-    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
     const network = await docker.networks.get(networkName)?.inspect();
     expect(network?.Options).toEqual({
       "com.docker.network.bridge.enable_icc": "false",
@@ -707,7 +820,7 @@ describe("Docker Workspace Runtime egress", () => {
 
   it("refuses to start a container while the egress rules are not enforced", async () => {
     const { config, docker, runtime, egress } = await fixture();
-    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
     egress.enforced = false;
 
     await expect(runtime.start(WORKSPACE_ID)).rejects.toMatchObject<
@@ -722,7 +835,7 @@ describe("Docker Workspace Runtime egress", () => {
 
   it("closes the Gateway path while the egress rules are not enforced", async () => {
     const { config, runtime, egress } = await fixture();
-    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
     await runtime.start(WORKSPACE_ID);
     egress.enforced = false;
 
@@ -734,7 +847,7 @@ describe("Docker Workspace Runtime egress", () => {
   it("migrates a stopped Workspace from a legacy network to the arw- bridge", async () => {
     const { config, docker, runtime, legacyNetworkId } = await legacyNetworkFixture(false);
 
-    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
     const network = docker.networks.get(networkName);
     expect(network?.id).not.toBe(legacyNetworkId);
     expect(network?.options["com.docker.network.bridge.name"]).toBe("arw-90b38efcaa9");
@@ -748,7 +861,7 @@ describe("Docker Workspace Runtime egress", () => {
     const { config, docker, runtime, legacyNetworkId } = await legacyNetworkFixture(true);
 
     await expect(
-      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES),
+      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE),
     ).rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({ code: "EGRESS_NETWORK_LEGACY" });
     expect(docker.networks.get(networkName)?.id).toBe(legacyNetworkId);
   });
@@ -757,7 +870,7 @@ describe("Docker Workspace Runtime egress", () => {
     const { config, docker, runtime } = await legacyNetworkFixture(true);
 
     const report = await runtime.reconcile([
-      { workspaceId: WORKSPACE_ID, runtimeImage: config.RUNTIME_IMAGE, desiredState: "RUNNING" },
+      { workspaceId: WORKSPACE_ID, runtimeImage: config.RUNTIME_IMAGE, desiredState: "RUNNING", diskLimitBytes: STORAGE.diskLimitBytes },
     ]);
     expect(report.workspaces).toEqual([
       {
@@ -772,12 +885,12 @@ describe("Docker Workspace Runtime egress", () => {
 
   it("stops a running Workspace during reconciliation while the egress rules are not enforced", async () => {
     const { config, docker, runtime, egress } = await fixture();
-    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
     await runtime.start(WORKSPACE_ID);
     egress.enforced = false;
 
     const report = await runtime.reconcile([
-      { workspaceId: WORKSPACE_ID, runtimeImage: config.RUNTIME_IMAGE, desiredState: "RUNNING" },
+      { workspaceId: WORKSPACE_ID, runtimeImage: config.RUNTIME_IMAGE, desiredState: "RUNNING", diskLimitBytes: STORAGE.diskLimitBytes },
     ]);
     expect(report.workspaces).toEqual([
       {
@@ -792,13 +905,322 @@ describe("Docker Workspace Runtime egress", () => {
 
   it("stops only running managed containers when enforcement is lost", async () => {
     const { config, docker, runtime } = await fixture();
-    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
     await runtime.start(WORKSPACE_ID);
     const stoppedId = "1f0e0a52-3b55-4f51-9a49-34c9b2f9a0b1";
-    await runtime.ensure(stoppedId, config.RUNTIME_IMAGE, RESOURCES);
+    await runtime.ensure(stoppedId, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
 
     await expect(runtime.stopRunningWorkspaces()).resolves.toEqual([WORKSPACE_ID]);
     expect(docker.containers.get(networkName)?.inspection.State.Running).toBe(false);
     await expect(runtime.stopRunningWorkspaces()).resolves.toEqual([]);
+  });
+});
+
+describe("Docker Workspace Runtime disk quotas and container limits (Phase 15)", () => {
+  const metadataOf = async (root: string, workspaceId = WORKSPACE_ID) =>
+    JSON.parse(
+      await readFile(join(root, "workspaces", workspaceId, "metadata", "managed.json"), "utf8"),
+    ) as { quota?: { dataProjectId: number; piProjectId: number; dataLimitBytes: number } };
+
+  it("creates a read-only-root container whose writable places are quota'd binds and bounded tmpfs", async () => {
+    const { root, config, docker, runtime, storage } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    const base = join(root, "workspaces", WORKSPACE_ID);
+    const host = docker.createdOptions?.HostConfig;
+    expect(host?.Binds).toBeUndefined();
+    expect(host?.ReadonlyRootfs).toBe(true);
+    expect(host?.Mounts).toEqual([
+      { Type: "bind", Source: join(base, "workspace"), Target: "/workspace", ReadOnly: false },
+      { Type: "bind", Source: join(base, "home"), Target: "/home/agent", ReadOnly: false },
+      { Type: "bind", Source: join(base, "tmp"), Target: "/tmp", ReadOnly: false },
+      { Type: "bind", Source: join(base, "pi"), Target: "/agent/pi", ReadOnly: false },
+    ]);
+    expect(Object.keys(host?.Tmpfs ?? {}).sort()).toEqual(["/run", "/run/lock", "/var/tmp"]);
+    expect(host?.Tmpfs?.["/var/tmp"]).toContain("size=256m");
+    expect(host?.Ulimits).toEqual([
+      { Name: "nofile", Soft: 65_536, Hard: 65_536 },
+      { Name: "core", Soft: 0, Hard: 0 },
+    ]);
+    expect(host?.LogConfig).toEqual({
+      Type: "json-file",
+      Config: { "max-size": "10m", "max-file": "3" },
+    });
+    expect(docker.createdOptions?.Env).toContain("CARGO_HOME=/home/agent/.cargo");
+
+    // Quotas were in place before the container existed, on all four directories.
+    const metadata = await metadataOf(root);
+    expect(metadata.quota).toEqual({
+      dataProjectId: 1_000_001,
+      piProjectId: 1_000_002,
+      dataLimitBytes: 20 * GIB,
+    });
+    expect(storage.prepared[0]).toMatchObject({
+      directories: {
+        workspace: join(base, "workspace"),
+        home: join(base, "home"),
+        tmp: join(base, "tmp"),
+        pi: join(base, "pi"),
+      },
+      quota: { dataProjectId: 1_000_001, piProjectId: 1_000_002 },
+      dataLimitBytes: 20 * GIB,
+    });
+  });
+
+  it("seeds a new home from /etc/skel inside a network-less sandbox, once", async () => {
+    const { root, config, docker, runtime } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    const helpers = docker.allCreated.filter((options) =>
+      options.name?.startsWith("agent-runtime-home-init-"),
+    );
+    expect(helpers).toHaveLength(1);
+    expect(helpers[0]).toMatchObject({
+      Image: config.RUNTIME_IMAGE,
+      User: TEST_USER,
+      NetworkDisabled: true,
+      HostConfig: {
+        NetworkMode: "none",
+        CapDrop: ["ALL"],
+        Privileged: false,
+        ReadonlyRootfs: true,
+        SecurityOpt: ["no-new-privileges:true"],
+        Mounts: [
+          {
+            Type: "bind",
+            Source: join(root, "workspaces", WORKSPACE_ID, "home"),
+            Target: "/home/agent",
+            ReadOnly: false,
+          },
+        ],
+      },
+    });
+    // Never overwrites what is already there.
+    expect(String(helpers[0]?.Cmd?.[0])).toContain('[ -e "$t" ] || [ -L "$t" ] ||');
+    expect([...docker.containers.keys()]).toEqual([`agent-runtime-${WORKSPACE_ID}`]);
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    expect(docker.allCreated.filter((options) => options.name?.startsWith("agent-runtime-home-init-"))).toHaveLength(1);
+  });
+
+  it("does not create the Workspace container when home seeding fails", async () => {
+    const { config, docker, runtime } = await fixture();
+    docker.helperExitCode = 1;
+    await expect(
+      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE),
+    ).rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({ code: "RUNTIME_ENGINE_ERROR" });
+    expect(docker.containers.size).toBe(0);
+    docker.helperExitCode = 0;
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    expect(docker.containers.size).toBe(1);
+  });
+
+  it("gives every Workspace its own project IDs and releases them on delete", async () => {
+    const { root, config, runtime, storage } = await fixture();
+    const otherId = "90b38efc-aa9a-4bc6-8eee-528b4e0c7c61";
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    await runtime.ensure(otherId, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    const first = (await metadataOf(root)).quota;
+    const second = (await metadataOf(root, otherId)).quota;
+    const ids = [first?.dataProjectId, first?.piProjectId, second?.dataProjectId, second?.piProjectId];
+    expect(new Set(ids).size).toBe(4);
+    expect(ids.every((id) => id !== undefined && id > 1_000_000)).toBe(true);
+
+    await runtime.delete(WORKSPACE_ID);
+    expect(storage.released).toEqual([first]);
+    const third = "90b38efc-aa9a-4bc6-8eee-528b4e0c7c62";
+    await runtime.ensure(third, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    // Freed IDs are reused only after their Workspace's metadata is gone.
+    const reused = (await metadataOf(root, third)).quota;
+    expect([reused?.dataProjectId, reused?.piProjectId].sort()).toEqual(
+      [first?.dataProjectId, first?.piProjectId].sort(),
+    );
+  });
+
+  it("refuses to create or start anything while quotas are not enforced", async () => {
+    const { config, docker, runtime, storage } = await fixture();
+    storage.enforced = false;
+    await expect(
+      runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE),
+    ).rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({ code: "STORAGE_QUOTA_UNENFORCED" });
+    expect(docker.containers.size).toBe(0);
+
+    storage.enforced = true;
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    storage.enforced = false;
+    await expect(runtime.start(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "STORAGE_QUOTA_UNENFORCED" });
+    expect(docker.containers.get(`agent-runtime-${WORKSPACE_ID}`)?.inspection.State.Running).toBe(false);
+  });
+
+  it("re-applies quotas and empties /tmp, without following links, before each start", async () => {
+    const { root, config, runtime, storage } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    const tmp = join(root, "workspaces", WORKSPACE_ID, "tmp");
+    const outside = join(root, "outside.txt");
+    await writeFile(outside, "keep", "utf8");
+    await writeFile(join(tmp, "scratch.txt"), "old", "utf8");
+    await symlink(outside, join(tmp, "link"));
+    const preparedBefore = storage.prepared.length;
+
+    await runtime.start(WORKSPACE_ID);
+    expect(storage.prepared.length).toBe(preparedBefore + 1);
+    expect(existsSync(join(tmp, "scratch.txt"))).toBe(false);
+    expect(existsSync(join(tmp, "link"))).toBe(false);
+    expect(await readFile(outside, "utf8")).toBe("keep");
+
+    storage.failApply = true;
+    await runtime.stop(WORKSPACE_ID);
+    await expect(runtime.start(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "STORAGE_QUOTA_APPLY_FAILED", retryable: true });
+  });
+
+  it("keeps a pre-Phase-15 container manageable but never starts or serves it", async () => {
+    const { config, docker, runtime } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    const name = `agent-runtime-${WORKSPACE_ID}`;
+    makeLegacyContainer(docker.containers.get(name));
+
+    for (const attempt of [
+      () => runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE),
+      () => runtime.start(WORKSPACE_ID),
+    ]) {
+      await expect(attempt()).rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({
+        code: "STORAGE_MIGRATION_REQUIRED",
+      });
+    }
+    expect(docker.containers.get(name)?.inspection.State.Running).toBe(false);
+    await expect(runtime.inspect(WORKSPACE_ID)).resolves.toMatchObject({ state: "STOPPED" });
+
+    // A legacy container that is somehow running is not served and is stopped on recovery.
+    await docker.containers.get(name)?.start();
+    await expect(runtime.gatewayTarget(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "STORAGE_MIGRATION_REQUIRED" });
+    await expect(
+      runtime.reconcile([
+        {
+          workspaceId: WORKSPACE_ID,
+          runtimeImage: config.RUNTIME_IMAGE,
+          desiredState: "RUNNING",
+          diskLimitBytes: STORAGE.diskLimitBytes,
+        },
+      ]),
+    ).resolves.toMatchObject({
+      workspaces: [{ status: "INVALID", code: "STORAGE_MIGRATION_REQUIRED" }],
+    });
+    expect(docker.containers.get(name)?.inspection.State.Running).toBe(false);
+    await expect(runtime.stop(WORKSPACE_ID)).resolves.toMatchObject({ state: "STOPPED" });
+    await runtime.delete(WORKSPACE_ID);
+    expect(docker.containers.size).toBe(0);
+  });
+
+  it("rejects a container that mixes the new mounts with a writable root", async () => {
+    const { config, docker, runtime } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    const container = docker.containers.get(`agent-runtime-${WORKSPACE_ID}`);
+    if (container === undefined) throw new Error("container fixture missing");
+    container.inspection.HostConfig = { ...container.inspection.HostConfig, ReadonlyRootfs: false };
+    await expect(runtime.start(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "RUNTIME_CONFIGURATION_MISMATCH" });
+  });
+
+  it("detects drift in tmpfs, ulimits and log limits of a newly created container", async () => {
+    const { config } = await fixture();
+    for (const drift of [
+      (host: Docker.HostConfig) => ({ ...host, Tmpfs: { "/run": "rw,size=1g" } }),
+      (host: Docker.HostConfig) => ({ ...host, Ulimits: [{ Name: "nofile", Soft: 1024, Hard: 1024 }] }),
+      (host: Docker.HostConfig) => ({ ...host, LogConfig: { Type: "json-file", Config: {} } }),
+    ]) {
+      const fresh = await fixture();
+      fresh.docker.createContainer = async (options: Docker.ContainerCreateOptions) =>
+        FakeDocker.prototype.createContainer.call(fresh.docker, {
+          ...options,
+          HostConfig: options.name?.startsWith("agent-runtime-home-init-")
+            ? options.HostConfig
+            : drift(options.HostConfig ?? {}),
+        });
+      await expect(
+        fresh.runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE),
+      ).rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({
+        code: "RUNTIME_CONFIGURATION_MISMATCH",
+      });
+    }
+  });
+
+  it("closes the Gateway path while quotas are not enforced", async () => {
+    const { config, runtime, storage } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    await runtime.start(WORKSPACE_ID);
+    await expect(runtime.gatewayTarget(WORKSPACE_ID)).resolves.toBeInstanceOf(URL);
+    storage.enforced = false;
+    await expect(runtime.gatewayTarget(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "STORAGE_QUOTA_UNENFORCED" });
+  });
+
+  it("stops a running Workspace during recovery while quotas are not enforced", async () => {
+    const { config, docker, runtime, storage } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    await runtime.start(WORKSPACE_ID);
+    storage.enforced = false;
+    await expect(
+      runtime.reconcile([
+        {
+          workspaceId: WORKSPACE_ID,
+          runtimeImage: config.RUNTIME_IMAGE,
+          desiredState: "RUNNING",
+          diskLimitBytes: STORAGE.diskLimitBytes,
+        },
+      ]),
+    ).resolves.toMatchObject({
+      workspaces: [{ status: "INVALID", code: "STORAGE_QUOTA_UNENFORCED" }],
+    });
+    expect(docker.containers.get(`agent-runtime-${WORKSPACE_ID}`)?.inspection.State.Running).toBe(false);
+    await expect(runtime.gatewayTarget(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "RUNTIME_NOT_READY" });
+  });
+
+  it("closes the Gateway path while quotas are not enforced", async () => {
+    const { config, runtime, storage } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    await runtime.start(WORKSPACE_ID);
+    await expect(runtime.gatewayTarget(WORKSPACE_ID)).resolves.toBeInstanceOf(URL);
+    storage.enforced = false;
+    await expect(runtime.gatewayTarget(WORKSPACE_ID)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "STORAGE_QUOTA_UNENFORCED" });
+  });
+
+  it("changes a disk limit in place and samples usage only under enforced quotas", async () => {
+    const { root, config, runtime, storage } = await fixture();
+    const unprepared = "90b38efc-aa9a-4bc6-8eee-528b4e0c7c63";
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    await expect(runtime.setDiskLimit(WORKSPACE_ID, 5 * GIB)).resolves.toEqual({
+      dataLimitBytes: 5 * GIB,
+      dataUsedBytes: GIB,
+    });
+    expect((await metadataOf(root)).quota?.dataLimitBytes).toBe(5 * GIB);
+    expect(storage.prepared.at(-1)?.dataLimitBytes).toBe(5 * GIB);
+
+    await expect(runtime.diskUsage()).resolves.toEqual([
+      {
+        workspaceId: WORKSPACE_ID,
+        dataUsedBytes: 3 * GIB,
+        dataLimitBytes: 20 * GIB,
+        dataUsedInodes: 42,
+        piUsedBytes: 1024,
+        piLimitBytes: 2 * GIB,
+      },
+    ]);
+    await expect(runtime.setDiskLimit(unprepared, 5 * GIB)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "WORKSPACE_NOT_MANAGED" });
+    storage.enforced = false;
+    await expect(runtime.diskUsage()).resolves.toEqual([]);
+    await expect(runtime.setDiskLimit(WORKSPACE_ID, 6 * GIB)).rejects.toMatchObject<
+      Partial<WorkspaceRuntimeError>
+    >({ code: "STORAGE_QUOTA_UNENFORCED" });
   });
 });

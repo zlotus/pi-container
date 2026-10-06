@@ -13,7 +13,10 @@ export function createWorkspaceRepository(database: DatabaseClient) {
       const rows = await database<WorkspaceRow[]>`
         select
           id, user_id, name, worker_id, state, runtime_image,
-          created_at, updated_at, last_activity_at
+          created_at, updated_at, last_activity_at,
+          disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
+          disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
+          pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
         from workspaces
         where user_id = ${userId}
         order by created_at asc, id asc
@@ -26,13 +29,20 @@ export function createWorkspaceRepository(database: DatabaseClient) {
       userId: string;
       name: string;
       runtimeImage: string;
+      diskLimitBytes: number;
     }): Promise<WorkspaceRecord> {
       const rows = await database<WorkspaceRow[]>`
-        insert into workspaces (id, user_id, name, runtime_image)
-        values (${input.id}, ${input.userId}, ${input.name}, ${input.runtimeImage})
+        insert into workspaces (id, user_id, name, runtime_image, disk_limit_bytes)
+        values (
+          ${input.id}, ${input.userId}, ${input.name}, ${input.runtimeImage},
+          ${input.diskLimitBytes}
+        )
         returning
           id, user_id, name, worker_id, state, runtime_image,
-          created_at, updated_at, last_activity_at
+          created_at, updated_at, last_activity_at,
+          disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
+          disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
+          pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
       `;
       const row = rows[0];
       if (row === undefined) {
@@ -48,7 +58,10 @@ export function createWorkspaceRepository(database: DatabaseClient) {
       const rows = await database<WorkspaceRow[]>`
         select
           id, user_id, name, worker_id, state, runtime_image,
-          created_at, updated_at, last_activity_at
+          created_at, updated_at, last_activity_at,
+          disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
+          disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
+          pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
         from workspaces
         where id = ${workspaceId} and user_id = ${userId}
         limit 1
@@ -80,6 +93,9 @@ export function createWorkspaceRepository(database: DatabaseClient) {
           workspaces.id, workspaces.user_id, workspaces.name, workspaces.worker_id,
           workspaces.state, workspaces.runtime_image, workspaces.created_at,
           workspaces.updated_at, workspaces.last_activity_at,
+          workspaces.disk_limit_bytes::text as disk_limit_bytes, workspaces.disk_used_bytes::text as disk_used_bytes,
+          workspaces.disk_used_inodes::text as disk_used_inodes, workspaces.pi_used_bytes::text as pi_used_bytes,
+          workspaces.pi_limit_bytes::text as pi_limit_bytes, workspaces.disk_usage_at,
           users.username as owner_username, users.email as owner_email
         from workspaces
         join users on users.id = workspaces.user_id
@@ -103,7 +119,10 @@ export function createWorkspaceRepository(database: DatabaseClient) {
         const rows = await transaction<WorkspaceRow[]>`
           select
             id, user_id, name, worker_id, state, runtime_image,
-            created_at, updated_at, last_activity_at
+            created_at, updated_at, last_activity_at,
+            disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
+            disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
+            pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
           from workspaces
           where user_id = ${userId}
           order by created_at asc, id asc

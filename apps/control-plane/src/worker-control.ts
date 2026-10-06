@@ -4,6 +4,7 @@ import {
   WorkerTokenSchema,
   WorkerToControlMessageSchema,
 } from "@agent-runtime/protocol";
+import type { Logger } from "@agent-runtime/logging";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 
 import type { WorkerChannel } from "./worker-channel.js";
@@ -35,6 +36,7 @@ export function registerWorkerControlChannel(
     channel: WorkerChannel;
     now: () => Date;
     onHelloAccepted?: (workerId: string) => void;
+    log?: Logger;
   },
 ): void {
   const identities = new WeakMap<FastifyRequest, WorkerConnectionIdentity>();
@@ -129,6 +131,7 @@ export function registerWorkerControlChannel(
                 allocatedWorkspaces: message.payload.allocatedWorkspaces,
                 systemResources: message.payload.systemResources,
                 egress: message.payload.egress,
+                storage: message.payload.storage,
                 receivedAt: dependencies.now(),
               });
               if (!recorded) {
@@ -156,9 +159,18 @@ export function registerWorkerControlChannel(
                 workerId: identity.workerId,
                 allocatedWorkspaces: message.payload.allocatedWorkspaces,
                 egress: message.payload.egress,
+                storage: message.payload.storage,
+                workspaceDisk: message.payload.workspaceDisk ?? [],
                 receivedAt: dependencies.now(),
               });
-              if (!recorded) closeForPolicy();
+              if (recorded === null) {
+                closeForPolicy();
+              } else if (recorded.ignoredDiskSamples > 0) {
+                dependencies.log?.warn(
+                  { workerId: identity.workerId, ignored: recorded.ignoredDiskSamples },
+                  "worker reported disk usage for Workspaces it is not assigned",
+                );
+              }
               return;
             }
 
