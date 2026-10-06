@@ -14,12 +14,23 @@ export interface AdminUser extends User {
   updatedAt: string;
 }
 
+/** Data-project limit and the Worker's latest usage sample (null until sampled). */
+export interface WorkspaceDisk {
+  limitBytes: number;
+  usedBytes: number | null;
+  usedInodes: number | null;
+  piUsedBytes: number | null;
+  piLimitBytes: number | null;
+  sampledAt: string | null;
+}
+
 export interface Workspace {
   id: string;
   name: string;
   workerId: string | null;
   state: string;
   createdAt: string;
+  disk: WorkspaceDisk;
 }
 
 export interface AdminWorkspace extends Workspace {
@@ -48,6 +59,24 @@ export interface Worker {
   lastHeartbeatAt: string | null;
   /** Whether the Worker verifiably enforces the egress policy, and which revision. */
   egress: { enforced: boolean; revision: number | null; checkedAt: string | null };
+  /** Whether the Worker's managed root enforces disk quotas, and its capacity. */
+  storage: {
+    enforced: boolean;
+    fsType: string | null;
+    totalBytes: number | null;
+    freeBytes: number | null;
+    checkedAt: string | null;
+    allocatedLimitBytes: number;
+  };
+}
+
+export interface AuthLock {
+  id: string;
+  scope: "login_ip" | "ip" | "login" | "sso_start";
+  ipAddress: string | null;
+  user: { id: string; email: string | null } | null;
+  failures: number;
+  lockedUntil: string;
 }
 
 export interface EgressRule {

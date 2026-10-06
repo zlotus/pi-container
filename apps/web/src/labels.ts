@@ -80,6 +80,49 @@ export function transitionValueLabel(value: string): string {
     value;
 }
 
+const BYTE_UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
+
+/** Binary units with at most one decimal, e.g. `1.5 GiB`; `—` when unknown. */
+export function formatBytes(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value) || value < 0) return "—";
+  let amount = value;
+  let unit = 0;
+  while (amount >= 1024 && unit < BYTE_UNITS.length - 1) {
+    amount /= 1024;
+    unit += 1;
+  }
+  const text = unit === 0 || amount >= 100 ? String(Math.round(amount)) : amount.toFixed(1).replace(/\.0$/, "");
+  return `${text} ${BYTE_UNITS[unit]}`;
+}
+
+export type DiskUsageLevel = "unknown" | "ok" | "warning" | "full";
+
+/** Portal thresholds (specs.md Phase 15.7): warn from 90 %, full at the limit. */
+export function diskUsageLevel(usedBytes: number | null, limitBytes: number): DiskUsageLevel {
+  if (usedBytes === null || limitBytes <= 0) return "unknown";
+  if (usedBytes >= limitBytes) return "full";
+  return usedBytes / limitBytes >= 0.9 ? "warning" : "ok";
+}
+
+/** Parses an administrator's GiB input (`20`, `1.5`); null unless a positive number. */
+export function parseGibInput(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) return null;
+  const bytes = Math.round(Number(trimmed) * 1024 ** 3);
+  return bytes > 0 ? bytes : null;
+}
+
+const LOCK_SCOPE_LABELS: Record<string, string> = {
+  login_ip: "账户 + 来源地址",
+  ip: "来源地址",
+  login: "账户（全部来源）",
+  sso_start: "SSO 发起频率",
+};
+
+export function lockScopeLabel(scope: string): string {
+  return LOCK_SCOPE_LABELS[scope] ?? scope;
+}
+
 /** Local time as YYYY-MM-DD HH:mm:ss, the Portal's single absolute timestamp format. */
 export function formatAbsoluteTime(value: string): string {
   const date = new Date(value);

@@ -43,7 +43,22 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   EGRESS_ALLOW_OUTSIDE_DENY: "放行规则必须位于内网（RFC1918）或已有拒绝网段之内",
   EGRESS_ALLOW_OVERLAPS_PROTECTED: "放行规则不能包含平台保护地址",
   EGRESS_RULE_LIMIT: "出口规则数量已达上限",
+  AUTH_RATE_LIMITED: "登录尝试过于频繁，请稍后再试",
+  AUTH_UNAVAILABLE: "登录服务暂时不可用，请稍后重试",
+  AUTH_LOCK_NOT_FOUND: "该锁定不存在或已到期",
+  STORAGE_QUOTA_UNENFORCED: "Worker 磁盘配额未生效，暂时无法启动",
+  STORAGE_QUOTA_APPLY_FAILED: "Workspace 磁盘配额设置失败，请稍后重试",
+  STORAGE_LIMIT_EXCEEDED: "现有数据已超过磁盘上限，请联系管理员调高上限",
+  STORAGE_MIGRATION_REQUIRED: "该 Workspace 创建于磁盘配额启用之前，需要管理员完成存储迁移后才能启动",
+  DISK_LIMIT_OUT_OF_RANGE: "磁盘上限超出允许范围",
 };
+
+/** “请在 N 分钟后重试” for a 429 with Retry-After; null when there is nothing to add. */
+export function retryAfterText(header: string | null): string | null {
+  if (header === null || !/^\d+$/.test(header)) return null;
+  const minutes = Math.max(1, Math.ceil(Number(header) / 60));
+  return `请在 ${minutes} 分钟后重试`;
+}
 
 export function apiErrorText(code: string | undefined, serverMessage: string): string {
   return (code === undefined ? undefined : API_ERROR_MESSAGES[code]) ?? serverMessage;
@@ -75,8 +90,10 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       error?: { code?: string; message?: string };
     } | null;
     const code = body?.error?.code;
+    const text = apiErrorText(code, body?.error?.message ?? `请求失败（HTTP ${response.status}）`);
+    const retry = response.status === 429 ? retryAfterText(response.headers.get("retry-after")) : null;
     throw new ApiError(
-      apiErrorText(code, body?.error?.message ?? `请求失败（HTTP ${response.status}）`),
+      retry === null ? text : `${text.replace(/，请稍后再试$/, "")}，${retry}`,
       response.status,
       code,
     );

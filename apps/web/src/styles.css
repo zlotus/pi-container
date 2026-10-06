@@ -296,3 +296,13 @@ td small { display: block; margin-top: 4px; color: var(--text-muted); }
   .create-form button { width: 100%; }
   .section-heading { align-items: flex-start; }
     }
+
+/* Disk usage (Phase 15): warning from 90 %, full at the limit. */
+.disk-usage { display: inline-flex; flex-direction: column; align-items: flex-end; }
+.disk-usage .capacity-track { width: 110px; }
+.disk-warning .capacity-track i { background: var(--warning); }
+.disk-full .capacity-track i { background: var(--danger); }
+.disk-full, .disk-full small { color: var(--danger); }
+.disk-usage small { font-size: .7rem; margin-top: 4px; }
+td .disk-usage { align-items: flex-start; }
+.notice.banner { border-color: #b9d6c4; background: #f2f8f4; color: var(--success); }

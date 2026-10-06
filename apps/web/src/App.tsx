@@ -85,7 +85,7 @@ export function PortalRouteContent({
         />
       );
     case "admin-workspaces":
-      return <AdminWorkspacesPage />;
+      return <AdminWorkspacesPage session={session} />;
     case "admin-workers":
       return <AdminWorkersPage session={session} />;
     case "admin-egress":
