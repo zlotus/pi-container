@@ -63,7 +63,7 @@ export function registerAdminWorkerRoutes(app: FastifyInstance, context: RouteCo
       audit: {
         actorUserId: auth.session.user.id,
         requestId: String(request.id).slice(0, 128),
-        ipAddress: request.ip.slice(0, 128),
+        ipAddress: context.clientAddress(request),
         userAgent: typeof userAgent === "string" ? userAgent.slice(0, 512) : null,
       },
     });

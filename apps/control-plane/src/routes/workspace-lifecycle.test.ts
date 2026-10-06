@@ -13,6 +13,7 @@ import {
   WORKER_1_TOKEN,
   WORKER_2_TOKEN,
   workerHello,
+  TEST_WORKSPACE_DISK,
 } from "./test-fixtures.js";
 
 describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
@@ -459,6 +460,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       createdAt: NOW,
       updatedAt: NOW,
       lastActivityAt: NOW,
+      disk: TEST_WORKSPACE_DISK,
     });
 
     worker.send(

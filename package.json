@@ -13,6 +13,7 @@
     "dev:web": "pnpm --filter @agent-runtime/web dev",
     "build:web": "pnpm --filter @agent-runtime/web build",
     "db:migrate": "pnpm --filter @agent-runtime/database migrate",
+    "auth:unlock": "pnpm --filter @agent-runtime/control-plane auth:unlock",
     "user:create": "pnpm --filter @agent-runtime/control-plane user:create",
     "worker:provision": "pnpm --filter @agent-runtime/control-plane worker:provision",
     "worker:rotate": "pnpm --filter @agent-runtime/control-plane worker:rotate",

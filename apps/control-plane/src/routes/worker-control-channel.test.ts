@@ -15,6 +15,7 @@ import {
   WORKER_1_TOKEN,
   WORKER_2_TOKEN,
   workerHello,
+  TEST_WORKSPACE_DISK,
 } from "./test-fixtures.js";
 
 describe("Phase 2 worker control channel", () => {
@@ -233,6 +234,7 @@ describe("Phase 2 worker control channel", () => {
         createdAt: NOW,
         updatedAt: NOW,
         lastActivityAt: NOW,
+        disk: TEST_WORKSPACE_DISK,
       },
     
       {
@@ -246,6 +248,7 @@ describe("Phase 2 worker control channel", () => {
         createdAt: NOW,
         updatedAt: NOW,
         lastActivityAt: NOW,
+        disk: TEST_WORKSPACE_DISK,
       },
     ]);
     const app = buildControlPlane(dependencies);

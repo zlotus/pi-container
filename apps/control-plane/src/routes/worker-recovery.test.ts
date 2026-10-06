@@ -15,6 +15,7 @@ import {
   WORKER_1_TOKEN,
   WORKER_2_TOKEN,
   workerHello,
+  TEST_WORKSPACE_DISK,
 } from "./test-fixtures.js";
 
 describe("Phase 6 Worker recovery reconciliation", () => {
@@ -228,6 +229,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
           createdAt: NOW,
           updatedAt: NOW,
           lastActivityAt: NOW,
+          disk: TEST_WORKSPACE_DISK,
         },
       ]);
       dependencies.testState.setDesiredState(workspaceId, desiredState);
@@ -305,6 +307,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
           createdAt: NOW,
           updatedAt: NOW,
           lastActivityAt: NOW,
+          disk: TEST_WORKSPACE_DISK,
         },
       ]);
       const app = buildControlPlane(dependencies);
@@ -406,6 +409,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
         createdAt: NOW,
         updatedAt: NOW,
         lastActivityAt: NOW,
+        disk: TEST_WORKSPACE_DISK,
       },
     ]);
     const app = buildControlPlane(dependencies);

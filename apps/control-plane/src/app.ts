@@ -6,6 +6,7 @@ import {
   type ControlPlaneDependencies,
   createRouteContext,
 } from "./context.js";
+import { registerAdminAuthLockRoutes } from "./routes/admin-auth-locks.js";
 import { registerAdminEgressRoutes } from "./routes/admin-egress.js";
 import { registerAdminUserRoutes } from "./routes/admin-users.js";
 import { registerAdminWorkerRoutes } from "./routes/admin-workers.js";
@@ -79,6 +80,7 @@ export function buildControlPlane(
   registerAdminWorkerRoutes(app, context);
   registerAdminEgressRoutes(app, context, runtime);
   registerAdminUserRoutes(app, context);
+  registerAdminAuthLockRoutes(app, context);
 
   return app;
 }

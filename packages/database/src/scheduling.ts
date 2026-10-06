@@ -1,12 +1,11 @@
 import type {
   Architecture,
   WorkerCapabilities,
-  WorkspaceState,
 } from "@agent-runtime/protocol";
 
 import type { DatabaseClient } from "./index.js";
 import { createWorkerRepository } from "./workers.js";
-import type { WorkspaceRecord } from "./records.js";
+import { mapWorkspace, type WorkspaceRecord, type WorkspaceRow } from "./records.js";
 import type { WorkerRecord, WorkerStatus } from "./workers.js";
 
 const SCHEDULER_ADVISORY_LOCK_ID = 708_913_425;
@@ -66,19 +65,10 @@ export type ScheduleWorkspaceStartResult =
   | { outcome: "NO_ELIGIBLE_WORKER" }
   | { outcome: "WORKSPACE_CHANGED" };
 
-interface SchedulingWorkspaceRow {
-  id: string;
-  user_id: string;
-  name: string;
-  worker_id: string | null;
-  state: WorkspaceState;
-  runtime_image: string;
+type SchedulingWorkspaceRow = WorkspaceRow & {
   required_architecture: Architecture | null;
   required_capabilities: Partial<WorkerCapabilities>;
-  created_at: Date;
-  updated_at: Date;
-  last_activity_at: Date;
-}
+};
 
 interface CandidateRow {
   id: string;
@@ -94,20 +84,6 @@ interface CandidateRow {
   last_heartbeat_at: Date | null;
   egress_enforced: boolean;
   egress_revision: string | null;
-}
-
-function mapWorkspace(row: SchedulingWorkspaceRow): WorkspaceRecord {
-  return {
-    id: row.id,
-    userId: row.user_id,
-    name: row.name,
-    workerId: row.worker_id,
-    state: row.state,
-    runtimeImage: row.runtime_image,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    lastActivityAt: row.last_activity_at,
-  };
 }
 
 function mapCandidate(row: CandidateRow): WorkerScheduleCandidate {
@@ -213,7 +189,10 @@ export function createSchedulingRepository(
           select
             id, user_id, name, worker_id, state, runtime_image,
             required_architecture, required_capabilities,
-            created_at, updated_at, last_activity_at
+            created_at, updated_at, last_activity_at,
+            disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
+            disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
+            pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
           from workspaces
           where id = ${input.workspaceId} and user_id = ${input.userId}
           for update
@@ -284,7 +263,10 @@ export function createSchedulingRepository(
           returning
             id, user_id, name, worker_id, state, runtime_image,
             required_architecture, required_capabilities,
-            created_at, updated_at, last_activity_at
+            created_at, updated_at, last_activity_at,
+            disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
+            disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
+            pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
         `;
         const starting = updated[0];
         return starting === undefined

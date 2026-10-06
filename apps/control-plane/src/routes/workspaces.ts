@@ -73,6 +73,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
         userId: auth.session.user.id,
         name: parsed.data.name,
         runtimeImage: dependencies.defaultRuntimeImage,
+        diskLimitBytes: dependencies.workspaceDiskLimitBytes,
       });
       return reply.code(201).send({ workspace: publicWorkspace(workspace) });
     } catch (error) {

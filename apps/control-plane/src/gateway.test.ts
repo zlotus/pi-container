@@ -17,6 +17,7 @@ import {
   buildWorkspaceGateway,
   type WorkspaceGatewayStore,
 } from "./gateway.js";
+import { TEST_WORKSPACE_DISK } from "./routes/test-fixtures.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
 import { SessionConnectionRegistry } from "./session-connections.js";
 
@@ -78,6 +79,7 @@ function workspace(state: WorkspaceRecord["state"] = "RUNNING"): WorkspaceRecord
     createdAt: NOW,
     updatedAt: NOW,
     lastActivityAt: NOW,
+    disk: TEST_WORKSPACE_DISK,
   };
 }
 

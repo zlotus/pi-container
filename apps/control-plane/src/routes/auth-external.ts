@@ -39,7 +39,82 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
     oauth2TransactionCookieName,
     authenticationAudit,
     recordAuthenticationFailure,
+    clientAddress,
+    sendRateLimited,
+    sendThrottleUnavailable,
   } = context;
+  const guard = dependencies.loginGuard;
+
+  /**
+   * Rate-limits SSO starts per client address, so no single source can fill the
+   * in-memory transaction store and lock everyone else out of SSO.
+   */
+  async function admitSsoStart(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    protocol: "OIDC" | "OAUTH2",
+    providerId: string,
+  ): Promise<boolean> {
+    const address = clientAddress(request);
+    try {
+      const lockedUntil = await dependencies.store.findAuthLock(
+        guard.ssoStartKeys(address),
+        now(),
+      );
+      if (lockedUntil !== null) {
+        sendRateLimited(reply, lockedUntil);
+        return false;
+      }
+      await dependencies.store.recordAuthThrottleHits({
+        hits: [guard.ssoStartHit(address)],
+        now: now(),
+        audit: authenticationAudit(request, protocol, providerId),
+      });
+      return true;
+    } catch (error) {
+      request.log.error({ err: error }, "login throttle unavailable");
+      sendThrottleUnavailable(reply);
+      return false;
+    }
+  }
+
+  /** A locked address is turned away before its callback consumes a transaction. */
+  async function admitCallback(request: FastifyRequest, reply: FastifyReply): Promise<boolean> {
+    try {
+      const lockedUntil = await dependencies.store.findAuthLock(
+        guard.addressKeys(clientAddress(request)),
+        now(),
+      );
+      if (lockedUntil === null) return true;
+      sendRateLimited(reply, lockedUntil);
+      return false;
+    } catch (error) {
+      request.log.error({ err: error }, "login throttle unavailable");
+      sendThrottleUnavailable(reply);
+      return false;
+    }
+  }
+
+  /** Invalid transactions and failed code exchanges count against the address. */
+  async function countCallbackFailure(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    protocol: "OIDC" | "OAUTH2",
+    providerId: string,
+  ): Promise<boolean> {
+    try {
+      await dependencies.store.recordAuthThrottleHits({
+        hits: [guard.addressFailureHit(clientAddress(request))],
+        now: now(),
+        audit: authenticationAudit(request, protocol, providerId),
+      });
+      return true;
+    } catch (error) {
+      request.log.error({ err: error }, "login throttle unavailable");
+      sendThrottleUnavailable(reply);
+      return false;
+    }
+  }
 
   async function completeExternalAuthentication(input: {
     request: FastifyRequest;
@@ -145,6 +220,11 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
         .code(404)
         .send(errorBody("OIDC_DISABLED", "OIDC login is not enabled"));
     }
+    if (
+      !(await admitSsoStart(request, reply, "OIDC", dependencies.oidc.providerId))
+    ) {
+      return reply;
+    }
     try {
       const authorization =
         await dependencies.oidc.client.createAuthorizationRequest(
@@ -184,6 +264,9 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
         .code(404)
         .send(errorBody("OIDC_DISABLED", "OIDC login is not enabled"));
     }
+    if (!(await admitCallback(request, reply))) {
+      return reply;
+    }
     const clearedTransactionCookie = sessionCookie(
       oidcTransactionCookieName,
       "",
@@ -201,6 +284,16 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
         ? null
         : dependencies.oidc.transactions.consume(handle, now());
     if (transaction === null) {
+      if (
+        !(await countCallbackFailure(
+          request,
+          reply,
+          "OIDC",
+          dependencies.oidc.providerId,
+        ))
+      ) {
+        return reply;
+      }
       await recordAuthenticationFailure(
         request,
         "OIDC",
@@ -231,6 +324,16 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
         transaction,
       });
     } catch {
+      if (
+        !(await countCallbackFailure(
+          request,
+          reply,
+          "OIDC",
+          dependencies.oidc.providerId,
+        ))
+      ) {
+        return reply;
+      }
       await recordAuthenticationFailure(
         request,
         "OIDC",
@@ -264,6 +367,11 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
       return reply
         .code(404)
         .send(errorBody("OAUTH2_DISABLED", "OAuth2 login is not enabled"));
+    }
+    if (
+      !(await admitSsoStart(request, reply, "OAUTH2", dependencies.oauth2.providerId))
+    ) {
+      return reply;
     }
     try {
       const authorization =
@@ -304,6 +412,9 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
         .code(404)
         .send(errorBody("OAUTH2_DISABLED", "OAuth2 login is not enabled"));
     }
+    if (!(await admitCallback(request, reply))) {
+      return reply;
+    }
     const clearedTransactionCookie = sessionCookie(
       oauth2TransactionCookieName,
       "",
@@ -321,6 +432,16 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
         ? null
         : dependencies.oauth2.transactions.consume(handle, now());
     if (transaction === null) {
+      if (
+        !(await countCallbackFailure(
+          request,
+          reply,
+          "OAUTH2",
+          dependencies.oauth2.providerId,
+        ))
+      ) {
+        return reply;
+      }
       await recordAuthenticationFailure(
         request,
         "OAUTH2",
@@ -351,6 +472,16 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
         transaction,
       });
     } catch {
+      if (
+        !(await countCallbackFailure(
+          request,
+          reply,
+          "OAUTH2",
+          dependencies.oauth2.providerId,
+        ))
+      ) {
+        return reply;
+      }
       await recordAuthenticationFailure(
         request,
         "OAUTH2",

@@ -46,6 +46,10 @@ const MIGRATIONS = [
     name: "0010_egress_policy",
     url: new URL("../migrations/0010_egress_policy.sql", import.meta.url),
   },
+  {
+    name: "0011_storage_and_login_guard",
+    url: new URL("../migrations/0011_storage_and_login_guard.sql", import.meta.url),
+  },
 ] as const;
 
 export async function migrateDatabase(client: DatabaseClient): Promise<void> {

@@ -8,6 +8,11 @@ import { createLogger, LoggingConfigSchema } from "@agent-runtime/logging";
 import { buildControlPlane } from "./app.js";
 import { parseServerConfig } from "./config.js";
 import { protectedAddressResolver } from "./egress.js";
+import {
+  AddressSet,
+  DEFAULT_LOGIN_GUARD_POLICIES,
+  LoginGuard,
+} from "./login-guard.js";
 import { buildWorkspaceGateway } from "./gateway.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
 import { SessionConnectionRegistry } from "./session-connections.js";
@@ -75,6 +80,25 @@ const oauth2 = config.AUTH_OAUTH2_ENABLED
       allowedDomains: config.AUTH_OAUTH2_ALLOWED_DOMAINS,
     }
   : undefined;
+const loginGuard = new LoginGuard(
+  config.SESSION_SECRET,
+  {
+    loginIp: {
+      ...DEFAULT_LOGIN_GUARD_POLICIES.loginIp,
+      threshold: config.AUTH_LOCKOUT_ACCOUNT_IP_THRESHOLD,
+    },
+    ip: { ...DEFAULT_LOGIN_GUARD_POLICIES.ip, threshold: config.AUTH_LOCKOUT_IP_THRESHOLD },
+    login: {
+      ...DEFAULT_LOGIN_GUARD_POLICIES.login,
+      threshold: config.AUTH_LOCKOUT_ACCOUNT_THRESHOLD,
+    },
+    ssoStart: {
+      ...DEFAULT_LOGIN_GUARD_POLICIES.ssoStart,
+      threshold: config.AUTH_SSO_START_LIMIT,
+    },
+  },
+  new AddressSet(config.AUTH_TRUSTED_NETWORKS),
+);
 const app = buildControlPlane({
   checkDatabase: async () => checkDatabase(database),
   store: repository,
@@ -92,9 +116,13 @@ const app = buildControlPlane({
     memoryBytes: config.WORKSPACE_MEMORY_BYTES,
     pidsLimit: config.WORKSPACE_PIDS_LIMIT,
   },
+  workspaceDiskLimitBytes: config.WORKSPACE_DISK_LIMIT_BYTES,
+  workspaceDiskLimitMaxBytes: config.WORKSPACE_DISK_LIMIT_MAX_BYTES,
   workspaceBaseUrl: config.WORKSPACE_BASE_URL,
   sessionExchanges,
   sessionConnections,
+  loginGuard,
+  trustedProxies: new AddressSet(config.AUTH_TRUSTED_PROXIES),
   ...(oidc === undefined ? {} : { oidc }),
   ...(oauth2 === undefined ? {} : { oauth2 }),
   egressProtected: protectedAddressResolver(
@@ -130,8 +158,18 @@ const workerStatusTimer = setInterval(() => {
 }, config.WORKER_STATUS_SWEEP_MS);
 workerStatusTimer.unref();
 
+const authThrottleCleanupTimer = setInterval(() => {
+  void repository
+    .deleteExpiredAuthThrottle(new Date(), loginGuard.maxWindowMs)
+    .catch((error: unknown) => {
+      log.error({ err: error }, "login throttle cleanup failed");
+    });
+}, 60_000);
+authThrottleCleanupTimer.unref();
+
 const shutdown = async (): Promise<void> => {
   clearInterval(workerStatusTimer);
+  clearInterval(authThrottleCleanupTimer);
   await new Promise<void>((resolve, reject) => {
     gateway.close((error) => (error === undefined ? resolve() : reject(error)));
   });

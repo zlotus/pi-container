@@ -15,6 +15,7 @@ import {
   USER_A_ID,
   WORKER_1_TOKEN,
   workerHello,
+  TEST_WORKSPACE_DISK,
 } from "./test-fixtures.js";
 
 const WORKSPACE_ID = "66666666-6666-4666-8666-666666666666";
@@ -44,6 +45,7 @@ describe("Control Plane request logging", () => {
         createdAt: NOW,
         updatedAt: NOW,
         lastActivityAt: NOW,
+        disk: TEST_WORKSPACE_DISK,
       },
     ]);
     dependencies.log = createJsonLogger(

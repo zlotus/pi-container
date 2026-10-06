@@ -1,43 +1,21 @@
-import type {
-  WorkspaceDesiredState,
-  WorkspaceState,
-} from "@agent-runtime/protocol";
+import type { WorkspaceDesiredState } from "@agent-runtime/protocol";
 
 import type { DatabaseClient } from "./index.js";
-import type { WorkspaceRecord } from "./records.js";
+import { mapWorkspace, type WorkspaceRecord, type WorkspaceRow } from "./records.js";
 
 export interface WorkspaceRecoveryRecord extends WorkspaceRecord {
   desiredState: WorkspaceDesiredState;
 }
 
-interface WorkspaceRecoveryRow {
-  id: string;
-  user_id: string;
-  name: string;
+type WorkspaceRecoveryRow = WorkspaceRow & {
   worker_id: string;
-  state: WorkspaceState;
   desired_state: WorkspaceDesiredState;
-  runtime_image: string;
-  created_at: Date;
-  updated_at: Date;
-  last_activity_at: Date;
-}
+};
 
 function mapRecoveryWorkspace(
   row: WorkspaceRecoveryRow,
 ): WorkspaceRecoveryRecord {
-  return {
-    id: row.id,
-    userId: row.user_id,
-    name: row.name,
-    workerId: row.worker_id,
-    state: row.state,
-    desiredState: row.desired_state,
-    runtimeImage: row.runtime_image,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    lastActivityAt: row.last_activity_at,
-  };
+  return { ...mapWorkspace(row), desiredState: row.desired_state };
 }
 
 export function createRecoveryRepository(database: DatabaseClient) {
@@ -74,7 +52,10 @@ export function createRecoveryRepository(database: DatabaseClient) {
         where worker_id = ${workerId}
         returning
           id, user_id, name, worker_id, state, desired_state, runtime_image,
-          created_at, updated_at, last_activity_at
+          created_at, updated_at, last_activity_at,
+          disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
+          disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
+          pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
       `;
       return rows.map(mapRecoveryWorkspace).sort((left, right) =>
         left.id.localeCompare(right.id),

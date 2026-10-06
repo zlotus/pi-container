@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { hashOpaqueToken, hashPassword } from "@agent-runtime/auth";
 import {
@@ -6,11 +6,14 @@ import {
   createDatabaseClient,
   createRepository,
   migrateDatabase,
+  nextAuthThrottleState,
+  type AuthThrottleState,
   type DatabaseClient,
 } from "@agent-runtime/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildControlPlane } from "./app.js";
+import { AddressSet, DEFAULT_LOGIN_GUARD_POLICIES, LoginGuard } from "./login-guard.js";
 import { selectWorker } from "./scheduler.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
 
@@ -105,6 +108,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       userId: phase9UserId,
       name: "phase9-metadata",
       runtimeImage: "agent-runtime:phase9-integration",
+      diskLimitBytes: 20 * 1024 ** 3,
     });
     const tokenHash = hashOpaqueToken(`phase9-${suffix}`);
     await expect(
@@ -504,6 +508,14 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       defaultRuntimeImage: "agent-runtime:integration-unassigned",
       workerOfflineAfterMs: 35_000,
       workerCommandTimeoutMs: 1_000,
+      workspaceDiskLimitBytes: 20 * 1024 ** 3,
+      workspaceDiskLimitMaxBytes: 1024 * 1024 ** 3,
+      loginGuard: new LoginGuard(
+        "integration-session-secret-at-least-32-characters",
+        DEFAULT_LOGIN_GUARD_POLICIES,
+        new AddressSet(["127.0.0.1/32"]),
+      ),
+      trustedProxies: new AddressSet([]),
       workspaceResources: {
         cpuCount: 2,
         memoryBytes: 4 * 1024 ** 3,
@@ -711,6 +723,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       userId: phase3UserId,
       name: "phase-3-lifecycle",
       runtimeImage: phase3RuntimeImage,
+      diskLimitBytes: 20 * 1024 ** 3,
     });
 
     await expect(
@@ -941,6 +954,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       userId: phase6UserId,
       name: "phase-6-recovery",
       runtimeImage,
+      diskLimitBytes: 20 * 1024 ** 3,
     });
     await expect(
       repository.scheduleWorkspaceStart({
@@ -1140,6 +1154,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       userId: phase5UserId,
       name: "scored-placement",
       runtimeImage,
+      diskLimitBytes: 20 * 1024 ** 3,
     });
     await database`
       update workspaces
@@ -1186,6 +1201,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
           userId: phase5UserId,
           name,
           runtimeImage: finalSlotImage,
+          diskLimitBytes: 20 * 1024 ** 3,
         });
         return repository.scheduleWorkspaceStart({
           workspaceId: workspace.id,
@@ -1257,6 +1273,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       userId: schedulingUserId,
       name: "sticky-on-paused",
       runtimeImage,
+      diskLimitBytes: 20 * 1024 ** 3,
     });
     await database`
       update workspaces set worker_id = ${pausedWorker}, state = 'STOPPED'
@@ -1301,6 +1318,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       userId: schedulingUserId,
       name: "placed-while-paused",
       runtimeImage,
+      diskLimitBytes: 20 * 1024 ** 3,
     });
     const connected = [pausedWorker, activeWorker];
     const cutoff = new Date(NOW.getTime() - 35_000);
@@ -1358,6 +1376,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       userId: auditFilterUserId,
       name: "audit-filter-target",
       runtimeImage: "agent-runtime:audit-filter",
+      diskLimitBytes: 20 * 1024 ** 3,
     });
     await database`
       insert into platform_audit_events (event_type, actor_user_id, owner_user_id, details)
@@ -1530,5 +1549,118 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       "worker.egress_unenforced",
       "worker.egress_enforced",
     ]);
+  });
+});
+
+describeWithPostgres("Phase 15 login throttle PostgreSQL integration", () => {
+  const userId = randomUUID();
+  const suffix = randomUUID();
+  let database!: DatabaseClient;
+  const audit = {
+    protocol: "LOCAL" as const,
+    providerId: "local",
+    requestId: "request",
+    ipAddress: "198.51.100.1",
+    userAgent: null,
+  };
+  const policy = { threshold: 5, windowMs: 15 * 60_000, lockMs: 15 * 60_000 };
+  const keyHash = (label: string) =>
+    createHash("sha256").update(`${suffix}:${label}`).digest("hex");
+
+  beforeAll(async () => {
+    if (databaseUrl === undefined) throw new Error("TEST_DATABASE_URL is required");
+    database = createDatabaseClient(databaseUrl);
+    await migrateDatabase(database);
+    await createRepository(database, selectWorker).createUser({
+      id: userId,
+      email: `throttle-${suffix}@example.test`,
+      username: null,
+      passwordHash: await hashPassword("integration-throttle-password"),
+      role: "user",
+    });
+  });
+
+  afterAll(async () => {
+    await database`delete from platform_audit_events where owner_user_id = ${userId}`;
+    await database`delete from auth_throttle where user_id = ${userId}`;
+    await database`delete from users where id = ${userId}`;
+    await database.end({ timeout: 5 });
+  });
+
+  it("counts concurrent failures exactly and records one lock event", async () => {
+    const repository = createRepository(database, selectWorker);
+    const hit = {
+      scope: "login_ip" as const,
+      keyHash: keyHash("concurrent"),
+      policy,
+      ipAddress: "198.51.100.1",
+      userId,
+    };
+    const results = await Promise.all(
+      Array.from({ length: 50 }, () =>
+        repository.recordAuthThrottleHits({ hits: [hit], now: NOW, audit }),
+      ),
+    );
+    expect(results.flat()).toEqual(["login_ip"]);
+    const [row] = await database<Array<{ failures: number; locked_until: Date }>>`
+      select failures, locked_until from auth_throttle
+      where scope = 'login_ip' and key_hash = ${hit.keyHash}
+    `;
+    expect(row?.failures).toBe(50);
+    expect(row?.locked_until).toEqual(new Date(NOW.getTime() + policy.lockMs));
+    const events = await database<Array<{ details: Record<string, unknown> }>>`
+      select details from platform_audit_events
+      where event_type = 'auth.login_locked' and owner_user_id = ${userId}
+    `;
+    expect(events).toHaveLength(1);
+    expect(events[0]?.details).toMatchObject({ scope: "login_ip", ipAddress: "198.51.100.1" });
+
+    expect(await repository.findAuthLock([hit], NOW)).toEqual(row?.locked_until);
+    const locks = await repository.listAuthLocks(NOW);
+    expect(locks.find((lock) => lock.userId === userId)).toMatchObject({
+      scope: "login_ip",
+      ipAddress: "198.51.100.1",
+      userEmail: `throttle-${suffix}@example.test`,
+    });
+  });
+
+  it("matches the shared transition when windows and locks expire", async () => {
+    const repository = createRepository(database, selectWorker);
+    const hit = {
+      scope: "ip" as const,
+      keyHash: keyHash("expiry"),
+      policy: { threshold: 2, windowMs: 60_000, lockMs: 120_000 },
+      ipAddress: "198.51.100.2",
+      userId: null,
+    };
+    const at = (ms: number) => new Date(NOW.getTime() + ms);
+    let state: AuthThrottleState | null = null;
+    for (const offset of [0, 1_000, 61_000, 200_000, 200_500, 400_000, 400_500]) {
+      await repository.recordAuthThrottleHits({ hits: [hit], now: at(offset), audit });
+      state = nextAuthThrottleState(state, hit.policy, at(offset));
+      const [row] = await database<
+        Array<{ window_start: Date; failures: number; locked_until: Date | null }>
+      >`
+        select window_start, failures, locked_until from auth_throttle
+        where scope = 'ip' and key_hash = ${hit.keyHash}
+      `;
+      expect({
+        windowStart: row?.window_start,
+        failures: row?.failures,
+        lockedUntil: row?.locked_until,
+      }).toEqual(state);
+    }
+    expect(
+      await repository.clearAuthLocks({
+        target: { kind: "keys", keys: [hit] },
+        now: at(400_500),
+        source: "cli",
+        actorUserId: null,
+        requestId: null,
+      }),
+    ).toBe(1);
+    expect(await repository.findAuthLock([hit], at(400_500))).toBeNull();
+    expect(await repository.deleteExpiredAuthThrottle(at(10 * 60 * 60_000), 60 * 60_000)).toBeGreaterThanOrEqual(0);
+    await database`delete from platform_audit_events where event_type in ('auth.login_locked', 'auth.lock_cleared') and details->>'ipAddress' = '198.51.100.2'`;
   });
 });

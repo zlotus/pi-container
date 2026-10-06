@@ -34,6 +34,15 @@ export {
   type PlatformAuditEvent,
 } from "./audit.js";
 export {
+  nextAuthThrottleState,
+  type AuthLockRecord,
+  type AuthThrottleHit,
+  type AuthThrottleKey,
+  type AuthThrottlePolicy,
+  type AuthThrottleScope,
+  type AuthThrottleState,
+} from "./auth-throttle.js";
+export {
   type CreateEgressRuleResult,
   type DeleteEgressRuleResult,
   type EgressAuditMetadata,
