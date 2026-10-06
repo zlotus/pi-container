@@ -272,10 +272,12 @@ set +a
 pnpm dev:worker
 ```
 
-从 Phase 14 起 Worker 需要 `CAP_NET_ADMIN` 来管理 Workspace 出口规则（仍以普通用户运行）。开发时用
-`tools/dev/run-worker-privileged.sh .data/worker-a.env` 代替上面的 `pnpm dev:worker`；不带该
+从 Phase 14 起 Worker 需要 `CAP_NET_ADMIN` 来管理 Workspace 出口规则，从 Phase 15 起还需要
+`CAP_SYS_ADMIN` 来设置磁盘配额（仍以普通用户运行）。开发时用
+`tools/dev/run-worker-privileged.sh .data/worker-a.env` 代替上面的 `pnpm dev:worker`；缺少任一
 capability 时 Worker 会拒绝启动任何 Workspace。宿主机还需安装开机加载规则的 unit，见
-[Workspace Egress Runbook](docs/egress-runbook.md)。
+[Workspace Egress Runbook](docs/egress-runbook.md)；`WORKER_MANAGED_ROOT` 必须是以 `prjquota` 挂载的
+独立 XFS，见 [Workspace Storage Runbook](docs/storage-runbook.md)。
 
 Worker 每次建立 control channel 时，都会先对 `RUNTIME_IMAGE` 启动一次短时、无网络且受资源/
 安全约束的 capability probe。只有镜像 OS/architecture 与宿主机匹配且 probe 返回严格 typed 结果，
@@ -291,6 +293,22 @@ Workspace 默认可以访问公网，不能访问 RFC1918 内网与 Worker 宿�
 每次变更记录 Audit 并立即下发到所有在线 Worker。规则由 Worker 在平台独占的 nftables 表中维护并
 持续校验；无法确认规则生效时 fail-closed（不启动 Workspace、停止运行中的 Workspace，数据保留）。
 安装、配置、开发环境中的 Clash/Tailscale 注意事项与排障见 [Workspace Egress Runbook](docs/egress-runbook.md)。
+
+## Workspace disk quotas and container limits
+
+每个 Workspace 的 `/workspace`、`/home/agent`、`/tmp` 共用一个磁盘上限（默认 20 GiB，管理员可在“全部
+Workspace”页按 Workspace 调整，立即生效），Pi 会话数据（`/agent/pi`）另有 2 GiB 上限，`/workspace`
+写满时 Pi Session 仍可保存。容器根文件系统只读，home 持久化；`nofile` 65536、不产生 core 文件、容器日志
+最多约 30 MiB。Portal 显示已用/上限。配额由 Worker 以 XFS project quota 实现，无法确认生效时 fail-closed。
+Phase 15 之前创建的 Workspace 需要管理员迁移一次后才能启动。安装、开发设备上的 loop 镜像、迁移与排障见
+[Workspace Storage Runbook](docs/storage-runbook.md)。
+
+## Login protection
+
+本地登录按“账户 + 来源地址”、来源地址、账户三个维度计数并临时锁定，SSO 入口按来源地址限速；锁定记
+Audit，到期自动解除，管理员可在“用户”页或用 `pnpm auth:unlock` 解除。来自 `AUTH_TRUSTED_NETWORKS` 的
+请求不受账户维度锁定影响（break-glass）。`X-Forwarded-For` 只在 `AUTH_TRUSTED_PROXIES` 中的代理转发时
+采信。见 [Authentication Runbook](docs/authentication-runbook.md#login-protection-phase-15)。
 
 ## Logs
 

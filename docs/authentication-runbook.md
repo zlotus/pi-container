@@ -52,6 +52,8 @@ user.role_changed
 user.password_reset
 identity.bound
 identity.unbound
+auth.login_locked
+auth.lock_cleared
 ```
 
 普通用户的 Audit API 只返回自己的 `workspace.*` 事件，不返回认证、用户管理或 identity 管理事件。
@@ -64,6 +66,48 @@ where details::text ~* '(password|authorization[_ -]?code|access[_ -]?token|refr
 ```
 
 命中必须人工确认并按安全事件处理；不要把疑似敏感 `details` 复制到普通日志。
+
+## Login Protection (Phase 15)
+
+本地登录与 SSO 入口的限速和临时锁定（`specs.md` 第 64 节 Phase 15.9）。全部锁定都会到期自动解除，没有
+永久锁定。
+
+| 计数 | 默认阈值 → 锁定 | 说明 |
+|---|---|---|
+| 账户 + 来源地址 | 15 分钟内失败 5 次 → 15 分钟 | 只影响这个地址对这个账户的尝试 |
+| 来源地址 | 15 分钟内失败 20 次 → 15 分钟 | 含格式错误的登录请求与失败的 SSO callback |
+| 账户（全部来源） | 1 小时内失败 50 次 → 1 小时 | 来自 `AUTH_TRUSTED_NETWORKS` 的请求不受此项限制 |
+| SSO 发起 | 10 分钟内 30 次 → 10 分钟 | 防止单一来源耗尽进程内的 SSO transaction 容量 |
+
+- 被锁定的请求直接返回 429 与 `Retry-After`，不再校验密码、不再计数，响应不说明是哪一项锁定。存在与
+  不存在的账户行为完全一致。
+- 一次成功登录只清除“账户 + 来源地址”计数；来源地址与账户计数继续累积，攻击者不能借合法用户的一次
+  登录重置计数。管理员重置某用户密码时清除该用户的全部锁定。
+- 数据库只保存登录名的 HMAC（以 `SESSION_SECRET` 派生的密钥），不保存明文登录名。
+- 计数存储不可用时登录返回 503 `AUTH_UNAVAILABLE`，不跳过限速。
+- 被锁定期间的每次拒绝不逐条写 Audit（避免刷写审计表），只在开始锁定时写一次 `auth.login_locked`。
+
+### 客户端地址
+
+`AUTH_TRUSTED_PROXIES` 列出可信的反向代理；只有 TCP 对端在该列表中时才读取 `X-Forwarded-For`，并从右往左
+取第一个不可信的地址。其他来源伪造的 `X-Forwarded-For` 一律忽略。开发时 Portal 经 Vite proxy（已开启
+`xfwd`）访问，配置 `AUTH_TRUSTED_PROXIES=127.0.0.1/32,::1/128`。**生产必须只填写真实的反向代理地址**；
+填写过宽会让任何人伪造来源地址绕过按地址的限速。该地址同时写入 Audit 的 `ipAddress`。
+
+### Break-glass
+
+1. 外部攻击者只能锁定自己的来源地址，或某个账户对自己地址的尝试；管理员换一个地址即可登录。
+2. 分布式攻击可以触发“账户（全部来源）”锁定，但它对 `AUTH_TRUSTED_NETWORKS`（默认仅 loopback，生产配置为
+   管理网段）不生效：管理员从管理网络用正确密码仍可登录。
+3. Portal“用户”页底部的“登录锁定”列出生效中的锁定，可逐条解除（记 `auth.lock_cleared`）。
+4. 能登录 Control Plane 宿主机即可直接解除（同样记 Audit，`details.source=cli`）：
+
+   ```bash
+   set -a; . ./.env; set +a                      # 需要 DATABASE_URL 与 SESSION_SECRET
+   pnpm auth:unlock login admin@example.com      # 某个账户（邮箱或用户名）
+   pnpm auth:unlock ip 198.51.100.7              # 某个来源地址
+   pnpm auth:unlock all                          # 全部
+   ```
 
 ## Phase 12 Manual Acceptance
 
