@@ -273,7 +273,7 @@ pnpm dev:worker
 ```
 
 从 Phase 14 起 Worker 需要 `CAP_NET_ADMIN` 来管理 Workspace 出口规则（仍以普通用户运行）。开发时用
-`tools/dev/run-worker-with-egress.sh .data/worker-a.env` 代替上面的 `pnpm dev:worker`；不带该
+`tools/dev/run-worker-privileged.sh .data/worker-a.env` 代替上面的 `pnpm dev:worker`；不带该
 capability 时 Worker 会拒绝启动任何 Workspace。宿主机还需安装开机加载规则的 unit，见
 [Workspace Egress Runbook](docs/egress-runbook.md)。
 

@@ -60,3 +60,12 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           pnpm test:egress
       - run: pnpm build:web
+      - name: Disk quotas on a real kernel (XFS project quotas on a loop device)
+        # Runs last: it needs root, which may leave root-owned caches behind.
+        run: |
+          sudo apt-get install -y --no-install-recommends xfsprogs
+          truncate -s 512M "$RUNNER_TEMP/quota.xfs"
+          mkfs.xfs -q "$RUNNER_TEMP/quota.xfs"
+          sudo mkdir -p /mnt/agent-runtime-quota
+          sudo mount -o loop,prjquota "$RUNNER_TEMP/quota.xfs" /mnt/agent-runtime-quota
+          sudo env "PATH=$PATH" TEST_XFS_ROOT=/mnt/agent-runtime-quota pnpm test:quota
