@@ -23,7 +23,7 @@
 > 不是给大模型挂几个工具，而是给智能体提供一台隔离的计算机。
 
 当前状态：v0.x（Phase 0–12 与 v0.13 Portal 调整）已实现并验收，tag `v0.13.0`；v1.0 的 Phase 13 已验收，
-tag `v1.0.0-alpha.1`。现在进入 v1.0 产品化，
+tag `v1.0.0-alpha.1`；Phase 14 已验收，tag `v1.0.0-alpha.2`。现在进入 v1.0 产品化，
 按 Phase 13–19 逐个开发、逐个验收，目标是可交给企业内部团队长期使用。范围与顺序见
 `docs/v1-roadmap.md`，各 Phase 详细规范见 `specs.md` 第 64 节。
 
@@ -170,7 +170,7 @@ Container stop/start、Worker restart 后，Workspace 文件和 Pi Session 必�
 平台不实现备份、快照或跨 Worker 恢复；备份由外部工具针对挂载点完成。平台只保证全部持久状态位于
 `WORKER_MANAGED_ROOT` 与 PostgreSQL，并保证数据恢复到原 Worker 原路径后 reconciliation 能接管。
 
-v1.0 出口策略（Phase 14 已实现，**人工验收通过前不要对外宣称**；运维见 `docs/egress-runbook.md`）：Workspace 默认允许公网、拒绝内网
+v1.0 出口策略（Phase 14 已实现并验收，tag `v1.0.0-alpha.2`；运维见 `docs/egress-runbook.md`）：Workspace 默认允许公网、拒绝内网
 （RFC1918 与 Worker 宿主机地址），内网按管理员白名单放行，管理员可按环境追加拒绝网段；平台管理地址
 永远不可放行。Tailscale / Clash 只存在于开发环境，默认规则不针对它们。详见 `specs.md` 第 44 节。
 

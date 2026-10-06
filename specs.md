@@ -3464,7 +3464,7 @@ Worker、Docker Runtime、pi-web、pi-agent 不认识 OIDC/OAuth2。
 
 ## Phase 14：Workspace 网络出口控制
 
-状态：**已实现，待人工验收**（2026-10-05 负责人确认 14.11 全部按建议执行），分支 `phase-14-egress`；运维说明见 `docs/egress-runbook.md`。方向见第 44 节与 `docs/v1-roadmap.md` 决策 D3。
+状态：**已验收（2026-10-06）**，经 PR #2 合入 master，tag `v1.0.0-alpha.2`（2026-10-05 负责人确认 14.11 全部按建议执行）；运维说明见 `docs/egress-runbook.md`。方向见第 44 节与 `docs/v1-roadmap.md` 决策 D3。
 
 目标：Workspace 默认可以访问公网，但不能访问内网与 Worker 宿主机；内网目标只能由管理员按网段/端口
 放行；平台管理地址永远不可放行；规则缺失或无法确认时 fail-closed。
