@@ -4299,7 +4299,7 @@ API 与 Portal：
 
 ## Phase 16：模型网关与凭据托管
 
-状态：**设计已确认，spike 通过（2026-10-08），实现中**。Q1–Q9 全部确认（Q4 改为“session 撤销不改变 key”，16.14）。方向见第 43.1 节与 `docs/v1-roadmap.md` Phase 16、决策 D4、D7。
+状态：**已实现，待人工验收（2026-10-08）**，分支 `phase-16-model-gateway`；运维见 `docs/model-gateway-runbook.md`。本 Phase 只接入 DeepSeek，Xiaomi MiMo 延后到 Phase 18（负责人 2026-10-08 决定，16.17）。实现中的调整见 16.16。Q1–Q9 全部确认（Q4 改为“session 撤销不改变 key”，16.14）。方向见第 43.1 节与 `docs/v1-roadmap.md` Phase 16、决策 D4、D7。
 
 目标：用户在 Workspace 中无需自己填写 API Key 即可使用平台提供的模型；真实上游 key 只存在于模型网关；每次调用
 按平台用户计量，可设预算；用户禁用、Workspace 删除时对应凭据失效，session 撤销后被撤销者无法再使用该凭据（16.6）；Workspace 无法访问网关的
@@ -4530,8 +4530,8 @@ chain relay_input {                                       # 新增：hook input�
 
 - 字段为 Pi 0.85.1 `models.json` 模型定义的子集：`id`（= LiteLLM `model_name`）、`name`、`api`（三种之一）、
   `reasoning`、`thinkingLevelMap`、`input`、`contextWindow`、`maxTokens`、`cost`、`compat`（JSON 对象，序列化后
-  ≤ 8 KiB）；模型 ≤ 100 个。示例模板 `deploy/model-gateway/catalog.example.json` 按 Pi 内置目录给出 DeepSeek 与
-  MiMo 的定义。
+  ≤ 8 KiB）；模型 ≤ 100 个。示例模板 `deploy/model-gateway/catalog.example.json` 按 Pi 内置目录给出 DeepSeek 的
+  定义（MiMo 见 16.17）。
 - Control Plane 启动时与之后每 10 分钟用 master key 读取网关的模型列表，目录中有而网关没有的模型记 `warn` 并在
   Admin 页面显示。
 - 目录中的全部模型都写进平台 provider 的 `models[]`（每个模型带自己的 `api` 与 `compat`），在 pi-web 模型选择器
@@ -4614,7 +4614,7 @@ chain relay_input {                                       # 新增：hook input�
 - **预算**：LiteLLM user 级 `max_budget`（USD）+ `budget_duration`。默认值来自 `MODEL_GATEWAY_USER_BUDGET_USD`
   （未设置 = 不限额）与 `MODEL_GATEWAY_BUDGET_DURATION`（默认 `30d`）；admin 可按用户覆盖（`users.model_budget_usd`）。
   超出预算时网关拒绝请求，Pi 显示网关的错误信息。预算依赖网关中的模型单价，`deploy/model-gateway/config.yaml`
-  模板为 DeepSeek 与 MiMo 写明单价。
+  模板为 DeepSeek 写明单价。
 - **限速**：每个 key 的 `rpm_limit` / `tpm_limit` 取 `MODEL_GATEWAY_KEY_RPM`（默认 60）/ `MODEL_GATEWAY_KEY_TPM`
   （默认不限）。
 - **用量查询**：Control Plane 不保存用量（Phase 17 再做指标）；Portal 需要时经网关管理 API 查询该用户的
@@ -4640,15 +4640,23 @@ model_keys
   revoke_requested_at  timestamptz null
   revoked_at           timestamptz null
   revoke_attempts      integer not null default 0
+  next_attempt_at      timestamptz null                     -- 吊销重试：30 s 起倍增，最长 10 分钟
   last_error_code      text null
   unique (workspace_id) where status in ('issuing', 'active')
+  check (workspace_id is not null or status in ('revoking', 'revoked'))   -- 可用的 key 必有 Workspace
+
+触发器（任何代码路径都覆盖）：
+  workspaces BEFORE DELETE         -> 该 Workspace 的 issuing/active key 置 revoking（workspace_deleted）
+  users AFTER UPDATE OF status     -> 变为 disabled 时该用户全部 issuing/active key 置 revoking（user_disabled）
+  两者都写 Audit model.key_revoke_requested
 
 users
   + model_budget_usd   numeric(12, 2) null                  -- null = 使用全局默认
 
 workers
-  + model_relay_enabled  boolean not null default false
-  + model_relay_port     integer null
+  + model_relay_enabled    boolean not null default false
+  + model_relay_port       integer null
+  + model_relay_listening  boolean not null default false
 ```
 
 配置（Control Plane；`MODEL_GATEWAY_ADMIN_URL` 未设置即整体关闭，部分设置则启动失败）：
@@ -4659,26 +4667,31 @@ Worker：`WORKER_MODEL_GATEWAY_URL`（未设置即不启用中继）、`WORKER_M
 
 API：
 
-- `GET /api/workspaces`、`GET /api/workspaces/:id`：增加 `modelAccess: { status: "available" | "unavailable" |
-  "disabled", reason: string | null }`（`reason` 为 `MODEL_KEY_PENDING`、`MODEL_RELAY_DISABLED`、
+- `GET /api/workspaces`、`GET /api/workspaces/:id`（及创建/启动/停止的返回）：增加 `modelAccess: { status:
+  "available" | "pending" | "unavailable" | "disabled", reason: string | null }`（`pending` = 未运行且尚无 key，
+  启动时签发）（`reason` 为 `MODEL_KEY_PENDING`、`MODEL_RELAY_DISABLED`、
   `USER_CONFIG_INVALID` 等稳定码），不返回 alias。
 - `GET /api/me/model-usage`：当前用户的用量与预算（16.7）。
-- `GET /api/admin/model-gateway`：`{ enabled, reachable, catalog: [{ id, name, presentInGateway }],
-  pendingRevocations, lastError, workers: [{ id, relayEnabled, relayPort }] }`。
-- `GET /api/admin/users/:id/model-usage`；`PATCH /api/admin/users/:id` 增加 `modelBudgetUsd`（`null` 恢复默认，
-  0～1 000 000）。
+- `GET /api/admin/model-gateway`：`{ enabled, reachable, providerId, catalog: [{ id, name, presentInGateway }],
+  pendingRevocations, oldestPendingAt, lastErrorCode, activeKeys }`；各 Worker 的中继状态在
+  `GET /api/admin/workers` 的 `modelRelay` 字段中。
+- `GET /api/admin/users/:id/model-usage`（`{ budgetUsd, available, usage }`）；
+  `PUT /api/admin/users/:id/model-budget`：`{ budgetUsd: number | null }`（`null` 恢复默认，0～1 000 000，最多两位小数），
+  先写数据库与 Audit，再同步到网关（`appliedToGateway` 表示是否已同步）。网关未配置时这些 admin 路由返回
+  404 `MODEL_GATEWAY_DISABLED`。
 - `POST /api/admin/users/:id/model-keys/rotate`、`POST /api/admin/workspaces/:id/model-key/rotate`。
 - 全部 admin 路由沿用 admin role、Origin、CSRF 校验；普通用户只能看到自己的 Workspace 与用量。
 
-Audit（新类别 `model`）：`model_key.issued`（workspaceId、keyAlias、reason）、`model_key.revoke_requested`
-（reason）、`model_key.revoked`、`model_key.rotated`（admin 发起时 actor 为该 admin）、`model_budget.changed`
-（旧值、新值）。details 永不包含 key 明文；`owner_user_id` 为 key 所属用户。
+Audit（新类别 `model`，按 `event_type` 前缀筛选）：`model.key_issued`（keyAlias、reason）、
+`model.key_revoke_requested`（keyAlias、reason；admin 轮换时 actor 为该 admin）、`model.key_revoked`、
+`model.budget_changed`（fromUsd、toUsd）。details 永不包含 key 明文；`owner_user_id` 为 key 所属用户。
 
 Portal：
 
-- Workspace 卡片/详情显示“平台模型：可用 / 暂不可用（原因）”；账户区域显示本周期用量与预算。
-- Admin Users：用量列、预算编辑、“轮换模型凭据”。Admin 新增“模型网关”状态区：网关可达性、目录与网关的差异、
-  待吊销数量、各 Worker 中继状态。
+- Workspace 卡片显示“平台模型：可用 / 启动后可用 / 暂不可用（原因）”；页面说明行显示本周期用量与预算。
+- Admin Users：用户“管理”展开后的“平台模型”区域：本周期用量、预算编辑、“轮换模型凭据…”。
+- Admin Workers：页首“模型网关”面板（可达性、目录与网关的差异、有效凭据数、待吊销数量与最近错误），Worker
+  详情中的“模型中继”。
 - 中文错误说明：`MODEL_KEY_UNAVAILABLE`、`MODEL_GATEWAY_UNAVAILABLE`、`USER_CONFIG_INVALID`
   （“models.json 格式错误，平台模型未注入，请修复或删除该文件后重启 Workspace”）。
 
@@ -4688,14 +4701,18 @@ Portal：
 
 - `worker.hello` / `worker.heartbeat` 增加 `modelRelay: { enabled: boolean, port: number | null, listening:
   boolean }`。
-- `worker.reconcile` 的每个 Workspace observation 增加 `modelKeyAlias: string | null`。
+- `worker.reconcile` 的报告增加顶层 `modelKeys: [{ workspaceId, keyAlias }]`（Worker 持有的全部 key；不改动
+  各命令共用的 observation 结构）。
 - `workspace.ensure` payload 增加 `modelGateway: { providerId, defaultModel, models: [...] } | null`（模型定义
   schema 与 16.5 共享）；结果增加 `modelConfig: "applied" | "removed" | "unchanged_running" |
   "user_config_invalid" | "write_failed"`。
 - 新命令 `workspace.model_key.set`：`{ workspaceId, keyAlias, secret }`（`secret` 为 16～512 个可打印 ASCII
   字符）。Worker 校验 managed label 与元数据后原子写入 `model-key.json` 并替换中继中的 key，返回 `{ keyAlias }`；
   Workspace 不存在返回 `WORKSPACE_NOT_FOUND`；写入失败返回 `MODEL_KEY_STORE_FAILED`（retryable）。
-- 新命令 `workspace.model_key.clear`：`{ workspaceId }`，幂等。
+- 新命令 `workspace.model_key.clear`：`{ workspaceId, keyAlias }`，幂等；**只清除该 alias**，Worker 当前持有的
+  是更新的 key 时保持不变（避免轮换后迟到的 clear 删掉新 key），返回仍持有的 alias。
+- Worker 未启用中继时 `workspace.model_key.set` 返回 `MODEL_RELAY_DISABLED`；Control Plane 也不会为这类 Worker
+  上的 Workspace 签发 key。
 - 协议层与两端日志对 `secret` 字段做 redaction（扩展 Phase 13 的脱敏测试）。
 
 ### 16.10 Worker 行为
@@ -4714,7 +4731,7 @@ Portal：
 - `deploy/model-gateway/compose.yml`：pinned `litellm-database` 镜像（tag + digest）；连接现有开发 PostgreSQL
   中的 `litellm` 库；端口只发布到 `127.0.0.1:4000`；`env_file` 引用负责人本机的 `0600` 文件（仓库只提供
   `litellm.env.example`，不含真实 key）。
-- `deploy/model-gateway/config.yaml`：DeepSeek 与 MiMo 模型、单价、16.3 的安全配置。
+- `deploy/model-gateway/config.yaml`：DeepSeek 模型（`litellm_proxy/` 路由，16.16）、单价、16.3 的安全配置。
 - `deploy/model-gateway/catalog.example.json`：与 `config.yaml` 一致的平台目录。
 - `tools/dev/init-litellm-db.sh`：在开发 PostgreSQL 中创建 `litellm` role 与库（幂等）。
 - `docs/model-gateway-runbook.md`：部署、上游 key 更换、版本升级（核对 changelog 与 digest）、待吊销排查、
@@ -4762,20 +4779,20 @@ LiteLLM + 测试库 + **mock 上游**（本地 HTTP 服务，记录收到的请�
 
 人工验收（详细步骤随交付说明给出），要点与预期结果：
 
-0. **准备**（负责人）：在本机 `0600` 文件中填入 DeepSeek 与 MiMo 的真实 key；`tools/dev/init-litellm-db.sh`；
+0. **准备**（负责人）：在本机 `0600` 文件中填入 DeepSeek 的真实 key；`tools/dev/init-litellm-db.sh`；
    `docker compose -f deploy/model-gateway/compose.yml up -d`；Control Plane 与 Worker 配置网关变量后重启。
    预期：Admin“模型网关”显示可达、目录与网关一致；Admin Workers 显示中继已启用；`nft list table inet agent_runtime`
    含中继规则。
-1. 新建 Workspace 并打开 pi-web：模型列表中出现平台 provider 的 DeepSeek 与 MiMo 模型，默认选中目录默认模型；
+1. 新建 Workspace 并打开 pi-web：模型列表中出现平台 provider 的 DeepSeek 模型，默认选中目录默认模型；
    **不在 `auth.json` 中填写任何 key** 即可对话，并完成一次带思考的多轮工具调用（例如让 Agent 读写文件），
-   DeepSeek 与 MiMo 各一次。
+   deepseek-v4-flash 与 deepseek-v4-pro 各一次。
 2. 在 Terminal 中：`env`、`cat /agent/pi/models.json /agent/pi/auth.json`、`ps -ef` 中找不到虚拟 key 与上游 key；
    `curl` 中继的非白名单路径（如 `/key/generate`、`/v1/models`、`/ui`）返回 404；带伪造 `Authorization` 访问
-   白名单路径仍按本 Workspace 计量；直接访问网关地址 `:4000`、宿主机其他端口不可达。
+   白名单路径仍按本 Workspace 计量；直接访问网关地址（开发为 `:4400`）、宿主机其他端口不可达。
 3. 存量 Workspace（已有自有 deepseek key）：停止再启动后，原有 `auth.json`、`settings.json` 与自有 provider 不变，
    同时多出平台 provider；两种方式都可用。
 4. 计量：Portal 显示本用户的用量，与网关管理端一致；admin 把该用户预算调到极低值后，下一次请求被拒绝并在 pi-web
-   中显示原因；恢复后可用；Audit 有 `model_budget.changed`。
+   中显示原因；恢复后可用；Audit 有 `model.budget_changed`。
 5. 吊销：(a) 禁用用户 → 该用户运行中 Workspace 的 Agent 下一次模型请求失败（`MODEL_KEY_UNAVAILABLE`），网关中
    对应 key 已删除；重新启用后再次可用。(b) admin 撤销该用户 session → 浏览器立即失去 Workspace 访问，正在运行的
    Agent 任务继续可用，key 不变；admin 执行“轮换模型凭据” → 网关中旧 key 删除、新 key 生效，Agent 任务继续可用。
@@ -4839,9 +4856,9 @@ key 只写入负责人本机的 `0600` 文件，不进入仓库、对话或日�
 - `deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`：按 Pi 0.85.1 的请求形态（`thinking: {type: "enabled"}`、
   `reasoning_effort`、tools、流式 + `include_usage`）完成两轮工具调用，第二轮回传 `reasoning_content` 成功；
   流式 usage 带 `cost`。
-- **MiMo 必须用 `deepseek/` provider + `api_base: https://api.xiaomimimo.com/v1`**：`openai/` 拒绝 `thinking`
-  （`UnsupportedParamsError`；加 `allowed_openai_params` 后 OpenAI SDK 报未知参数），内置 `xiaomi_mimo/` 拒绝
-  `tools`、`thinking`、`reasoning_effort`。`drop_params: false` 保证参数不被静默丢弃。MiMo 单价写在 `model_info`。
+- （被后续 mock 测试推翻，见 16.16）当时以为 MiMo 可以用 `deepseek/` provider + MiMo 的 `api_base`：`openai/`
+  拒绝 `thinking`（`UnsupportedParamsError`；加 `allowed_openai_params` 后 OpenAI SDK 报未知参数），内置
+  `xiaomi_mimo/` 拒绝 `tools`、`thinking`、`reasoning_effort`。`drop_params: false` 保证参数不被静默丢弃。
 - `key_type: "llm_api"` 的 key 调用 `/key/generate`、`/key/list`、`/key/delete`、`/user/list`、`/user/new`、
   `/user/info`、`/model/new`、`/spend/logs`、`/global/spend` 均为 403。仍可访问的只读路由：`/v1/models`、
   `/model/info`（只列该 key 可用的模型，`api_key` 为空，MiMo 显示公开的 `api_base`）、`/openapi.json`；
@@ -4853,6 +4870,47 @@ key 只写入负责人本机的 `0600` 文件，不进入仓库、对话或日�
 - spend 按 `user_id` 汇总（`/user/info` 的 `spend`）；`LiteLLM_SpendLogs` 39 行中没有任何 prompt 或响应内容；
   容器日志中没有 key、数据库 URL 或 prompt。删除后的 key 立即 401；删除不存在的 alias 返回 404
   （`No keys found`），平台把它视为“已删除”。
+
+### 16.16 实现中的调整（2026-10-08）
+
+相对 16.1–16.15 的设计，实现时做了以下调整（均已反映在上文对应小节或下列说明中）：
+
+- **网关路由改为 `litellm_proxy/`**：`pnpm test:model-gateway`（真实 LiteLLM + mock 上游）发现 `deepseek/` provider
+  在带 `thinking` 时**丢弃 `reasoning_effort`**（LiteLLM 把它只当作开关），Pi 的 low/high/max 强度因此无法到达上游。
+  对比 `deepseek/`、`openai/`（含 `allowed_openai_params`）、`hosted_vllm/`、`litellm_proxy/`：只有 `litellm_proxy/`
+  原样转发 `thinking`、`reasoning_effort`、`tools`、`max_tokens` 与回传的 `reasoning_content`。该路由没有内置单价，
+  `config.yaml` 在 `model_info` 中写明单价（沿用 LiteLLM 价目表的 DeepSeek 值）。真实上游复验：spike 31/31
+  （含 `--effort max`），`model-relay-smoke.ts` 中真实 Pi 0.85.1 经中继完成带工具调用的对话（deepseek-v4-flash、
+  deepseek-v4-pro）。
+- **目录 compat 必须显式写全**：Pi 按 provider id 或 `deepseek.com` 域名推断 DeepSeek 的 compat；平台 provider 的
+  baseUrl 是中继地址，推断不生效，目录写明 `supportsStore: false`、`supportsDeveloperRole: false`、
+  `maxTokensField: "max_tokens"`、`requiresReasoningContentOnAssistantMessages: true`、`thinkingFormat: "deepseek"`。
+- **同一目录不能混用 OpenAI 与 Anthropic 类 API**：Anthropic SDK 自己拼 `/v1/messages`，OpenAI SDK 只拼
+  `/chat/completions`，provider 级 baseUrl 无法同时满足（schema 拒绝）。中继的路径白名单是三种 API 类型推理路径的
+  并集，而不是按目录推导。
+- **Worker 记住写入的 provider id**（Workspace 元数据 `modelProviderId`）：网关整体关闭（ensure 中
+  `modelGateway: null`）或 provider id 改名时据此删除旧条目。
+- **吊销由数据库触发器兜底**（16.8），`beginWorkspaceDelete` 在同一事务中也立即发起吊销；签发事务按“用户行
+  `FOR SHARE` → Workspace 行 `FOR SHARE` → 插入（冲突即返回 `ALREADY_LIVE`）”加锁，禁用/删除与签发并发时不会留下
+  可用 key（真实 PostgreSQL 并发测试覆盖）。网关调用期间被吊销的 key 不会交给 Worker。
+- **网关不可用时不堆积 key**：后台处理在本轮发现网关不可达后跳过补签；处理过程中的失败不会再触发新一轮（修复了
+  一个会导致忙循环的设计缺陷，有回归测试）。超过 1 分钟仍为 `issuing` 的行按 `issue_failed` 吊销。
+- **预算接口**改为 `PUT /api/admin/users/:id/model-budget`（不扩展用户 PATCH，16.8）。
+- **LiteLLM 行为**：`/user/update` 对不存在的用户会静默创建一个无角色用户，平台先 `/user/new`（`internal_user_viewer`），
+  409 时再 update；删除不存在的 alias 返回 404，视为已删除；预算超出返回 422 `budget_exceeded`。
+- **CI**：`pnpm test:model-gateway` 加入 `runtime-toolchain.yml`（拉取 pinned 镜像）；PR 上运行其余单元、mock 与
+  PostgreSQL 集成测试；真实内核出口测试（`pnpm test:egress`）覆盖中继例外。
+- **变异检查（已执行，全部被测试发现）**：中继接受未知来源；只校验对端地址；转发客户端请求头；转发任意路径；
+  无 key 时仍转发；`models.json` 读取跟随符号链接；运行中改写 `models.json`；中继端点不校验 label；Worker 清除任意
+  alias；出口例外不限端口（单元与真实内核两层）；去掉 `relay_input`；去掉禁用触发器；签发不检查用户状态；激活不检查
+  吊销；网关删除失败仍标记 `revoked`；网关调用期间被吊销仍交付；禁用后不触发吊销；key 在 start 之后才签发。
+
+### 16.17 Xiaomi MiMo 延后到 Phase 18
+
+负责人 2026-10-08 决定：本 Phase 只交付 DeepSeek；MiMo 在 Phase 18 升级 Pi / pi-web 之后再接入与验收。已获得的
+事实供 Phase 18 使用：MiMo 同样必须走 `litellm_proxy/` + `api_base: https://api.xiaomimimo.com/v1`；
+`reasoning_effort` 只接受 `low` / `medium` / `high`（`minimal` / `xhigh` / `max` 返回 400），目录需用
+`thinkingLevelMap` 把这三档设为 `null`；在此配置下 mimo-v2.5 与 mimo-v2.5-pro 的真实 Pi 冒烟测试已通过（2026-10-08）。
 
 ## Phase 17：可观测性
 
