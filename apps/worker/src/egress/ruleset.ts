@@ -40,11 +40,14 @@ export interface EffectiveEgressRules {
   allowNet: Ipv4Interval[];
   allowService: ServiceEntry[];
   denyExtra: Ipv4Interval[];
+  /** The Worker model relay's TCP port, the only host port Workspaces reach (Phase 16.4). */
+  relayPort: number | null;
 }
 
 export function effectiveEgressRules(
   policy: EgressPolicy | null,
   localProtected: readonly string[],
+  relayPort: number | null = null,
 ): EffectiveEgressRules {
   const allowNet: Ipv4Interval[] = [];
   const allowService = new Map<string, ServiceEntry>();
@@ -71,6 +74,7 @@ export function effectiveEgressRules(
       serviceKey(left).localeCompare(serviceKey(right)),
     ),
     denyExtra: mergeIntervals((policy?.denyExtra ?? []).map(cidrTextInterval)),
+    relayPort,
   };
 }
 
@@ -125,58 +129,87 @@ const ipv6Dropped: Json[] = [
   { drop: null },
 ];
 
-/** Chains in the exact form `nft -j list` prints them, so verification can compare. */
-const CHAINS: readonly ChainSpec[] = [
-  {
-    // After conntrack, before Docker's DNAT: any address of the Worker host itself,
-    // including published ports that would be rewritten to another container.
-    name: "ws_prerouting",
-    hook: "prerouting",
-    prio: -150,
-    rules: [
-      workspaceTrafficOnly,
-      repliesPass,
-      ipv6Dropped,
-      [
-        match(
-          "==",
-          { fib: { result: "type", flags: ["daddr"] } },
-          { set: ["local", "broadcast", "multicast"] },
-        ),
-        { drop: null },
+const hostAddress: Json = { fib: { result: "type", flags: ["daddr"] } };
+const tcpDport: Json = { payload: { protocol: "tcp", field: "dport" } };
+
+/**
+ * Chains in the exact form `nft -j list` prints them, so verification can compare. With a
+ * model relay port, Workspaces may reach exactly that TCP port on the Worker host, and only
+ * Workspace bridges may reach it (specs.md Phase 16.4).
+ */
+function egressChains(relayPort: number | null): ChainSpec[] {
+  const relayException: Json[][] =
+    relayPort === null
+      ? []
+      : [[match("==", hostAddress, "local"), match("==", tcpDport, relayPort), { accept: null }]];
+  const chains: ChainSpec[] = [
+    {
+      // After conntrack, before Docker's DNAT: any address of the Worker host itself,
+      // including published ports that would be rewritten to another container.
+      name: "ws_prerouting",
+      hook: "prerouting",
+      prio: -150,
+      rules: [
+        workspaceTrafficOnly,
+        repliesPass,
+        ipv6Dropped,
+        ...relayException,
+        [
+          match(
+            "==",
+            { fib: { result: "type", flags: ["daddr"] } },
+            { set: ["local", "broadcast", "multicast"] },
+          ),
+          { drop: null },
+        ],
       ],
-    ],
-  },
-  {
-    // Protected platform addresses first, then the whitelist, then the deny ranges.
-    name: "ws_forward",
-    hook: "forward",
-    prio: -10,
-    rules: [
-      workspaceTrafficOnly,
-      repliesPass,
-      ipv6Dropped,
-      [match("==", daddr, "@protected_v4"), { drop: null }],
-      [
-        match(
-          "==",
-          {
-            concat: [
-              daddr,
-              { meta: { key: "l4proto" } },
-              { payload: { protocol: "th", field: "dport" } },
-            ],
-          },
-          `@${SERVICE_SET}`,
-        ),
-        { accept: null },
+    },
+    {
+      // Protected platform addresses first, then the whitelist, then the deny ranges.
+      name: "ws_forward",
+      hook: "forward",
+      prio: -10,
+      rules: [
+        workspaceTrafficOnly,
+        repliesPass,
+        ipv6Dropped,
+        [match("==", daddr, "@protected_v4"), { drop: null }],
+        [
+          match(
+            "==",
+            {
+              concat: [
+                daddr,
+                { meta: { key: "l4proto" } },
+                { payload: { protocol: "th", field: "dport" } },
+              ],
+            },
+            `@${SERVICE_SET}`,
+          ),
+          { accept: null },
+        ],
+        [match("==", daddr, "@allow_net_v4"), { accept: null }],
+        [match("==", daddr, "@deny_default_v4"), { drop: null }],
+        [match("==", daddr, "@deny_extra_v4"), { drop: null }],
       ],
-      [match("==", daddr, "@allow_net_v4"), { accept: null }],
-      [match("==", daddr, "@deny_default_v4"), { drop: null }],
-      [match("==", daddr, "@deny_extra_v4"), { drop: null }],
-    ],
-  },
-];
+    },
+  ];
+  if (relayPort !== null) {
+    chains.push({
+      name: "relay_input",
+      hook: "input",
+      prio: -10,
+      rules: [
+        [
+          match("==", tcpDport, relayPort),
+          match("!=", { meta: { key: "iifname" } }, WORKSPACE_BRIDGE_PATTERN),
+          { drop: null },
+        ],
+      ],
+    });
+  }
+  return chains;
+}
 
 function prefixElements(intervals: readonly Ipv4Interval[]): Json[] {
   return intervals.flatMap((interval) =>
@@ -244,7 +277,7 @@ export function renderEgressTransaction(rules: EffectiveEgressRules): { nftables
       },
     },
   });
-  for (const chain of CHAINS) {
+  for (const chain of egressChains(rules.relayPort)) {
     commands.push({
       add: {
         chain: {
@@ -387,8 +420,9 @@ export function verifyEgressListing(
   }
   if (tables.length !== 1) return { ok: false, reason: "egress table is missing" };
 
-  if (chains.size !== CHAINS.length) return { ok: false, reason: "unexpected chain count" };
-  for (const expected of CHAINS) {
+  const expectedChains = egressChains(rules.relayPort);
+  if (chains.size !== expectedChains.length) return { ok: false, reason: "unexpected chain count" };
+  for (const expected of expectedChains) {
     const chain = chains.get(expected.name);
     if (
       chain === undefined ||

@@ -143,4 +143,52 @@ describe("egress ruleset", () => {
     }
     expect(verify(printed)).toEqual({ ok: true });
   });
+  describe("model relay exception (Phase 16.4)", () => {
+    const relayRules = () => effectiveEgressRules(POLICY, ["100.112.169.46/32"], 3101);
+    const relayListing = () => listingFromTransaction(renderEgressTransaction(relayRules())) as Listing;
+
+    it("renders exactly the Phase 14 table when the relay is disabled", () => {
+      const names = listing().nftables.flatMap((entry) => (entry.chain ? [entry.chain.name] : []));
+      expect(names).toEqual(["ws_prerouting", "ws_forward"]);
+    });
+
+    it("accepts only the relay port on host addresses, before the host drop", () => {
+      const pre = rulesOf(relayListing(), "ws_prerouting").map((entry) => JSON.stringify(entry.rule?.expr));
+      const relay = pre.findIndex((expr) => expr.includes("3101"));
+      const hostDrop = pre.findIndex((expr) => expr.includes('"broadcast"'));
+      expect(relay).toBeGreaterThan(-1);
+      expect(relay).toBeLessThan(hostDrop);
+      expect(pre[relay]).toContain('"local"');
+      expect(pre[relay]).toContain('"accept"');
+      expect(pre[relay]).not.toContain('"broadcast"');
+    });
+
+    it("drops the relay port from every interface except Workspace bridges", () => {
+      const chain = relayListing().nftables.find((entry) => entry.chain?.name === "relay_input");
+      expect(chain?.chain).toMatchObject({ hook: "input", prio: -10, policy: "accept" });
+      const rules = rulesOf(relayListing(), "relay_input").map((entry) => JSON.stringify(entry.rule?.expr));
+      expect(rules).toHaveLength(1);
+      expect(rules[0]).toContain('"!="');
+      expect(rules[0]).toContain('"arw-*"');
+      expect(rules[0]).toContain("3101");
+      expect(rules[0]).toContain('"drop"');
+    });
+
+    it("verifies only against the configured relay port", () => {
+      expect(verifyEgressListing(relayListing(), relayRules())).toEqual({ ok: true });
+      expect(verifyEgressListing(listing(), relayRules())).toMatchObject({ ok: false });
+      expect(verifyEgressListing(relayListing(), effectiveEgressRules(POLICY, ["100.112.169.46/32"]))).toMatchObject({ ok: false });
+      expect(
+        verifyEgressListing(relayListing(), effectiveEgressRules(POLICY, ["100.112.169.46/32"], 3102)),
+      ).toMatchObject({ ok: false });
+      const withoutInput = relayListing();
+      withoutInput.nftables = withoutInput.nftables.filter(
+        (entry) => entry.rule?.chain !== "relay_input",
+      );
+      expect(verifyEgressListing(withoutInput, relayRules())).toEqual({
+        ok: false,
+        reason: "rules of relay_input do not match",
+      });
+    });
+  });
 });

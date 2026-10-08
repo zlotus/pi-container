@@ -8,6 +8,9 @@ import {
   type Architecture,
   type ControlToWorkerMessage,
   type EgressPolicy,
+  type ModelConfigResult,
+  type ModelGatewayConfig,
+  type ModelRelayStatus,
   type WorkerCapabilities,
   type WorkerEgressStatus,
   type WorkerReconcileAssignment,
@@ -22,6 +25,7 @@ import WebSocket from "ws";
 import type { WorkerConfig } from "./config.js";
 import type { RuntimeCapabilityProbe } from "./capabilities.js";
 import { EgressApplyError } from "./egress/controller.js";
+import { DISABLED_MODEL_ACCESS, ModelAccessError, type WorkerModelAccess } from "./model-relay/access.js";
 import {
   WorkspaceRuntimeError,
   type WorkspaceRuntimeObservation,
@@ -54,7 +58,12 @@ export interface WorkspaceRuntime {
   inspect(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
   reconcile(
     assignments: readonly WorkerReconcileAssignment[],
-  ): Promise<WorkerReconciliationReport>;
+  ): Promise<Omit<WorkerReconciliationReport, "modelKeys">>;
+  configureModelProvider(
+    workspaceId: string,
+    config: ModelGatewayConfig | null,
+    relayPort: number | null,
+  ): Promise<ModelConfigResult>;
   allocatedWorkspaces(): Promise<number>;
   stopRunningWorkspaces(): Promise<string[]>;
 }
@@ -93,6 +102,7 @@ export function buildWorkerHello(
   egress: WorkerEgressStatus,
   storage: WorkerStorageStatus,
   allocatedWorkspaces = 0,
+  modelRelay: ModelRelayStatus = DISABLED_MODEL_ACCESS.status(),
 ): WorkerHelloMessage {
   return {
     version: WORKER_PROTOCOL_VERSION,
@@ -113,6 +123,7 @@ export function buildWorkerHello(
       },
       egress,
       storage,
+      modelRelay,
     },
   };
 }
@@ -124,6 +135,7 @@ export function buildWorkerHeartbeat(
   storage: WorkerStorageStatus,
   allocatedWorkspaces = 0,
   workspaceDisk: WorkspaceDiskUsage[] | null = null,
+  modelRelay: ModelRelayStatus = DISABLED_MODEL_ACCESS.status(),
 ): WorkerHeartbeatMessage {
   return {
     version: WORKER_PROTOCOL_VERSION,
@@ -134,6 +146,7 @@ export function buildWorkerHeartbeat(
       allocatedWorkspaces,
       egress,
       storage,
+      modelRelay,
       ...(workspaceDisk === null ? {} : { workspaceDisk }),
       observedAt: observedAt.toISOString(),
     },
@@ -159,6 +172,7 @@ export class WorkerDaemon {
     readonly egress: WorkerEgress,
     readonly storage: WorkerStorage,
     readonly log: Pick<Logger, "info" | "warn"> = createJsonLogger("worker"),
+    readonly modelAccess: WorkerModelAccess = DISABLED_MODEL_ACCESS,
   ) {
     this.#reconnectDelayMs = config.WORKER_RECONNECT_INITIAL_MS;
   }
@@ -313,6 +327,7 @@ export class WorkerDaemon {
           this.egress.status(),
           this.storage.status(),
           allocatedWorkspaces,
+          this.modelAccess.status(),
         ),
       );
       this.#heartbeatTimer = setInterval(() => {
@@ -341,6 +356,7 @@ export class WorkerDaemon {
           this.storage.status(),
           allocatedWorkspaces,
           workspaceDisk,
+          this.modelAccess.status(),
         ),
       );
     } catch (error) {
@@ -355,14 +371,35 @@ export class WorkerDaemon {
   async #handleCommand(message: ControlToWorkerMessage): Promise<void> {
     try {
       if (message.type === "worker.reconcile") {
-        const reconciliation = await this.runtime.reconcile(
+        const report = await this.runtime.reconcile(
           message.payload.assignments,
         );
+        await this.modelAccess.refresh();
         this.#send({
           version: WORKER_PROTOCOL_VERSION,
           type: "response.ok",
           requestId: message.requestId,
-          payload: { requestType: message.type, reconciliation },
+          payload: {
+            requestType: message.type,
+            reconciliation: { ...report, modelKeys: this.modelAccess.holdings() },
+          },
+        });
+        return;
+      }
+      if (message.type === "workspace.model_key.set" || message.type === "workspace.model_key.clear") {
+        const { workspaceId } = message.payload;
+        let keyAlias: string | null = null;
+        if (message.type === "workspace.model_key.set") {
+          await this.modelAccess.setKey(workspaceId, message.payload.keyAlias, message.payload.secret);
+          keyAlias = message.payload.keyAlias;
+        } else {
+          await this.modelAccess.clearKey(workspaceId);
+        }
+        this.#send({
+          version: WORKER_PROTOCOL_VERSION,
+          type: "response.ok",
+          requestId: message.requestId,
+          payload: { requestType: message.type, modelKey: { workspaceId, keyAlias } },
         });
         return;
       }
@@ -393,6 +430,7 @@ export class WorkerDaemon {
         return;
       }
       let workspace: WorkspaceRuntimeObservation;
+      let modelConfig: ModelConfigResult | undefined;
       switch (message.type) {
         case "workspace.ensure":
           workspace = await this.runtime.ensure(
@@ -401,15 +439,23 @@ export class WorkerDaemon {
             message.payload.resources,
             message.payload.storage,
           );
+          modelConfig = await this.#configureModelProvider(
+            message.payload.workspaceId,
+            message.payload.modelGateway,
+          );
           break;
         case "workspace.start":
           workspace = await this.runtime.start(message.payload.workspaceId);
+          await this.modelAccess.refresh();
           break;
         case "workspace.stop":
           workspace = await this.runtime.stop(message.payload.workspaceId);
+          await this.modelAccess.refresh();
           break;
         case "workspace.delete":
           workspace = await this.runtime.delete(message.payload.workspaceId);
+          this.modelAccess.forget(message.payload.workspaceId);
+          await this.modelAccess.refresh();
           break;
         case "workspace.inspect":
           workspace = await this.runtime.inspect(message.payload.workspaceId);
@@ -419,11 +465,15 @@ export class WorkerDaemon {
         version: WORKER_PROTOCOL_VERSION,
         type: "response.ok",
         requestId: message.requestId,
-        payload: { requestType: message.type, workspace },
+        payload: {
+          requestType: message.type,
+          workspace,
+          ...(modelConfig === undefined ? {} : { modelConfig }),
+        },
       });
     } catch (error) {
       const runtimeError =
-        error instanceof WorkspaceRuntimeError
+        error instanceof WorkspaceRuntimeError || error instanceof ModelAccessError
           ? error
           : error instanceof EgressApplyError
             ? { code: "EGRESS_APPLY_FAILED", message: "Egress rules could not be applied", retryable: true }
@@ -443,6 +493,19 @@ export class WorkerDaemon {
           retryable: runtimeError.retryable,
         },
       });
+    }
+  }
+
+  /** Model access is not an isolation boundary: a failure here never fails the ensure. */
+  async #configureModelProvider(
+    workspaceId: string,
+    config: ModelGatewayConfig | null,
+  ): Promise<ModelConfigResult> {
+    try {
+      return await this.runtime.configureModelProvider(workspaceId, config, this.modelAccess.relayPort());
+    } catch (error) {
+      this.log.warn({ workspaceId, err: error }, "could not write the platform model provider");
+      return "write_failed";
     }
   }
 

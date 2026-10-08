@@ -16,6 +16,9 @@ import {
 import { dirname, join, resolve } from "node:path";
 
 import {
+  type ModelConfigResult,
+  type ModelGatewayConfig,
+  ModelProviderIdSchema,
   WorkspaceIdSchema,
   type WorkerReconcileAssignment,
   type WorkerReconciliationReport,
@@ -31,6 +34,8 @@ import { z } from "zod";
 
 import type { WorkerConfig } from "./config.js";
 import { workspaceBridgeName } from "./egress/ruleset.js";
+import { writePlatformProvider } from "./model-relay/pi-config.js";
+import type { RelayEndpoint } from "./model-relay/relay.js";
 import {
   type ProjectUsage,
   StorageQuotaError,
@@ -133,6 +138,8 @@ const MetadataSchema = z
       .strict()
       .optional(),
     homeInitialized: z.boolean().optional(),
+    /** The Pi provider ID last written into models.json (Phase 16.5). */
+    modelProviderId: ModelProviderIdSchema.optional(),
   })
   .strict();
 
@@ -607,7 +614,7 @@ export class DockerWorkspaceRuntime {
 
   async reconcile(
     assignments: readonly WorkerReconcileAssignment[],
-  ): Promise<WorkerReconciliationReport> {
+  ): Promise<Omit<WorkerReconciliationReport, "modelKeys">> {
     await this.#initialize();
     let containers: Docker.ContainerInfo[];
     let networks: Docker.NetworkInspectInfo[];
@@ -777,6 +784,100 @@ export class DockerWorkspaceRuntime {
     }
 
     return { workspaces, issues, observedAt: new Date().toISOString() };
+  }
+
+  /**
+   * Writes (or removes) the platform provider in the Workspace's Pi models.json. Only while
+   * the container is not running, so it never races pi-web's own writes (Phase 16.5).
+   */
+  async configureModelProvider(
+    workspaceId: string,
+    config: ModelGatewayConfig | null,
+    relayPort: number | null,
+  ): Promise<ModelConfigResult> {
+    const paths = await this.#requireWorkspacePaths(workspaceId);
+    const container = await this.#findNamedContainer(workspaceId);
+    if (container !== null) {
+      const inspection = await container.inspect();
+      this.#verifyManagedContainerIdentity(inspection, workspaceId, paths, this.#networkName(workspaceId));
+      if (inspection.State.Running) return "unchanged_running";
+    }
+    let relayOrigin: string | null = null;
+    if (config !== null && relayPort !== null) {
+      const gateway = await this.#networkGatewayAddress(workspaceId);
+      relayOrigin = gateway === null ? null : `http://${gateway}:${relayPort}`;
+      if (relayOrigin === null) return "write_failed";
+    }
+    const written = await writePlatformProvider({
+      piDirectory: paths.pi,
+      config,
+      relayOrigin,
+      previousProviderId: paths.managed.modelProviderId ?? null,
+      uid: this.#runtimeUid,
+      gid: this.#runtimeGid,
+    });
+    if ((written.providerId ?? undefined) !== paths.managed.modelProviderId) {
+      const metadata: WorkspaceMetadata = { ...paths.managed };
+      if (written.providerId === null) delete metadata.modelProviderId;
+      else metadata.modelProviderId = written.providerId;
+      await this.#writeMetadata(paths, metadata);
+    }
+    return written.result;
+  }
+
+  /** The Workspace's private metadata directory, after the managed-path checks. */
+  async modelKeyDirectory(workspaceId: string): Promise<string> {
+    return (await this.#requireWorkspacePaths(workspaceId)).metadata;
+  }
+
+  /**
+   * Running managed Workspaces with their bridge gateway and container addresses, as the
+   * model relay identifies connections (Phase 16.4). Only containers carrying this Worker's
+   * labels and attached to their own managed network count.
+   */
+  async relayEndpoints(): Promise<RelayEndpoint[]> {
+    let containers: Docker.ContainerInfo[];
+    try {
+      containers = await this.#docker.listContainers({
+        filters: {
+          status: ["running"],
+          label: [`app=${APP_LABEL}`, `managed_by=${MANAGED_BY_LABEL}`, `worker_id=${this.#workerId}`],
+        },
+      });
+    } catch (error) {
+      throw this.#engineError(error, "list running Workspace containers");
+    }
+    const endpoints: RelayEndpoint[] = [];
+    for (const container of containers) {
+      const workspaceId = container.Labels?.workspace_id;
+      if (workspaceId === undefined || !WorkspaceIdSchema.safeParse(workspaceId).success) continue;
+      if (!labelsMatch(container.Labels, managedLabels(this.#workerId, workspaceId))) continue;
+      if (!container.Names.includes(`/${this.#containerName(workspaceId)}`)) continue;
+      const networks = Object.entries(container.NetworkSettings?.Networks ?? {});
+      if (networks.length !== 1) continue;
+      const [networkName, network] = networks[0] ?? [];
+      if (network === undefined || networkName !== this.#networkName(workspaceId)) continue;
+      if (!network.IPAddress || !network.Gateway) continue;
+      endpoints.push({
+        workspaceId,
+        gatewayAddress: network.Gateway,
+        containerAddress: network.IPAddress,
+      });
+    }
+    return endpoints;
+  }
+
+  async #networkGatewayAddress(workspaceId: string): Promise<string | null> {
+    const network = await this.#findNamedNetwork(workspaceId);
+    if (network === null) return null;
+    const inspection = await network.inspect();
+    if (this.#verifyManagedNetwork(inspection, workspaceId, this.#networkName(workspaceId)) !== "current") {
+      return null;
+    }
+    const gateway = (inspection.IPAM?.Config ?? [])
+      .map((entry) => entry.Gateway)
+      .find((value) => value !== undefined && /^\d+\.\d+\.\d+\.\d+$/.test(value));
+    return gateway ?? null;
   }
 
   async gatewayTarget(workspaceId: string): Promise<URL> {

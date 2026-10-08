@@ -41,9 +41,12 @@ describe("credential redaction", () => {
       code: "secret-oauth-code",
       body: { password: "secret-body" },
       details: { cookie: "secret-nested-cookie", authorization: "secret-nested-auth" },
+      secret: "secret-virtual-key",
+      payload: { secret: "secret-payload-key" },
+      masterKey: "secret-master-key",
     }, "raw object");
     const output = lines.join("");
-    for (const secret of ["secret-cookie", "secret-bearer", "secret-password", "secret-token", "secret-raw", "secret-oauth-code", "secret-body", "secret-nested-cookie", "secret-nested-auth"]) {
+    for (const secret of ["secret-cookie", "secret-bearer", "secret-password", "secret-token", "secret-raw", "secret-oauth-code", "secret-body", "secret-nested-cookie", "secret-nested-auth", "secret-virtual-key", "secret-payload-key", "secret-master-key"]) {
       expect(output).not.toContain(secret);
     }
     expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({ service: "test", msg: "raw object" });

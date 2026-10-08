@@ -63,7 +63,7 @@ describe("egress protocol messages", () => {
   it("accepts a typed policy and rejects malformed entries", () => {
     const message = (payload: unknown) =>
       ControlToWorkerMessageSchema.safeParse({
-        version: 3,
+        version: 4,
         type: "worker.egress.apply",
         requestId,
         payload,
@@ -98,13 +98,14 @@ describe("egress protocol messages", () => {
   it("requires the egress state in heartbeats", () => {
     const heartbeat = (payload: Record<string, unknown>) =>
       WorkerToControlMessageSchema.safeParse({
-        version: 3,
+        version: 4,
         type: "worker.heartbeat",
         requestId,
         payload: {
           workerId: "worker-01",
           allocatedWorkspaces: 0,
           storage: { enforced: true, fsType: "xfs", totalBytes: 10, freeBytes: 5 },
+        modelRelay: { enabled: false, port: null, listening: false },
           observedAt: "2026-10-05T08:00:00.000Z",
           ...payload,
         },

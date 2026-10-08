@@ -12,6 +12,7 @@ import {
   type WorkspaceRuntime,
 } from "./daemon.js";
 import { EgressApplyError } from "./egress/controller.js";
+import type { WorkerModelAccess } from "./model-relay/access.js";
 
 const config = loadWorkerConfig({
   CONTROL_PLANE_URL: "wss://control.internal/api/workers/connect",
@@ -34,6 +35,7 @@ function fakeRuntime(): WorkspaceRuntime {
     stopRunningWorkspaces: vi.fn().mockResolvedValue([]),
     setDiskLimit: vi.fn<WorkspaceRuntime["setDiskLimit"]>(),
     diskUsage: vi.fn<WorkspaceRuntime["diskUsage"]>().mockResolvedValue([]),
+    configureModelProvider: vi.fn<WorkspaceRuntime["configureModelProvider"]>().mockResolvedValue("removed"),
   };
 }
 
@@ -130,7 +132,7 @@ describe("worker daemon messages", () => {
     }, capabilities, { enforced: true, revision: 4 }, STORAGE_STATUS);
 
     expect(message).toMatchObject({
-      version: 3,
+      version: 4,
       type: "worker.hello",
       payload: {
         workerId: "worker-01",
@@ -267,7 +269,7 @@ describe("worker daemon egress", () => {
       ]) {
         workerSocket?.send(
           JSON.stringify({
-            version: 3,
+            version: 4,
             type: "worker.egress.apply",
             requestId,
             payload: policy,
@@ -277,7 +279,7 @@ describe("worker daemon egress", () => {
       await vi.waitFor(() => expect(received).toHaveLength(3));
       expect(egress.apply).toHaveBeenCalledWith(policy);
       expect(received[1]).toEqual({
-        version: 3,
+        version: 4,
         type: "response.ok",
         requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d01",
         payload: {
@@ -286,7 +288,7 @@ describe("worker daemon egress", () => {
         },
       });
       expect(received[2]).toEqual({
-        version: 3,
+        version: 4,
         type: "response.error",
         requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d02",
         payload: {
@@ -362,7 +364,7 @@ describe("worker daemon disk quotas", () => {
 
       workerSocket?.send(
         JSON.stringify({
-          version: 3,
+          version: 4,
           type: "workspace.storage.set",
           requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d03",
           payload: { workspaceId: sample.workspaceId, diskLimitBytes: 5 * 1024 ** 3 },
@@ -377,6 +379,180 @@ describe("worker daemon disk quotas", () => {
     } finally {
       daemon.stop();
       vi.useRealTimers();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+describe("worker daemon model access (Phase 16.9)", () => {
+  const workspaceId = "8d6f5c43-0d3a-4f53-9d84-3f8c0f3e7a10";
+  const keyAlias = `arw-${workspaceId}-2`;
+  const SECRET = "sk-virtual-key-from-gateway";
+  const catalog = {
+    providerId: "platform",
+    defaultModel: "deepseek-v4-flash",
+    models: [{ id: "deepseek-v4-flash", api: "openai-completions" as const }],
+  };
+
+  function fakeModelAccess(): WorkerModelAccess {
+    const held = new Map<string, string>();
+    return {
+      status: () => ({ enabled: true, port: 3101, listening: true }),
+      relayPort: () => 3101,
+      holdings: () => [...held].map(([id, alias]) => ({ workspaceId: id, keyAlias: alias })),
+      setKey: vi.fn(async (id: string, alias: string) => {
+        held.set(id, alias);
+      }),
+      clearKey: vi.fn(async (id: string) => {
+        held.delete(id);
+      }),
+      forget: vi.fn((id: string) => {
+        held.delete(id);
+      }),
+      refresh: vi.fn(async () => undefined),
+    };
+  }
+
+  it("reports the relay, stores and clears keys, and writes the provider on ensure", async () => {
+    const { server, url } = await listen();
+    const runtime = fakeRuntime();
+    const observation = {
+      workspaceId,
+      state: "STOPPED" as const,
+      runtimeImage: config.RUNTIME_IMAGE,
+      observedAt: "2026-10-08T08:00:00.000Z",
+    };
+    vi.mocked(runtime.ensure).mockResolvedValue(observation);
+    vi.mocked(runtime.configureModelProvider).mockResolvedValue("applied");
+    vi.mocked(runtime.reconcile).mockResolvedValue({ workspaces: [], issues: [], observedAt: observation.observedAt });
+    vi.mocked(runtime.delete).mockResolvedValue({ ...observation, state: "CREATED" });
+    const modelAccess = fakeModelAccess();
+    const warn = vi.fn();
+    const received: Array<{ type: string; requestId?: string; payload: Record<string, unknown> }> = [];
+    const raw: string[] = [];
+    let workerSocket: WebSocket | undefined;
+    server.on("connection", (socket) => {
+      workerSocket = socket;
+      socket.on("message", (data) => {
+        raw.push(data.toString());
+        received.push(JSON.parse(data.toString()));
+      });
+    });
+    const daemon = new WorkerDaemon(
+      { ...config, CONTROL_PLANE_URL: url },
+      runtime,
+      { probe: vi.fn().mockResolvedValue(capabilities) },
+      fakeEgress(true),
+      fakeStorage(true),
+      { info: vi.fn(), warn },
+      modelAccess,
+    );
+    const command = (type: string, requestId: string, payload: Record<string, unknown>) =>
+      workerSocket?.send(JSON.stringify({ version: 4, type, requestId, payload }));
+    const response = (requestId: string) => received.find((entry) => entry.requestId === requestId);
+    try {
+      daemon.start();
+      await vi.waitFor(() => expect(received).toHaveLength(1));
+      expect(received[0]?.payload.modelRelay).toEqual({ enabled: true, port: 3101, listening: true });
+
+      command("workspace.ensure", "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d11", {
+        workspaceId,
+        runtimeImage: config.RUNTIME_IMAGE,
+        resources: { cpuCount: 2, memoryBytes: 4 * 1024 ** 3, pidsLimit: 512 },
+        storage: { diskLimitBytes: 20 * 1024 ** 3 },
+        modelGateway: catalog,
+      });
+      await vi.waitFor(() => expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d11")).toBeDefined());
+      expect(runtime.configureModelProvider).toHaveBeenCalledWith(workspaceId, catalog, 3101);
+      expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d11")?.payload).toEqual({
+        requestType: "workspace.ensure",
+        workspace: observation,
+        modelConfig: "applied",
+      });
+
+      command("workspace.model_key.set", "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d12", { workspaceId, keyAlias, secret: SECRET });
+      await vi.waitFor(() => expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d12")).toBeDefined());
+      expect(modelAccess.setKey).toHaveBeenCalledWith(workspaceId, keyAlias, SECRET);
+      expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d12")?.payload).toEqual({
+        requestType: "workspace.model_key.set",
+        modelKey: { workspaceId, keyAlias },
+      });
+
+      command("worker.reconcile", "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d13", { assignments: [] });
+      await vi.waitFor(() => expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d13")).toBeDefined());
+      expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d13")?.payload).toMatchObject({
+        reconciliation: { modelKeys: [{ workspaceId, keyAlias }] },
+      });
+
+      command("workspace.model_key.clear", "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d14", { workspaceId });
+      await vi.waitFor(() => expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d14")).toBeDefined());
+      expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d14")?.payload).toEqual({
+        requestType: "workspace.model_key.clear",
+        modelKey: { workspaceId, keyAlias: null },
+      });
+
+      command("workspace.delete", "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d15", { workspaceId });
+      await vi.waitFor(() => expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d15")).toBeDefined());
+      expect(modelAccess.forget).toHaveBeenCalledWith(workspaceId);
+
+      // A failing provider write never fails the ensure (model access is not isolation).
+      vi.mocked(runtime.configureModelProvider).mockRejectedValueOnce(new Error("disk full"));
+      command("workspace.ensure", "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d16", {
+        workspaceId,
+        runtimeImage: config.RUNTIME_IMAGE,
+        resources: { cpuCount: 2, memoryBytes: 4 * 1024 ** 3, pidsLimit: 512 },
+        storage: { diskLimitBytes: 20 * 1024 ** 3 },
+        modelGateway: null,
+      });
+      await vi.waitFor(() => expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d16")).toBeDefined());
+      expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d16")).toMatchObject({
+        type: "response.ok",
+        payload: { modelConfig: "write_failed" },
+      });
+
+      // The secret is never echoed back to the Control Plane.
+      expect(raw.join("\n")).not.toContain(SECRET);
+    } finally {
+      daemon.stop();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("answers a key for a Worker without the relay with a typed error", async () => {
+    const { server, url } = await listen();
+    const received: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    let workerSocket: WebSocket | undefined;
+    server.on("connection", (socket) => {
+      workerSocket = socket;
+      socket.on("message", (data) => received.push(JSON.parse(data.toString())));
+    });
+    const daemon = new WorkerDaemon(
+      { ...config, CONTROL_PLANE_URL: url },
+      fakeRuntime(),
+      { probe: vi.fn().mockResolvedValue(capabilities) },
+      fakeEgress(true),
+      fakeStorage(true),
+      { info: vi.fn(), warn: vi.fn() },
+    );
+    try {
+      daemon.start();
+      await vi.waitFor(() => expect(received).toHaveLength(1));
+      expect(received[0]?.payload.modelRelay).toEqual({ enabled: false, port: null, listening: false });
+      workerSocket?.send(
+        JSON.stringify({
+          version: 4,
+          type: "workspace.model_key.set",
+          requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d21",
+          payload: { workspaceId, keyAlias, secret: SECRET },
+        }),
+      );
+      await vi.waitFor(() => expect(received).toHaveLength(2));
+      expect(received[1]).toMatchObject({
+        type: "response.error",
+        payload: { requestType: "workspace.model_key.set", code: "MODEL_RELAY_DISABLED", retryable: false },
+      });
+    } finally {
+      daemon.stop();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });

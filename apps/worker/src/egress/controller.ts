@@ -27,6 +27,8 @@ export interface EgressControllerOptions {
   stateDirectory: string;
   /** Worker-local protected addresses (CONTROL_PLANE_URL host, WORKER_EGRESS_PROTECTED). */
   resolveLocalProtected: () => Promise<string[]>;
+  /** The model relay port Workspaces may reach on this host, if the relay is enabled. */
+  relayPort?: number | null;
   log: Pick<Logger, "info" | "warn">;
 }
 
@@ -80,7 +82,7 @@ export class EgressController {
         return this.status();
       }
       await this.#refreshLocalProtected();
-      const rules = effectiveEgressRules(policy, this.#localProtected);
+      const rules = effectiveEgressRules(policy, this.#localProtected, this.#options.relayPort ?? null);
       try {
         await this.#options.nft.apply(renderEgressTransaction(rules));
       } catch (error) {
@@ -101,7 +103,7 @@ export class EgressController {
   }
 
   async #ensure(): Promise<void> {
-    const rules = effectiveEgressRules(this.#policy, this.#localProtected);
+    const rules = effectiveEgressRules(this.#policy, this.#localProtected, this.#options.relayPort ?? null);
     let reason = await this.#verify(rules);
     if (reason !== null) {
       try {
@@ -198,19 +200,25 @@ async function writeAtomically(path: string, content: string): Promise<void> {
 }
 
 /**
- * Worker-local protected addresses: the Control Plane host this Worker connects to (an
- * address literal or every IPv4 address its name resolves to) plus explicit entries.
+ * Worker-local protected addresses: the Control Plane host this Worker connects to and the
+ * model gateway it relays to (an address literal or every IPv4 address a name resolves to),
+ * plus explicit entries.
  */
 export function localProtectedResolver(
   controlPlaneUrl: string,
   explicit: readonly string[],
   resolveHost: (hostname: string) => Promise<string[]> = async (hostname) =>
     (await lookup(hostname, { all: true, family: 4 })).map((entry) => entry.address),
+  additionalUrls: readonly string[] = [],
 ): () => Promise<string[]> {
   return async () => {
-    const hostname = new URL(controlPlaneUrl).hostname.replace(/^\[|\]$/g, "");
-    const addresses =
-      isIP(hostname) === 0 ? await resolveHost(hostname) : isIP(hostname) === 4 ? [hostname] : [];
+    const addresses: string[] = [];
+    for (const url of [controlPlaneUrl, ...additionalUrls]) {
+      const hostname = new URL(url).hostname.replace(/^\[|\]$/g, "");
+      addresses.push(
+        ...(isIP(hostname) === 0 ? await resolveHost(hostname) : isIP(hostname) === 4 ? [hostname] : []),
+      );
+    }
     const cidrs = addresses
       .map((address) => canonicalIpv4Cidr(address))
       .filter((cidr): cidr is string => cidr !== null);
