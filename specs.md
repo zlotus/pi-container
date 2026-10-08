@@ -4299,7 +4299,7 @@ API 与 Portal：
 
 ## Phase 16：模型网关与凭据托管
 
-状态：**设计已确认（2026-10-08），待 spike（16.15）**。Q1–Q9 全部确认（Q4 改为“session 撤销不改变 key”，16.14）。方向见第 43.1 节与 `docs/v1-roadmap.md` Phase 16、决策 D4、D7。
+状态：**设计已确认，spike 通过（2026-10-08），实现中**。Q1–Q9 全部确认（Q4 改为“session 撤销不改变 key”，16.14）。方向见第 43.1 节与 `docs/v1-roadmap.md` Phase 16、决策 D4、D7。
 
 目标：用户在 Workspace 中无需自己填写 API Key 即可使用平台提供的模型；真实上游 key 只存在于模型网关；每次调用
 按平台用户计量，可设预算；用户禁用、Workspace 删除时对应凭据失效，session 撤销后被撤销者无法再使用该凭据（16.6）；Workspace 无法访问网关的
@@ -4570,7 +4570,8 @@ chain relay_input {                                       # 新增：hook input�
 ### 16.6 虚拟 key 生命周期
 
 **粒度**：每个 Workspace 一个 active 虚拟 key（LiteLLM `user_id` = 平台 User UUID，`key_alias` =
-`arw-<workspaceId>-<序号>`，`key_type: "llm_api"`，`models` = 目录中的模型，`metadata` 含 workspaceId）。
+`arw-<workspaceId>-<序号>`，`key_type: "llm_api"`，`models` = 目录中的模型，`metadata` 为
+`{ platform_workspace_id }`——字段名不能是 `workspace_id`，见 16.15）。
 计量与预算按平台用户（LiteLLM user）汇总；按 Workspace 粒度吊销与限速。
 
 **存放**：明文只在签发响应中出现一次，经 Worker 控制通道（生产为 TLS）送到 Worker，Worker 写入该 Workspace 的
@@ -4598,7 +4599,7 @@ chain relay_input {                                       # 新增：hook input�
 
 **吊销的 fail-closed 规则**：
 
-- 吊销以**网关删除成功**为准：只有网关确认删除（或确认 alias 不存在）后行才变为 `revoked`；网关不可达时保持
+- 吊销以**网关删除成功**为准：只有网关确认删除（或返回 alias 不存在的 404）后行才变为 `revoked`；网关不可达时保持
   `revoking`，后台循环指数退避重试（30 s 起，上限 10 分钟），Admin 页面显示待吊销数量与最近错误，不把未完成的
   吊销显示为已完成。
 - 双层切断：Worker 在线时先由 `workspace.model_key.clear` 立即在中继侧停止使用（不等网关）；Worker 离线时，其
@@ -4829,6 +4830,29 @@ key 只写入负责人本机的 `0600` 文件，不进入仓库、对话或日�
    消息中回传 `reasoning_content`），确认成功；确认请求体中的 `api_base` / `api_key` 不生效；确认 spend log 中没有
    prompt 与响应内容；确认 `/user/info`（或 pinned 版本的等价接口）能返回该用户的 spend 与 token。
 5. 结论与版本、digest 写入本节；不通过则按 Q1 回到选型。
+
+**spike 结论（2026-10-08，`tools/dev/model-gateway-spike.py`，31/31 通过）**：LiteLLM 1.104.1 满足 16.3 的全部
+硬性要求，选型确定。
+
+- 开发网关监听 `127.0.0.1:4400`（Q8B 的 4000 端口已被宿主机上与本项目无关的进程占用）；`litellm` role 与库由
+  `tools/dev/init-litellm-db.sh` 创建，网关经 compose 网络 `agent-runtime-platform_default` 连接开发 PostgreSQL。
+- `deepseek-v4-flash`、`mimo-v2.5`、`mimo-v2.5-pro`：按 Pi 0.85.1 的请求形态（`thinking: {type: "enabled"}`、
+  `reasoning_effort`、tools、流式 + `include_usage`）完成两轮工具调用，第二轮回传 `reasoning_content` 成功；
+  流式 usage 带 `cost`。
+- **MiMo 必须用 `deepseek/` provider + `api_base: https://api.xiaomimimo.com/v1`**：`openai/` 拒绝 `thinking`
+  （`UnsupportedParamsError`；加 `allowed_openai_params` 后 OpenAI SDK 报未知参数），内置 `xiaomi_mimo/` 拒绝
+  `tools`、`thinking`、`reasoning_effort`。`drop_params: false` 保证参数不被静默丢弃。MiMo 单价写在 `model_info`。
+- `key_type: "llm_api"` 的 key 调用 `/key/generate`、`/key/list`、`/key/delete`、`/user/list`、`/user/new`、
+  `/user/info`、`/model/new`、`/spend/logs`、`/global/spend` 均为 403。仍可访问的只读路由：`/v1/models`、
+  `/model/info`（只列该 key 可用的模型，`api_key` 为空，MiMo 显示公开的 `api_base`）、`/openapi.json`；
+  `/ui` 在 `DISABLE_ADMIN_UI=True` 时仍返回静态前端外壳（登录受保护）；`/config/yaml` 对任何 key 都先报请求体
+  校验错误 422。中继的路径白名单不转发这些路由（16.4），Workspace 在网络层面也无法到达网关。
+- 请求体中的 `api_base` / `base_url` / `api_key` 被拒绝（401，`allow_client_side_credentials: false` 为默认）。
+  **key 的 `metadata` 不能用 `workspace_id` 作为字段名**：LiteLLM 把它当作客户端传入的 provider 参数拒绝签发；
+  平台使用 `platform_workspace_id`。
+- spend 按 `user_id` 汇总（`/user/info` 的 `spend`）；`LiteLLM_SpendLogs` 39 行中没有任何 prompt 或响应内容；
+  容器日志中没有 key、数据库 URL 或 prompt。删除后的 key 立即 401；删除不存在的 alias 返回 404
+  （`No keys found`），平台把它视为“已删除”。
 
 ## Phase 17：可观测性
 

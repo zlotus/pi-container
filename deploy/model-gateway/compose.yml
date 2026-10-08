@@ -1,0 +1,33 @@
+# DEV ONLY gateway deployment for specs.md Phase 16. Production templates belong to Phase 19.
+# Prerequisites: deploy/compose.dev.yml PostgreSQL is running and
+# tools/dev/init-litellm-db.sh has created the litellm role and database.
+#
+#   LITELLM_ENV_FILE=~/.config/agent-runtime/litellm.env \
+#     docker compose -f deploy/model-gateway/compose.yml up -d
+name: agent-runtime-model-gateway
+
+services:
+  litellm:
+    # Pinned and verified in specs.md Phase 16.15; update only together with the spec.
+    image: ghcr.io/berriai/litellm-database:1.104.1@sha256:e187eea4b0bbc94c57b93d7dffcd3ce403f17375398a54539a4369cbf8a0e160
+    restart: unless-stopped
+    command: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
+    env_file:
+      - ${LITELLM_ENV_FILE:?set LITELLM_ENV_FILE to the 0600 gateway env file}
+    environment:
+      DISABLE_ADMIN_UI: "True"
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+      LITELLM_LOG: "WARNING"
+    volumes:
+      - ./config.yaml:/etc/litellm/config.yaml:ro
+    # Only the Control Plane and Workers on this host reach the gateway; Workspaces never do
+    # (host addresses are dropped by the Phase 14 egress table).
+    ports:
+      - "127.0.0.1:${LITELLM_PORT:-4400}:4000"
+    networks:
+      - platform
+
+networks:
+  platform:
+    name: agent-runtime-platform_default
+    external: true

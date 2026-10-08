@@ -1,0 +1,49 @@
+# Model gateway (LiteLLM Proxy 1.104.1) for the Containerized Agent Runtime Platform.
+# specs.md Phase 16.3. Real upstream keys come only from the gateway container's environment
+# (env_file, mode 0600); this file contains none. Model names must match the platform catalog
+# (catalog.example.json) one to one.
+model_list:
+  - model_name: deepseek-v4-flash
+    litellm_params:
+      model: deepseek/deepseek-v4-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  - model_name: deepseek-v4-pro
+    litellm_params:
+      model: deepseek/deepseek-v4-pro
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # MiMo uses the DeepSeek thinking format (Pi: thinkingFormat "deepseek"). The `deepseek/`
+  # provider forwards `thinking`, `reasoning_effort`, tools and replayed `reasoning_content`;
+  # `openai/` rejects `thinking` and the built-in `xiaomi_mimo/` rejects tools (Phase 16.15).
+  - model_name: mimo-v2.5
+    litellm_params:
+      model: deepseek/mimo-v2.5
+      api_base: https://api.xiaomimimo.com/v1
+      api_key: os.environ/XIAOMI_API_KEY
+    model_info:
+      input_cost_per_token: 1.4e-07
+      output_cost_per_token: 2.8e-07
+      cache_read_input_token_cost: 2.8e-09
+  - model_name: mimo-v2.5-pro
+    litellm_params:
+      model: deepseek/mimo-v2.5-pro
+      api_base: https://api.xiaomimimo.com/v1
+      api_key: os.environ/XIAOMI_API_KEY
+    model_info:
+      input_cost_per_token: 4.35e-07
+      output_cost_per_token: 8.7e-07
+      cache_read_input_token_cost: 3.6e-09
+
+litellm_settings:
+  # Never rewrite or drop request parameters silently; Pi's thinking parameters must reach
+  # the upstream unchanged.
+  drop_params: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  # Models come only from this file.
+  store_model_in_db: false
+  # Spend logs keep usage only, never prompts or responses.
+  store_prompts_in_spend_logs: false
+  # Clients must not supply upstream credentials or base URLs.
+  allow_client_side_credentials: false
