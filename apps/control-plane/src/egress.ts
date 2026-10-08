@@ -22,22 +22,26 @@ export function protectedAddressResolver(
   databaseUrl: string,
   resolveHost: (hostname: string) => Promise<string[]> = async (hostname) =>
     (await lookup(hostname, { all: true, family: 4 })).map((entry) => entry.address),
+  /** Further platform services, e.g. the model gateway (specs.md Phase 16.4). */
+  additionalUrls: readonly string[] = [],
 ): () => Promise<string[]> {
   return async () => {
-    let hostname: string;
-    try {
-      hostname = new URL(databaseUrl).hostname.replace(/^\[|\]$/g, "");
-    } catch {
-      hostname = "";
-    }
-    let addresses: string[] = [];
-    if (isIP(hostname) === 4) {
-      addresses = [hostname];
-    } else if (hostname !== "" && isIP(hostname) === 0) {
+    const addresses: string[] = [];
+    for (const url of [databaseUrl, ...additionalUrls]) {
+      let hostname: string;
       try {
-        addresses = await resolveHost(hostname);
+        hostname = new URL(url).hostname.replace(/^\[|\]$/g, "");
       } catch {
-        addresses = [];
+        hostname = "";
+      }
+      if (isIP(hostname) === 4) {
+        addresses.push(hostname);
+      } else if (hostname !== "" && isIP(hostname) === 0) {
+        try {
+          addresses.push(...(await resolveHost(hostname)));
+        } catch {
+          // An unresolvable name protects nothing; the explicit list still applies.
+        }
       }
     }
     const cidrs = addresses

@@ -58,20 +58,27 @@ export function createWorkspaceLifecycleRepository(database: DatabaseClient) {
       userId: string;
       workerId: string;
     }): Promise<boolean> {
-      const rows = await database<{ id: string }[]>`
-        update workspaces
-        set
-          state = 'DELETING',
-          desired_state = 'DELETED',
-          updated_at = now(),
-          last_activity_at = now()
-        where id = ${input.workspaceId}
-          and user_id = ${input.userId}
-          and worker_id = ${input.workerId}
-          and state not in ('STARTING', 'STOPPING', 'DELETING')
-        returning id
-      `;
-      return rows.length === 1;
+      return database.begin(async (transaction) => {
+        const rows = await transaction<{ id: string }[]>`
+          update workspaces
+          set
+            state = 'DELETING',
+            desired_state = 'DELETED',
+            updated_at = now(),
+            last_activity_at = now()
+          where id = ${input.workspaceId}
+            and user_id = ${input.userId}
+            and worker_id = ${input.workerId}
+            and state not in ('STARTING', 'STOPPING', 'DELETING')
+          returning id
+        `;
+        if (rows.length !== 1) return false;
+        // The model key stops working now, not only once the Worker confirmed the delete.
+        await transaction`
+          select model_keys_request_revoke(${input.workspaceId}::uuid, null, 'workspace_deleted')
+        `;
+        return true;
+      });
     },
 
     async deleteConfirmedWorkspace(input: {

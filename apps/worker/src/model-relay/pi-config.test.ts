@@ -183,9 +183,12 @@ describe("model key store (Phase 16.6)", () => {
     await expect(third.load(workspaces)).resolves.toEqual({ loaded: 1, ignored: 1 });
     expect(third.get(other)).toBeUndefined();
 
-    await reloaded.clear(WORKSPACE, metadata);
+    // Clearing an older alias keeps the current key in memory and on disk.
+    await expect(reloaded.clear(WORKSPACE, metadata, `arw-${WORKSPACE}-0`)).resolves.toBe(alias);
+    expect(reloaded.get(WORKSPACE)).toBe("sk-virtual-key-1234");
+    await expect(reloaded.clear(WORKSPACE, metadata, alias)).resolves.toBeNull();
     expect(reloaded.get(WORKSPACE)).toBeUndefined();
     await expect(lstat(join(metadata, MODEL_KEY_FILE))).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(reloaded.clear(WORKSPACE, metadata)).resolves.toBeUndefined();
+    await expect(reloaded.clear(WORKSPACE, metadata, alias)).resolves.toBeNull();
   });
 });

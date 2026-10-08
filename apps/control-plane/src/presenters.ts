@@ -50,7 +50,17 @@ export function publicUserIdentity(identity: UserIdentityRecord) {
   };
 }
 
-export function publicWorkspace(workspace: WorkspaceRecord) {
+/** Disabled when no model gateway is configured (specs.md Phase 16.8). */
+export type PublicModelAccess =
+  | { status: "available" | "pending" | "unavailable"; reason: string | null }
+  | { status: "disabled"; reason: null };
+
+const MODEL_ACCESS_DISABLED: PublicModelAccess = { status: "disabled", reason: null };
+
+export function publicWorkspace(
+  workspace: WorkspaceRecord,
+  modelAccess: PublicModelAccess = MODEL_ACCESS_DISABLED,
+) {
   return {
     id: workspace.id,
     name: workspace.name,
@@ -67,6 +77,7 @@ export function publicWorkspace(workspace: WorkspaceRecord) {
       piLimitBytes: workspace.disk.piLimitBytes,
       sampledAt: workspace.disk.sampledAt?.toISOString() ?? null,
     },
+    modelAccess,
   };
 }
 
@@ -122,5 +133,6 @@ export function publicWorker(
       checkedAt: worker.storage.checkedAt?.toISOString() ?? null,
       allocatedLimitBytes: worker.allocatedDiskLimitBytes,
     },
+    modelRelay: worker.modelRelay,
   };
 }

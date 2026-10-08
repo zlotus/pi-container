@@ -76,11 +76,22 @@ export class ModelKeyStore {
     this.#keys.set(workspaceId, { keyAlias, secret });
   }
 
-  /** Stops serving immediately, then removes the file (absent directories are fine). */
-  async clear(workspaceId: string, metadataDirectory: string | null): Promise<void> {
+  /**
+   * Stops serving the named key immediately, then removes its file (absent directories are
+   * fine). A different (newer) key of the Workspace is kept. Returns the alias still held.
+   */
+  async clear(workspaceId: string, metadataDirectory: string | null, keyAlias: string): Promise<string | null> {
+    const held = this.#keys.get(workspaceId);
+    if (held !== undefined && held.keyAlias !== keyAlias) return held.keyAlias;
     this.#keys.delete(workspaceId);
-    if (metadataDirectory === null) return;
-    await rm(join(metadataDirectory, MODEL_KEY_FILE), { force: true });
+    if (metadataDirectory !== null) {
+      const onDisk = await readKeyFile(metadataDirectory);
+      if (onDisk === "absent") return null;
+      if (onDisk === "invalid" || onDisk.keyAlias === keyAlias) {
+        await rm(join(metadataDirectory, MODEL_KEY_FILE), { force: true });
+      }
+    }
+    return null;
   }
 
   /** Forgets a key whose Workspace directory is already gone (delete). */

@@ -345,6 +345,43 @@ export const ServerConfigSchema = z
     AUTH_LOCKOUT_IP_THRESHOLD: thresholdSchema(20),
     AUTH_LOCKOUT_ACCOUNT_THRESHOLD: thresholdSchema(50),
     AUTH_SSO_START_LIMIT: thresholdSchema(30),
+    /** LiteLLM admin origin; empty disables platform model access (specs.md Phase 16). */
+    MODEL_GATEWAY_ADMIN_URL: endpointSchema("MODEL_GATEWAY_ADMIN_URL"),
+    MODEL_GATEWAY_MASTER_KEY: z.string().default(""),
+    MODEL_GATEWAY_CATALOG_FILE: z.string().trim().default(""),
+    /** Default per-user budget in USD per budget period; empty means unlimited. */
+    MODEL_GATEWAY_USER_BUDGET_USD: z
+      .string()
+      .trim()
+      .default("")
+      .transform((value, context) => {
+        if (value === "") return null;
+        const amount = Number(value);
+        if (!Number.isFinite(amount) || amount < 0 || amount > 1_000_000) {
+          context.addIssue({ code: "custom", message: "MODEL_GATEWAY_USER_BUDGET_USD must be 0..1000000" });
+          return z.NEVER;
+        }
+        return amount;
+      }),
+    MODEL_GATEWAY_BUDGET_DURATION: z
+      .string()
+      .trim()
+      .regex(/^[1-9][0-9]{0,3}[smhd]$/)
+      .default("30d"),
+    MODEL_GATEWAY_KEY_RPM: z.coerce.number().int().min(1).max(100_000).default(60),
+    MODEL_GATEWAY_KEY_TPM: z
+      .string()
+      .trim()
+      .default("")
+      .transform((value, context) => {
+        if (value === "") return null;
+        const amount = Number(value);
+        if (!Number.isInteger(amount) || amount < 1 || amount > 1_000_000_000) {
+          context.addIssue({ code: "custom", message: "MODEL_GATEWAY_KEY_TPM must be a positive integer" });
+          return z.NEVER;
+        }
+        return amount;
+      }),
   })
   .passthrough()
   .superRefine((config, context) => {
@@ -401,6 +438,32 @@ export const ServerConfigSchema = z
         path: ["WORKSPACE_DISK_LIMIT_BYTES"],
         message: "WORKSPACE_DISK_LIMIT_BYTES cannot exceed WORKSPACE_DISK_LIMIT_MAX_BYTES",
       });
+    }
+    if (config.MODEL_GATEWAY_ADMIN_URL === "") {
+      for (const key of ["MODEL_GATEWAY_MASTER_KEY", "MODEL_GATEWAY_CATALOG_FILE"] as const) {
+        if (config[key] !== "") {
+          context.addIssue({
+            code: "custom",
+            path: [key],
+            message: `${key} requires MODEL_GATEWAY_ADMIN_URL`,
+          });
+        }
+      }
+    } else {
+      if (!/^sk-[\x21-\x7e]{13,509}$/.test(config.MODEL_GATEWAY_MASTER_KEY)) {
+        context.addIssue({
+          code: "custom",
+          path: ["MODEL_GATEWAY_MASTER_KEY"],
+          message: "MODEL_GATEWAY_MASTER_KEY must be the LiteLLM master key (sk-...)",
+        });
+      }
+      if (!config.MODEL_GATEWAY_CATALOG_FILE.startsWith("/")) {
+        context.addIssue({
+          code: "custom",
+          path: ["MODEL_GATEWAY_CATALOG_FILE"],
+          message: "MODEL_GATEWAY_CATALOG_FILE must be an absolute path",
+        });
+      }
     }
     if (
       config.AUTH_OIDC_ENABLED &&

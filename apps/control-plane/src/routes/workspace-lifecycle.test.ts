@@ -50,7 +50,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
             : "CREATED";
       worker.send(
         JSON.stringify({
-          version: 3,
+          version: 4,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -259,7 +259,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       worker1Commands.push(command.type);
       worker1.send(
         JSON.stringify({
-          version: 3,
+          version: 4,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -288,7 +288,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       worker2Commands.push(command.type);
       worker2.send(
         JSON.stringify({
-          version: 3,
+          version: 4,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -465,7 +465,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
 
     worker.send(
       JSON.stringify({
-        version: 3,
+        version: 4,
         type: "worker.heartbeat",
         requestId: crypto.randomUUID(),
         payload: {
@@ -473,6 +473,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
           allocatedWorkspaces: 1,
           egress: { enforced: false, revision: 0 },
           storage: { enforced: true, fsType: "xfs", totalBytes: 2 ** 40, freeBytes: 2 ** 39 },
+          modelRelay: { enabled: false, port: null, listening: false },
           observedAt: NOW.toISOString(),
         },
       }),
@@ -532,7 +533,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
 
     worker.send(
       JSON.stringify({
-        version: 3,
+        version: 4,
         type: "worker.heartbeat",
         requestId: crypto.randomUUID(),
         payload: {
@@ -540,6 +541,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
           allocatedWorkspaces: 1,
           egress: { enforced: true, revision: 0 },
           storage: { enforced: false, fsType: "ext4", totalBytes: null, freeBytes: null },
+          modelRelay: { enabled: false, port: null, listening: false },
           workspaceDisk: [usage(ownId), usage(foreignId)],
           observedAt: NOW.toISOString(),
         },

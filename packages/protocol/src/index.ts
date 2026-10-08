@@ -315,10 +315,19 @@ export const WorkspaceModelKeySetMessageSchema = RequestEnvelopeSchema.extend({
     ),
 }).strict();
 
-/** Removes a Workspace's virtual key from the Worker; idempotent. */
+/**
+ * Removes one virtual key from the Worker; idempotent. Only the named alias is removed, so
+ * a late clear of a rotated key never removes its replacement.
+ */
 export const WorkspaceModelKeyClearMessageSchema = RequestEnvelopeSchema.extend({
   type: z.literal("workspace.model_key.clear"),
-  payload: WorkspaceCommandPayloadSchema,
+  payload: z
+    .object({ workspaceId: WorkspaceIdSchema, keyAlias: ModelKeyAliasSchema })
+    .strict()
+    .refine(
+      (value) => value.keyAlias.slice(4, 40) === value.workspaceId,
+      "keyAlias must belong to the Workspace",
+    ),
 }).strict();
 
 /** Changes a Workspace's data-project limit in place; no restart (Phase 15.7). */

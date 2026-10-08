@@ -85,9 +85,17 @@ describe("model gateway protocol (Phase 16)", () => {
         version: 4,
         type: "workspace.model_key.clear",
         requestId,
-        payload: { workspaceId },
+        payload: { workspaceId, keyAlias: `arw-${workspaceId}-1` },
       }).success,
     ).toBe(true);
+    expect(
+      ControlToWorkerMessageSchema.safeParse({
+        version: 4,
+        type: "workspace.model_key.clear",
+        requestId,
+        payload: { workspaceId },
+      }).success,
+    ).toBe(false);
   });
 
   it("requires the relay status in heartbeats and reports held key aliases", () => {

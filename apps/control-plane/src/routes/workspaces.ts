@@ -7,7 +7,7 @@ import type { FastifyInstance } from "fastify";
 import type { RouteContext } from "../context.js";
 import type { DispatchResult, RuntimeCommands } from "../runtime-commands.js";
 import { errorBody, isUniqueViolation } from "../http.js";
-import { publicWorkspace } from "../presenters.js";
+import { type PublicModelAccess, publicWorkspace } from "../presenters.js";
 
 const CreateWorkspaceBodySchema = z
   .object({
@@ -38,6 +38,23 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
     validateRuntimeResult,
   } = runtime;
 
+  /** Platform model access per Workspace; "disabled" without a model gateway (Phase 16.8). */
+  async function modelAccessOf(
+    workspaces: ReadonlyArray<{ id: string; state: string }>,
+  ): Promise<Map<string, PublicModelAccess>> {
+    if (dependencies.modelGateway === undefined || workspaces.length === 0) return new Map();
+    try {
+      return await dependencies.modelGateway.workspaceAccess(workspaces);
+    } catch (error) {
+      dependencies.log?.warn({ err: error }, "could not read model access state");
+      return new Map();
+    }
+  }
+
+  async function present<T extends Parameters<typeof publicWorkspace>[0]>(workspace: T) {
+    return publicWorkspace(workspace, (await modelAccessOf([workspace])).get(workspace.id));
+  }
+
   app.get("/api/workspaces", async (request, reply) => {
     const auth = await authenticate(request, reply);
     if (auth === null) {
@@ -46,7 +63,10 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
     const workspaces = await dependencies.store.listWorkspaces(
       auth.session.user.id,
     );
-    return { workspaces: workspaces.map(publicWorkspace) };
+    const access = await modelAccessOf(workspaces);
+    return {
+      workspaces: workspaces.map((workspace) => publicWorkspace(workspace, access.get(workspace.id))),
+    };
   });
 
   app.post("/api/workspaces", async (request, reply) => {
@@ -75,7 +95,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
         runtimeImage: dependencies.defaultRuntimeImage,
         diskLimitBytes: dependencies.workspaceDiskLimitBytes,
       });
-      return reply.code(201).send({ workspace: publicWorkspace(workspace) });
+      return reply.code(201).send({ workspace: await present(workspace) });
     } catch (error) {
       if (isUniqueViolation(error)) {
         return reply
@@ -106,7 +126,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
         .code(404)
         .send(errorBody("WORKSPACE_NOT_FOUND", "Workspace was not found"));
     }
-    return { workspace: publicWorkspace(workspace) };
+    return { workspace: await present(workspace) };
   });
 
   app.post("/api/workspaces/:id/start", async (request, reply) => {
@@ -134,7 +154,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
         .send(errorBody("WORKSPACE_NOT_FOUND", "Workspace was not found"));
     }
     if (workspace.state === "RUNNING") {
-      return { workspace: publicWorkspace(workspace) };
+      return { workspace: await present(workspace) };
     }
 
     if (
@@ -208,6 +228,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
         runtimeImage: workspace.runtimeImage,
         resources: dependencies.workspaceResources,
         storage: { diskLimitBytes: starting.disk.limitBytes },
+        modelGateway: dependencies.modelGateway?.catalog ?? null,
       },
     });
     if (!ensured.ok) {
@@ -222,6 +243,11 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
     if (invalidEnsure !== null) {
       await markRuntimeFailure(workspace.id, workerId, invalidEnsure);
       return sendDispatchFailure(reply, invalidEnsure);
+    }
+    if (dependencies.modelGateway !== undefined) {
+      dependencies.modelGateway.recordModelConfig(workspace.id, ensured.modelConfig);
+      // Best effort: the Workspace starts without platform models when this fails (Q3).
+      await dependencies.modelGateway.ensureWorkspaceKey(workspace.id);
     }
     const started = await dispatchRuntimeCommand(workerId, {
       version: WORKER_PROTOCOL_VERSION,
@@ -259,7 +285,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
         .code(404)
         .send(errorBody("WORKSPACE_NOT_FOUND", "Workspace was not found"));
     }
-    return { workspace: publicWorkspace(running) };
+    return { workspace: await present(running) };
   });
 
   app.post("/api/workspaces/:id/stop", async (request, reply) => {
@@ -287,7 +313,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
         .send(errorBody("WORKSPACE_NOT_FOUND", "Workspace was not found"));
     }
     if (workspace.state === "STOPPED") {
-      return { workspace: publicWorkspace(workspace) };
+      return { workspace: await present(workspace) };
     }
     const workerId = workspace.workerId;
     if (workerId === null || !workerChannel.isConnected(workerId)) {
@@ -342,7 +368,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
         .code(404)
         .send(errorBody("WORKSPACE_NOT_FOUND", "Workspace was not found"));
     }
-    return { workspace: publicWorkspace(current) };
+    return { workspace: await present(current) };
   });
 
   app.post("/api/workspaces/:id/open", async (request, reply) => {
@@ -438,6 +464,8 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
           .code(409)
           .send(errorBody("WORKSPACE_CHANGED", "Workspace state changed; retry"));
       }
+      // The key is now revoking; delete it at the gateway without waiting for the Worker.
+      dependencies.modelGateway?.kick();
       const deleted = await dispatchRuntimeCommand(workspace.workerId, {
         version: WORKER_PROTOCOL_VERSION,
         type: "workspace.delete",

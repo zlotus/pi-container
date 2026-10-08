@@ -11,7 +11,8 @@ export interface WorkerModelAccess {
   relayPort(): number | null;
   holdings(): WorkerModelKeyHolding[];
   setKey(workspaceId: string, keyAlias: string, secret: string): Promise<void>;
-  clearKey(workspaceId: string): Promise<void>;
+  /** Removes the named key only; returns the alias the Workspace still holds, if any. */
+  clearKey(workspaceId: string, keyAlias: string): Promise<string | null>;
   /** The Workspace directory is gone (delete): stop serving its key. */
   forget(workspaceId: string): void;
   /** Re-reads which managed Workspaces are running (after lifecycle changes). */
@@ -35,7 +36,7 @@ export const DISABLED_MODEL_ACCESS: WorkerModelAccess = {
   setKey: async () => {
     throw new ModelAccessError("MODEL_RELAY_DISABLED", "The model relay is not enabled on this Worker", false);
   },
-  clearKey: async () => undefined,
+  clearKey: async () => null,
   forget: () => undefined,
   refresh: async () => undefined,
 };
@@ -110,14 +111,14 @@ export class RelayModelAccess implements WorkerModelAccess {
     }
   }
 
-  async clearKey(workspaceId: string): Promise<void> {
+  async clearKey(workspaceId: string, keyAlias: string): Promise<string | null> {
     let directory: string | null = null;
     try {
       directory = await this.#runtime.modelKeyDirectory(workspaceId);
     } catch {
       // Not (or no longer) a managed Workspace here: nothing on disk to remove.
     }
-    await this.#keys.clear(workspaceId, directory);
+    return this.#keys.clear(workspaceId, directory, keyAlias);
   }
 
   forget(workspaceId: string): void {

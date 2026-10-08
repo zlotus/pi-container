@@ -18,6 +18,9 @@ import { WorkspaceSessionExchange } from "./session-exchange.js";
 import { SessionConnectionRegistry } from "./session-connections.js";
 import { selectWorker } from "./scheduler.js";
 import { GenericOidcClient, OidcTransactionStore } from "./oidc.js";
+import { LiteLlmAdminClient } from "./model-gateway/admin-client.js";
+import { loadModelCatalog, ModelKeyManager } from "./model-gateway/key-manager.js";
+import { WorkerChannel } from "./worker-channel.js";
 import {
   GenericOAuth2UserInfoClient,
   OAuth2TransactionStore,
@@ -99,6 +102,26 @@ const loginGuard = new LoginGuard(
   },
   new AddressSet(config.AUTH_TRUSTED_NETWORKS),
 );
+const workerChannel = new WorkerChannel(config.WORKER_COMMAND_TIMEOUT_MS);
+const modelGateway =
+  config.MODEL_GATEWAY_ADMIN_URL === ""
+    ? undefined
+    : new ModelKeyManager({
+        store: repository,
+        admin: new LiteLlmAdminClient({
+          adminUrl: config.MODEL_GATEWAY_ADMIN_URL,
+          masterKey: config.MODEL_GATEWAY_MASTER_KEY,
+        }),
+        channel: workerChannel,
+        catalog: await loadModelCatalog(config.MODEL_GATEWAY_CATALOG_FILE),
+        policy: {
+          defaultBudgetUsd: config.MODEL_GATEWAY_USER_BUDGET_USD,
+          budgetDuration: config.MODEL_GATEWAY_BUDGET_DURATION,
+          rpmLimit: config.MODEL_GATEWAY_KEY_RPM,
+          tpmLimit: config.MODEL_GATEWAY_KEY_TPM,
+        },
+        log: log.child({ component: "model-gateway" }),
+      });
 const app = buildControlPlane({
   checkDatabase: async () => checkDatabase(database),
   store: repository,
@@ -128,7 +151,11 @@ const app = buildControlPlane({
   egressProtected: protectedAddressResolver(
     config.PLATFORM_EGRESS_PROTECTED,
     config.DATABASE_URL,
+    undefined,
+    config.MODEL_GATEWAY_ADMIN_URL === "" ? [] : [config.MODEL_GATEWAY_ADMIN_URL],
   ),
+  workerChannel,
+  ...(modelGateway === undefined ? {} : { modelGateway }),
   reportRecoveryIssue: (issue) => {
     log.warn({ issue }, "worker recovery issue");
   },
@@ -167,7 +194,16 @@ const authThrottleCleanupTimer = setInterval(() => {
 }, 60_000);
 authThrottleCleanupTimer.unref();
 
+modelGateway?.start();
+if (modelGateway !== undefined) {
+  log.info(
+    { providerId: modelGateway.catalog.providerId, models: modelGateway.catalog.models.length },
+    "platform model access enabled",
+  );
+}
+
 const shutdown = async (): Promise<void> => {
+  modelGateway?.stop();
   clearInterval(workerStatusTimer);
   clearInterval(authThrottleCleanupTimer);
   await new Promise<void>((resolve, reject) => {

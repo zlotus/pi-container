@@ -393,7 +393,7 @@ export class WorkerDaemon {
           await this.modelAccess.setKey(workspaceId, message.payload.keyAlias, message.payload.secret);
           keyAlias = message.payload.keyAlias;
         } else {
-          await this.modelAccess.clearKey(workspaceId);
+          keyAlias = await this.modelAccess.clearKey(workspaceId, message.payload.keyAlias);
         }
         this.#send({
           version: WORKER_PROTOCOL_VERSION,

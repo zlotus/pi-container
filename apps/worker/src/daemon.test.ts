@@ -403,8 +403,9 @@ describe("worker daemon model access (Phase 16.9)", () => {
       setKey: vi.fn(async (id: string, alias: string) => {
         held.set(id, alias);
       }),
-      clearKey: vi.fn(async (id: string) => {
-        held.delete(id);
+      clearKey: vi.fn(async (id: string, alias: string) => {
+        if (held.get(id) === alias) held.delete(id);
+        return held.get(id) ?? null;
       }),
       forget: vi.fn((id: string) => {
         held.delete(id);
@@ -484,7 +485,17 @@ describe("worker daemon model access (Phase 16.9)", () => {
         reconciliation: { modelKeys: [{ workspaceId, keyAlias }] },
       });
 
-      command("workspace.model_key.clear", "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d14", { workspaceId });
+      // A late clear of an older key keeps the current one.
+      command("workspace.model_key.clear", "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d17", {
+        workspaceId,
+        keyAlias: `arw-${workspaceId}-1`,
+      });
+      await vi.waitFor(() => expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d17")).toBeDefined());
+      expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d17")?.payload).toEqual({
+        requestType: "workspace.model_key.clear",
+        modelKey: { workspaceId, keyAlias },
+      });
+      command("workspace.model_key.clear", "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d14", { workspaceId, keyAlias });
       await vi.waitFor(() => expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d14")).toBeDefined());
       expect(response("6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d14")?.payload).toEqual({
         requestType: "workspace.model_key.clear",

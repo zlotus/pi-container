@@ -14,6 +14,7 @@ import { registerAuditRoutes } from "./routes/audit.js";
 import { registerExternalAuthRoutes } from "./routes/auth-external.js";
 import { registerLocalAuthRoutes } from "./routes/auth-local.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { registerModelGatewayRoutes } from "./routes/model-gateway.js";
 import { registerWorkspaceRoutes } from "./routes/workspaces.js";
 import { createRuntimeCommands } from "./runtime-commands.js";
 import { WorkerChannel } from "./worker-channel.js";
@@ -43,7 +44,8 @@ export function buildControlPlane(
       );
     });
   }
-  const workerChannel = new WorkerChannel(dependencies.workerCommandTimeoutMs);
+  const workerChannel =
+    dependencies.workerChannel ?? new WorkerChannel(dependencies.workerCommandTimeoutMs);
   void app.register(websocket, {
     options: { maxPayload: 8 * 1024 * 1024, perMessageDeflate: false },
   });
@@ -82,6 +84,7 @@ export function buildControlPlane(
   registerAdminEgressRoutes(app, context, runtime);
   registerAdminUserRoutes(app, context);
   registerAdminAuthLockRoutes(app, context);
+  registerModelGatewayRoutes(app, context);
 
   return app;
 }

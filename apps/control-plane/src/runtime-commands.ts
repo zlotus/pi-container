@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   WORKER_PROTOCOL_VERSION,
   type ControlToWorkerMessage,
+  type ModelConfigResult,
   type WorkerEgressStatus,
   type WorkspaceObservation,
 } from "@agent-runtime/protocol";
@@ -15,13 +16,22 @@ import { type WorkerChannel, WorkerChannelError } from "./worker-channel.js";
 
 export type WorkspaceRuntimeCommand = Exclude<
   ControlToWorkerMessage,
-  { type: "worker.reconcile" | "worker.egress.apply" | "workspace.storage.set" }
+  {
+    type:
+      | "worker.reconcile"
+      | "worker.egress.apply"
+      | "workspace.storage.set"
+      | "workspace.model_key.set"
+      | "workspace.model_key.clear";
+  }
 >;
 
 export type DispatchResult =
   | {
       ok: true;
       workspace: WorkspaceObservation;
+      /** Only for `workspace.ensure`: what the Worker did with the Pi models.json. */
+      modelConfig?: ModelConfigResult;
     }
   | {
       ok: false;
@@ -73,7 +83,13 @@ export function createRuntimeCommands(
           message: "Worker returned an invalid Workspace result",
         };
       }
-      return { ok: true, workspace };
+      return {
+        ok: true,
+        workspace,
+        ...(response.payload.modelConfig === undefined
+          ? {}
+          : { modelConfig: response.payload.modelConfig }),
+      };
     } catch (error) {
       const workerOffline =
         error instanceof WorkerChannelError &&
@@ -190,6 +206,10 @@ export function createRuntimeCommands(
     for (const issue of report.issues) {
       dependencies.reportRecoveryIssue?.({ workerId, ...issue });
     }
+    // Keys the Worker should not hold are cleared, keys it lost are rotated (Phase 16.6).
+    await dependencies.modelGateway?.reconcileWorker(workerId, report.modelKeys).catch((error: unknown) => {
+      dependencies.log?.warn({ workerId, err: error }, "model key reconciliation failed");
+    });
 
     for (const workspace of workspaces) {
       if (!workerChannel.isConnected(workerId)) return;
