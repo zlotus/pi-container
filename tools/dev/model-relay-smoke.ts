@@ -67,7 +67,7 @@ function check(name: string, ok: boolean, detail = ""): void {
 }
 
 const catalog = ModelGatewayConfigSchema.parse(JSON.parse(readFileSync(catalogPath, "utf8")));
-const models = requested.length > 0 ? requested : ["deepseek-v4-flash", "mimo-v2.5-pro"];
+const models = requested.length > 0 ? requested : ["deepseek-v4-flash", "deepseek-v4-pro"];
 const workspaceId = randomUUID();
 const userId = `smoke-${randomBytes(4).toString("hex")}`;
 const keyAlias = `arw-${workspaceId}-1`;

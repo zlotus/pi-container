@@ -14,7 +14,8 @@
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "test:e2e": "vitest run src/routes src/gateway.test.ts"
+    "test:e2e": "vitest run src/routes src/gateway.test.ts",
+    "test:model-gateway": "TEST_MODEL_GATEWAY=1 vitest run src/model-gateway/litellm.docker.test.ts"
   },
   "dependencies": {
     "@agent-runtime/auth": "workspace:*",

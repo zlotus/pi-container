@@ -2,40 +2,35 @@
 # specs.md Phase 16.3. Real upstream keys come only from the gateway container's environment
 # (env_file, mode 0600); this file contains none. Model names must match the platform catalog
 # (catalog.example.json) one to one.
+#
+# Every model uses the generic `litellm_proxy/` route: it forwards the OpenAI-compatible request
+# unchanged, which Pi's DeepSeek thinking format needs (`thinking`, `reasoning_effort`, tools and
+# replayed `reasoning_content`). The provider-specific routes rewrite it: `deepseek/` drops
+# `reasoning_effort`, `openai/` rejects `thinking` (Phase 16.15). Xiaomi MiMo is deferred to
+# Phase 18 (verified notes in specs.md Phase 16.15).
+# This route has no built-in prices, so `model_info` carries them (USD per token).
 model_list:
   - model_name: deepseek-v4-flash
     litellm_params:
-      model: deepseek/deepseek-v4-flash
+      model: litellm_proxy/deepseek-v4-flash
+      api_base: https://api.deepseek.com
       api_key: os.environ/DEEPSEEK_API_KEY
+    model_info:
+      input_cost_per_token: 3.0e-07
+      output_cost_per_token: 1.2e-06
+      cache_read_input_token_cost: 6.0e-09
   - model_name: deepseek-v4-pro
     litellm_params:
-      model: deepseek/deepseek-v4-pro
+      model: litellm_proxy/deepseek-v4-pro
+      api_base: https://api.deepseek.com
       api_key: os.environ/DEEPSEEK_API_KEY
-  # MiMo uses the DeepSeek thinking format (Pi: thinkingFormat "deepseek"). The `deepseek/`
-  # provider forwards `thinking`, `reasoning_effort`, tools and replayed `reasoning_content`;
-  # `openai/` rejects `thinking` and the built-in `xiaomi_mimo/` rejects tools (Phase 16.15).
-  - model_name: mimo-v2.5
-    litellm_params:
-      model: deepseek/mimo-v2.5
-      api_base: https://api.xiaomimimo.com/v1
-      api_key: os.environ/XIAOMI_API_KEY
     model_info:
-      input_cost_per_token: 1.4e-07
-      output_cost_per_token: 2.8e-07
-      cache_read_input_token_cost: 2.8e-09
-  - model_name: mimo-v2.5-pro
-    litellm_params:
-      model: deepseek/mimo-v2.5-pro
-      api_base: https://api.xiaomimimo.com/v1
-      api_key: os.environ/XIAOMI_API_KEY
-    model_info:
-      input_cost_per_token: 4.35e-07
-      output_cost_per_token: 8.7e-07
-      cache_read_input_token_cost: 3.6e-09
+      input_cost_per_token: 1.32e-06
+      output_cost_per_token: 3.96e-06
+      cache_read_input_token_cost: 4.4e-08
 
 litellm_settings:
-  # Never rewrite or drop request parameters silently; Pi's thinking parameters must reach
-  # the upstream unchanged.
+  # Never rewrite or drop request parameters silently.
   drop_params: false
 
 general_settings:

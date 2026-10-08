@@ -156,7 +156,7 @@ def main():
     args = parser.parse_args()
     base = args.url.rstrip("/")
     master = load_master_key(os.path.expanduser(args.env_file))
-    models = args.model or ["deepseek-v4-flash", "mimo-v2.5-pro"]
+    models = args.model or ["deepseek-v4-flash", "deepseek-v4-pro"]
 
     status, body = request(base, "/model/info", master)
     names = sorted({m["model_name"] for m in json.loads(body).get("data", [])}) if status == 200 else []
