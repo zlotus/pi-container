@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 
 import { api } from "../api.js";
 import { ConfirmDialog } from "../components/Modal.js";
+import { ModelGatewayPanel } from "../components/ModelGatewayPanel.js";
 import { RelativeTime } from "../components/RelativeTime.js";
 import { formatBytes as formatSize, workerStatusLabel } from "../labels.js";
 import type { SessionResponse, Worker } from "../types.js";
@@ -18,6 +19,12 @@ const CAPABILITY_LABELS: Record<string, string> = {
 function formatBytes(value: number | null): string {
   if (value === null) return "—";
   return `${(value / 1024 ** 3).toFixed(value >= 10 * 1024 ** 3 ? 0 : 1)} GiB`;
+}
+
+/** The Worker's model relay state (Phase 16.4). */
+export function modelRelayText(worker: Pick<Worker, "modelRelay">): string {
+  if (!worker.modelRelay.enabled) return "未启用";
+  return worker.modelRelay.listening ? `已监听端口 ${worker.modelRelay.port ?? "—"}` : "已配置但未监听，请查看 Worker 日志";
 }
 
 export function beginWorkerPolling(
@@ -88,6 +95,7 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
         <button className="secondary" onClick={() => void refreshWorkers()}>刷新</button>
       </div>
       {error === null ? null : <p className="error banner" role="alert">{error}</p>}
+      <ModelGatewayPanel />
       <section className="worker-panel" aria-label="Worker 列表">
         {loading ? (
           <p className="muted">正在载入 Worker…</p>
@@ -154,6 +162,7 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
                             <div><dt>运行环境版本</dt><dd>{worker.runtimeVersion ?? "—"}</dd></div>
                             <div><dt>运行环境镜像</dt><dd>{worker.runtimeImage ?? "尚未上报"}</dd></div>
                             <div><dt>Worker 上报的 Workspace</dt><dd>{worker.allocatedWorkspaces}</dd></div>
+                            <div><dt>模型中继</dt><dd>{modelRelayText(worker)}</dd></div>
                             <div><dt>可用能力</dt><dd><span className="capability-list">{Object.entries(CAPABILITY_LABELS).map(([key, label]) => <span className={worker.capabilities[key] ? "capability pass" : "capability fail"} key={key}>{label}</span>)}</span></dd></div>
                           </dl>
                         </td>

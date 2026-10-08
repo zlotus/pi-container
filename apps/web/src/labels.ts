@@ -153,3 +153,46 @@ export function formatRelativeTime(value: string, now: number = Date.now()): str
   }
   return relativeFormat.format(Math.round(seconds / (365 * 24 * 3600)), "year");
 }
+
+const MODEL_ACCESS_REASON_LABELS: Record<string, string> = {
+  MODEL_KEY_PENDING: "平台模型凭据正在签发，或模型网关暂时不可用",
+  MODEL_RELAY_DISABLED: "该 Worker 未启用模型中继",
+  USER_CONFIG_INVALID: "models.json 格式错误，平台模型未注入，请修复或删除该文件后重启 Workspace",
+};
+
+/** Text and tone for a Workspace's platform model access (specs.md Phase 16.8). */
+export function modelAccessLabel(access: { status: string; reason: string | null }): {
+  text: string;
+  tone: "ok" | "muted" | "warn";
+  detail: string | null;
+} {
+  switch (access.status) {
+    case "available":
+      return { text: "可用", tone: "ok", detail: null };
+    case "pending":
+      return { text: "启动后可用", tone: "muted", detail: null };
+    case "unavailable":
+      return {
+        text: "暂不可用",
+        tone: "warn",
+        detail: access.reason === null ? null : (MODEL_ACCESS_REASON_LABELS[access.reason] ?? access.reason),
+      };
+    default:
+      return { text: "未启用", tone: "muted", detail: null };
+  }
+}
+
+/** USD amounts: cents below $100, whole dollars above. */
+export function formatUsd(value: number | null): string {
+  if (value === null) return "不限";
+  return value >= 100 ? `$${Math.round(value)}` : `$${value.toFixed(2)}`;
+}
+
+/** Parses a budget input in USD; empty means "default", invalid input is null. */
+export function parseUsdInput(text: string): number | "default" | null {
+  const trimmed = text.trim();
+  if (trimmed === "") return "default";
+  if (!/^\d{1,7}(?:\.\d{1,2})?$/.test(trimmed)) return null;
+  const value = Number(trimmed);
+  return value <= 1_000_000 ? value : null;
+}

@@ -306,3 +306,14 @@ td small { display: block; margin-top: 4px; color: var(--text-muted); }
 .disk-usage small { font-size: .7rem; margin-top: 4px; }
 td .disk-usage { align-items: flex-start; }
 .notice.banner { border-color: #b9d6c4; background: #f2f8f4; color: var(--success); }
+
+/* Platform model access (Phase 16.8). */
+.model-access { display: inline-flex; flex-direction: column; gap: 2px; }
+.model-access-ok { color: var(--success); }
+.model-access-muted { color: var(--text-muted); }
+.model-access-warn { color: var(--warning); }
+.model-access small { color: var(--warning); font-size: 0.8em; }
+.inline-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-2); }
+.inline-form label { display: flex; flex-direction: column; gap: var(--space-1); color: var(--text-secondary); }
+.model-gateway-panel h2 { margin: 0 0 var(--space-3); font-size: 1rem; }
+.model-gateway-panel small { display: block; }
