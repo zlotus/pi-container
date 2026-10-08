@@ -93,8 +93,9 @@ v0.x 证明了主链可行：多用户、Workspace 隔离、多 Worker 调度、
 - 候选：LiteLLM Proxy、New API / One API 一类网关。开工时按以下标准选型并记录：ARM64 镜像可用、
   支持虚拟 key 与按 key 计量、支持项目实际使用的模型服务商、能用 PostgreSQL 或自带存储部署、许可证。
 - 平台为每个用户/Workspace 通过网关管理 API 签发虚拟 key，注入 Runtime；真实上游 key 只在网关中。
-- 用户禁用、session 撤销或 Workspace 删除时，对应虚拟 key 失效。
-- Phase 14 出口策略放行网关地址（网关是平台组件，但只暴露推理接口，不暴露管理接口）。
+- 用户禁用或 Workspace 删除时，对应虚拟 key 失效；session 撤销后无法再经 Gateway 使用平台模型（Phase 16
+  采用 Worker 模型中继，虚拟 key 不进入 Runtime，见 `specs.md` 第 64 节 Phase 16）。
+- 网关对 Workspace 不可达；Workspace 只能访问本机 Worker 的模型中继端口（Phase 14 出口规则中的受限例外）。
 - 先核对 pinned Pi 对自定义 provider / base URL 的实际配置方式，不猜格式。
 
 ### Phase 17：可观测性（G4，P1）
