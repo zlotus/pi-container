@@ -24,10 +24,12 @@ import {
   resolveClientAddress,
   retryAfterSeconds,
 } from "./login-guard.js";
+import type { ModelAccessService } from "./model-gateway/key-manager.js";
 import type { OAuth2Runtime } from "./oauth2.js";
 import type { OidcRuntime } from "./oidc.js";
 import type { SessionConnectionRegistry } from "./session-connections.js";
 import type { WorkspaceSessionExchange } from "./session-exchange.js";
+import type { WorkerChannel } from "./worker-channel.js";
 import type { WorkerControlStore } from "./worker-control.js";
 
 type Phase1Store = Pick<
@@ -70,6 +72,8 @@ type Phase1Store = Pick<
   | "listAuthLocks"
   | "clearAuthLocks"
   | "updateWorkspaceDiskLimit"
+  | "findUserModelBudget"
+  | "setUserModelBudget"
 >;
 
 type WorkerAdminStore = Pick<
@@ -107,6 +111,10 @@ export interface ControlPlaneDependencies {
   loginGuard: LoginGuard;
   /** Peers whose `X-Forwarded-For` is believed; empty means the TCP peer is the client. */
   trustedProxies: AddressSet;
+  /** Shared with services that command Workers themselves (the model key manager). */
+  workerChannel?: WorkerChannel;
+  /** Platform model access (specs.md Phase 16); absent when no model gateway is configured. */
+  modelGateway?: ModelAccessService;
   /** Platform addresses no egress whitelist may open; defaults to none. */
   egressProtected?: () => Promise<string[]>;
   reportRecoveryIssue?: (

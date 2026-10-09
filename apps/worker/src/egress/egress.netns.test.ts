@@ -146,6 +146,7 @@ describe.skipIf(!enabled)("egress rules on a real kernel", { timeout: 30_000 }, 
     server(lan, "lan", [80, 8080]);
     server(pub, "public", [80]);
     server(null, "worker-host", [3100]);
+    server(null, "relay", [3101]);
     server(container, "pi-web", [30141]);
     await waitForListeners();
 
@@ -291,5 +292,33 @@ describe.skipIf(!enabled)("egress rules on a real kernel", { timeout: 30_000 }, 
     expect(greeting(container, "10.99.0.2", 80)).toBe("lan");
     expect(greeting(container, "10.99.0.2", 8080)).toBeNull();
     await expect(controller.ensure()).resolves.toEqual({ enforced: true, revision: 7 });
+  });
+  it("opens only the model relay port to Workspace bridges (Phase 16.4)", async () => {
+    const relayController = new EgressController({
+      nft,
+      stateDirectory: join(stateRoot, "egress-relay"),
+      resolveLocalProtected: async () => [],
+      relayPort: 3101,
+      log: { info: () => undefined, warn: (fields: object, message?: string) => warnings.push(`${message ?? ""} ${JSON.stringify(fields)}`) },
+    });
+    const status = await relayController.initialize();
+    expect(status, warnings.join("\n")).toEqual({ enforced: true, revision: null });
+    expect(verifyEgressListing(await nft.listTable(), effectiveEgressRules(null, [], 3101))).toEqual({ ok: true });
+
+    expect(greeting(container, "172.30.0.1", 3101)).toBe("relay");
+    expect(greeting(container, "172.30.0.1", 3100)).toBeNull();
+    expect(greeting(container, "10.99.0.1", 3100)).toBeNull();
+    expect(greeting(container, "10.99.0.2", 80)).toBeNull();
+    expect(greeting(container, "fd00:30::1", 3101)).toBeNull();
+    // Not a Workspace bridge: the relay port is dropped on input.
+    expect(greeting(other, "172.31.0.1", 3101)).toBeNull();
+    expect(greeting(other, "172.31.0.1", 3100)).toBe("worker-host");
+    expect(greeting(null, "127.0.0.1", 3101)).toBeNull();
+    expect(greeting(null, "127.0.0.1", 3100)).toBe("worker-host");
+
+    // Without the relay the port is closed again and the table is the Phase 14 one.
+    await controller.ensure();
+    expect(greeting(container, "172.30.0.1", 3101)).toBeNull();
+    expect(greeting(other, "172.31.0.1", 3101)).toBe("relay");
   });
 });

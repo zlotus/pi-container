@@ -294,6 +294,14 @@ Workspace 默认可以访问公网，不能访问 RFC1918 内网与 Worker 宿�
 持续校验；无法确认规则生效时 fail-closed（不启动 Workspace、停止运行中的 Workspace，数据保留）。
 安装、配置、开发环境中的 Clash/Tailscale 注意事项与排障见 [Workspace Egress Runbook](docs/egress-runbook.md)。
 
+## Platform model access
+
+管理员配置模型网关（LiteLLM Proxy，平台只做集成）后，每个 Workspace 的 pi-web 中自动出现平台 provider
+（默认 `platform`）的模型，用户无需填写 API Key。真实上游 key 只在网关中；平台为每个 Workspace 签发虚拟 key，
+按用户计量并可设预算，虚拟 key 只保存在 Worker 上，由 Worker 模型中继注入请求，不进入 Workspace 容器。
+用户禁用或 Workspace 删除时 key 被吊销（以网关确认为准）。用户自己在 pi-web 中配置的其他 provider 不受影响。
+当前目录为 DeepSeek。部署、目录维护与排障见 [Model Gateway Runbook](docs/model-gateway-runbook.md)。
+
 ## Workspace disk quotas and container limits
 
 每个 Workspace 的 `/workspace`、`/home/agent`、`/tmp` 共用一个磁盘上限（默认 20 GiB，管理员可在“全部

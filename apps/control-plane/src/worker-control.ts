@@ -132,6 +132,7 @@ export function registerWorkerControlChannel(
                 systemResources: message.payload.systemResources,
                 egress: message.payload.egress,
                 storage: message.payload.storage,
+                modelRelay: message.payload.modelRelay,
                 receivedAt: dependencies.now(),
               });
               if (!recorded) {
@@ -160,6 +161,7 @@ export function registerWorkerControlChannel(
                 allocatedWorkspaces: message.payload.allocatedWorkspaces,
                 egress: message.payload.egress,
                 storage: message.payload.storage,
+                modelRelay: message.payload.modelRelay,
                 workspaceDisk: message.payload.workspaceDisk ?? [],
                 receivedAt: dependencies.now(),
               });

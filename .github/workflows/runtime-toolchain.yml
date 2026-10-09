@@ -6,6 +6,8 @@ on:
     paths:
       - ".github/workflows/runtime-toolchain.yml"
       - "apps/worker/**"
+      - "apps/control-plane/src/model-gateway/**"
+      - "deploy/model-gateway/**"
       - "packages/protocol/**"
       - "runtime/**"
       - "package.json"
@@ -15,6 +17,8 @@ on:
     paths:
       - ".github/workflows/runtime-toolchain.yml"
       - "apps/worker/**"
+      - "apps/control-plane/src/model-gateway/**"
+      - "deploy/model-gateway/**"
       - "packages/protocol/**"
       - "runtime/**"
       - "package.json"
@@ -68,3 +72,6 @@ jobs:
         # Like a production Worker, the real-Docker tests must chown managed directories
         # to the Runtime user (UID 1000), which the unprivileged runner user cannot do.
         run: sudo -E env "PATH=$PATH" pnpm --filter @agent-runtime/worker test
+      - name: Run the pinned model gateway against a mock upstream
+        # Pulls the LiteLLM image pinned in deploy/model-gateway (specs.md Phase 16.14 Q8).
+        run: pnpm test:model-gateway

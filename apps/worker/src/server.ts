@@ -10,19 +10,25 @@ import { EgressController, localProtectedResolver } from "./egress/controller.js
 import { logEgressEnvironment } from "./egress/environment.js";
 import { ExecNftClient } from "./egress/nft.js";
 import { buildWorkerGateway } from "./gateway.js";
+import { DISABLED_MODEL_ACCESS, RelayModelAccess } from "./model-relay/access.js";
 import { DockerWorkspaceRuntime } from "./runtime.js";
 import { StorageController } from "./storage/controller.js";
 import { ExecXfsQuotaTool } from "./storage/quota.js";
 
 const config = loadWorkerConfig(process.env);
 const log = await createLogger("worker", LoggingConfigSchema.parse(process.env));
+const modelGatewayUrl = config.WORKER_MODEL_GATEWAY_URL;
 const egress = new EgressController({
   nft: new ExecNftClient(config.WORKER_EGRESS_NFT_PATH),
   stateDirectory: join(resolve(config.WORKER_MANAGED_ROOT), "egress"),
   resolveLocalProtected: localProtectedResolver(
     config.CONTROL_PLANE_URL,
     config.WORKER_EGRESS_PROTECTED,
+    undefined,
+    // Workspaces never reach the model gateway directly (Phase 16.4).
+    modelGatewayUrl === undefined ? [] : [modelGatewayUrl],
   ),
+  relayPort: modelGatewayUrl === undefined ? null : config.WORKER_MODEL_RELAY_PORT,
   log,
 });
 const storage = new StorageController({
@@ -38,7 +44,25 @@ const storage = new StorageController({
 });
 const runtime = new DockerWorkspaceRuntime(config, undefined, undefined, egress, storage);
 const capabilityProbe = new DockerRuntimeCapabilityProbe(config);
-const daemon = new WorkerDaemon(config, runtime, capabilityProbe, egress, storage, log);
+const modelAccess = modelGatewayUrl !== undefined
+  ? new RelayModelAccess({
+      runtime,
+      workspacesRoot: join(resolve(config.WORKER_MANAGED_ROOT), "workspaces"),
+      port: config.WORKER_MODEL_RELAY_PORT,
+      upstream: new URL(modelGatewayUrl),
+      maxBodyBytes: config.WORKER_MODEL_RELAY_MAX_BODY_BYTES,
+      log,
+    })
+  : null;
+const daemon = new WorkerDaemon(
+  config,
+  runtime,
+  capabilityProbe,
+  egress,
+  storage,
+  log,
+  modelAccess ?? DISABLED_MODEL_ACCESS,
+);
 const tls =
   config.WORKER_GATEWAY_TLS_CERT_PATH === undefined ||
   config.WORKER_GATEWAY_TLS_KEY_PATH === undefined
@@ -58,6 +82,7 @@ const gateway = buildWorkerGateway({
 const shutdown = (): void => {
   daemon.stop();
   gateway.close();
+  void modelAccess?.stop();
 };
 
 process.once("SIGINT", shutdown);
@@ -86,4 +111,5 @@ await egress.initialize();
 await daemon.checkEgress();
 await daemon.checkStorage();
 await daemon.sampleDiskUsage();
+await modelAccess?.start();
 daemon.start();

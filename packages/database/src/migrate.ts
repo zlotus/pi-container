@@ -50,6 +50,10 @@ const MIGRATIONS = [
     name: "0011_storage_and_login_guard",
     url: new URL("../migrations/0011_storage_and_login_guard.sql", import.meta.url),
   },
+  {
+    name: "0012_model_gateway",
+    url: new URL("../migrations/0012_model_gateway.sql", import.meta.url),
+  },
 ] as const;
 
 export async function migrateDatabase(client: DatabaseClient): Promise<void> {

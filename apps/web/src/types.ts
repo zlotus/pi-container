@@ -24,6 +24,12 @@ export interface WorkspaceDisk {
   sampledAt: string | null;
 }
 
+/** Platform model access of a Workspace (specs.md Phase 16.8). */
+export interface ModelAccess {
+  status: "available" | "pending" | "unavailable" | "disabled";
+  reason: string | null;
+}
+
 export interface Workspace {
   id: string;
   name: string;
@@ -31,7 +37,32 @@ export interface Workspace {
   state: string;
   createdAt: string;
   disk: WorkspaceDisk;
+  /** Absent on admin listings; "disabled" without a model gateway. */
+  modelAccess?: ModelAccess;
 }
+
+export interface ModelUsage {
+  spendUsd: number;
+  maxBudgetUsd: number | null;
+  budgetResetAt: string | null;
+}
+
+export type ModelUsageResponse =
+  | { enabled: false }
+  | { enabled: true; available: boolean; usage: ModelUsage | null };
+
+export type ModelGatewayStatusResponse =
+  | { enabled: false }
+  | {
+      enabled: true;
+      reachable: boolean;
+      providerId: string;
+      catalog: Array<{ id: string; name: string | null; presentInGateway: boolean | null }>;
+      pendingRevocations: number;
+      oldestPendingAt: string | null;
+      lastErrorCode: string | null;
+      activeKeys: number;
+    };
 
 export interface AdminWorkspace extends Workspace {
   updatedAt: string;
@@ -68,6 +99,8 @@ export interface Worker {
     checkedAt: string | null;
     allocatedLimitBytes: number;
   };
+  /** The Worker's model relay (Phase 16.4). */
+  modelRelay: { enabled: boolean; port: number | null; listening: boolean };
 }
 
 export interface AuthLock {

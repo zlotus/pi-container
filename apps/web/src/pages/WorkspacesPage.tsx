@@ -5,11 +5,42 @@ import { DiskUsage } from "../components/DiskUsage.js";
 import { ConfirmDialog } from "../components/Modal.js";
 import { RelativeTime } from "../components/RelativeTime.js";
 import {
+  formatAbsoluteTime,
+  formatUsd,
+  modelAccessLabel,
   STARTABLE_WORKSPACE_STATES,
   TRANSITIONAL_WORKSPACE_STATES,
   workspaceStateLabel,
 } from "../labels.js";
-import type { SessionResponse, Workspace, WorkspaceOpenResponse } from "../types.js";
+import type {
+  ModelAccess,
+  ModelUsageResponse,
+  SessionResponse,
+  Workspace,
+  WorkspaceOpenResponse,
+} from "../types.js";
+
+/** “本周期平台模型花费 …” for the page heading; null when platform models are off. */
+export function modelUsageSummary(response: ModelUsageResponse | null): string | null {
+  if (response === null || !response.enabled) return null;
+  if (!response.available) return "平台模型用量暂时无法获取。";
+  const usage = response.usage;
+  if (usage === null) return "本周期尚未使用平台模型。";
+  const reset = usage.budgetResetAt === null ? "" : `，${formatAbsoluteTime(usage.budgetResetAt)} 重置`;
+  return `本周期平台模型花费 ${formatUsd(usage.spendUsd)} / 预算 ${formatUsd(usage.maxBudgetUsd)}${reset}。`;
+}
+
+function ModelAccessBadge({ access }: { access: ModelAccess }) {
+  const label = modelAccessLabel(access);
+  return (
+    <span className={`model-access model-access-${label.tone}`} title={label.detail ?? undefined}>
+      {label.text}
+      {label.detail === null || access.reason !== "USER_CONFIG_INVALID" ? null : (
+        <small role="status">{label.detail}</small>
+      )}
+    </span>
+  );
+}
 
 export const WORKSPACE_POLL_INTERVAL_MS = 3_000;
 
@@ -28,7 +59,20 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
   const [error, setError] = useState<string | null>(null);
   const [pendingWorkspaceId, setPendingWorkspaceId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Workspace | null>(null);
+  const [modelUsage, setModelUsage] = useState<ModelUsageResponse | null>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let active = true;
+    void api<ModelUsageResponse>("/api/me/model-usage")
+      .then((result) => {
+        if (active) setModelUsage(result);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const loadWorkspaces = useCallback(async () => {
     const result = await api<{ workspaces: Workspace[] }>("/api/workspaces");
@@ -183,6 +227,7 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
     return running ? [openButton, runtimeButton] : [runtimeButton, openButton];
   }
 
+  const usageSummary = modelUsageSummary(modelUsage);
   return (
     <>
       <div className="page-heading">
@@ -191,6 +236,7 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
           <p>
             创建和管理你的 Workspace，并打开运行中的工作环境。
             {loading || workspaces.length === 0 ? null : ` ${workspaceSummary(workspaces)}`}
+            {usageSummary === null ? null : ` ${usageSummary}`}
           </p>
         </div>
         <form className="create-form" onSubmit={createWorkspace}>
@@ -228,6 +274,9 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
                 <div><dt>运行节点</dt><dd>{workspace.workerId ?? "等待分配"}</dd></div>
                 <div><dt>创建于</dt><dd><RelativeTime value={workspace.createdAt} /></dd></div>
                 <div><dt>磁盘</dt><dd><DiskUsage disk={workspace.disk} /></dd></div>
+                {workspace.modelAccess === undefined || workspace.modelAccess.status === "disabled" ? null : (
+                  <div><dt>平台模型</dt><dd><ModelAccessBadge access={workspace.modelAccess} /></dd></div>
+                )}
               </dl>
               <div className="card-actions">
                 {actionButtons(workspace)}

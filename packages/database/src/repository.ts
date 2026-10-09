@@ -3,6 +3,7 @@ import { createAuthThrottleRepository } from "./auth-throttle.js";
 import { createEgressRepository } from "./egress.js";
 import { createIdentityRepository } from "./identities.js";
 import type { DatabaseClient } from "./index.js";
+import { createModelKeyRepository } from "./model-keys.js";
 import { createRecoveryRepository } from "./recovery.js";
 import { createSchedulingRepository, type WorkerSelector } from "./scheduling.js";
 import { createStorageRepository } from "./storage.js";
@@ -28,6 +29,7 @@ export function createRepository(database: DatabaseClient, selectWorker: WorkerS
     ...createEgressRepository(database),
     ...createAuthThrottleRepository(database),
     ...createStorageRepository(database),
+    ...createModelKeyRepository(database),
   };
 }
 

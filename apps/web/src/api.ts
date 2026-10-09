@@ -50,6 +50,7 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   STORAGE_QUOTA_APPLY_FAILED: "Workspace 磁盘配额设置失败，请稍后重试",
   STORAGE_MIGRATION_REQUIRED: "该 Workspace 创建于磁盘配额启用之前，需要管理员完成存储迁移后才能启动",
   DISK_LIMIT_OUT_OF_RANGE: "磁盘上限超出允许范围",
+  MODEL_GATEWAY_DISABLED: "平台模型未启用",
 };
 
 /** “请在 N 分钟后重试” for a 429 with Retry-After; null when there is nothing to add. */

@@ -1,10 +1,18 @@
 import { z } from "zod";
 
 import { EgressPolicySchema, WorkerEgressStatusSchema } from "./egress.js";
+import {
+  ModelConfigResultSchema,
+  ModelGatewayConfigSchema,
+  ModelKeyAliasSchema,
+  ModelKeySecretSchema,
+  ModelRelayStatusSchema,
+} from "./model-gateway.js";
 
 export * from "./egress.js";
+export * from "./model-gateway.js";
 
-export const WORKER_PROTOCOL_VERSION = 3 as const;
+export const WORKER_PROTOCOL_VERSION = 4 as const;
 
 export const WorkspaceIdSchema = z.string().uuid();
 
@@ -122,6 +130,7 @@ export const WorkerHelloMessageSchema = RequestEnvelopeSchema.extend({
       systemResources: WorkerSystemResourcesSchema,
       egress: WorkerEgressStatusSchema,
       storage: WorkerStorageStatusSchema,
+      modelRelay: ModelRelayStatusSchema,
     })
     .strict()
     .refine(
@@ -138,6 +147,7 @@ export const WorkerHeartbeatMessageSchema = RequestEnvelopeSchema.extend({
       allocatedWorkspaces: z.number().int().nonnegative().max(10_000),
       egress: WorkerEgressStatusSchema,
       storage: WorkerStorageStatusSchema,
+      modelRelay: ModelRelayStatusSchema,
       workspaceDisk: z.array(WorkspaceDiskUsageSchema).max(10_000).optional(),
       observedAt: z.string().datetime({ offset: true }),
     })
@@ -221,10 +231,16 @@ export const WorkerRecoveryIssueSchema = z
   })
   .strict();
 
+/** A virtual key alias the Worker holds for one of its Workspaces (Phase 16.6). */
+export const WorkerModelKeyHoldingSchema = z
+  .object({ workspaceId: WorkspaceIdSchema, keyAlias: ModelKeyAliasSchema })
+  .strict();
+
 export const WorkerReconciliationReportSchema = z
   .object({
     workspaces: z.array(WorkerReconcileWorkspaceResultSchema).max(10_000),
     issues: z.array(WorkerRecoveryIssueSchema).max(10_000),
+    modelKeys: z.array(WorkerModelKeyHoldingSchema).max(10_000),
     observedAt: z.string().datetime({ offset: true }),
   })
   .strict()
@@ -265,6 +281,8 @@ export const ControlCommandTypeSchema = z.union([
   z.literal("worker.reconcile"),
   z.literal("worker.egress.apply"),
   z.literal("workspace.storage.set"),
+  z.literal("workspace.model_key.set"),
+  z.literal("workspace.model_key.clear"),
 ]);
 
 export const WorkspaceEnsureMessageSchema = RequestEnvelopeSchema.extend({
@@ -275,8 +293,41 @@ export const WorkspaceEnsureMessageSchema = RequestEnvelopeSchema.extend({
       runtimeImage: z.string().min(1).max(255),
       resources: WorkspaceResourcesSchema,
       storage: z.object({ diskLimitBytes: DiskLimitBytesSchema }).strict(),
+      /** The platform provider to write into models.json; null removes it (Phase 16.5). */
+      modelGateway: ModelGatewayConfigSchema.nullable(),
     })
     .strict(),
+}).strict();
+
+/** Hands a Workspace's virtual key to the Worker's model relay (Phase 16.6, 16.9). */
+export const WorkspaceModelKeySetMessageSchema = RequestEnvelopeSchema.extend({
+  type: z.literal("workspace.model_key.set"),
+  payload: z
+    .object({
+      workspaceId: WorkspaceIdSchema,
+      keyAlias: ModelKeyAliasSchema,
+      secret: ModelKeySecretSchema,
+    })
+    .strict()
+    .refine(
+      (value) => value.keyAlias.slice(4, 40) === value.workspaceId,
+      "keyAlias must belong to the Workspace",
+    ),
+}).strict();
+
+/**
+ * Removes one virtual key from the Worker; idempotent. Only the named alias is removed, so
+ * a late clear of a rotated key never removes its replacement.
+ */
+export const WorkspaceModelKeyClearMessageSchema = RequestEnvelopeSchema.extend({
+  type: z.literal("workspace.model_key.clear"),
+  payload: z
+    .object({ workspaceId: WorkspaceIdSchema, keyAlias: ModelKeyAliasSchema })
+    .strict()
+    .refine(
+      (value) => value.keyAlias.slice(4, 40) === value.workspaceId,
+      "keyAlias must belong to the Workspace",
+    ),
 }).strict();
 
 /** Changes a Workspace's data-project limit in place; no restart (Phase 15.7). */
@@ -314,6 +365,17 @@ const WorkspaceResponseOkPayloadSchema = z
   .object({
     requestType: WorkspaceCommandTypeSchema,
     workspace: WorkspaceObservationSchema,
+    /** Only on `workspace.ensure`. */
+    modelConfig: ModelConfigResultSchema.optional(),
+  })
+  .strict();
+
+const WorkspaceModelKeyResponseOkPayloadSchema = z
+  .object({
+    requestType: z.enum(["workspace.model_key.set", "workspace.model_key.clear"]),
+    modelKey: z
+      .object({ workspaceId: WorkspaceIdSchema, keyAlias: ModelKeyAliasSchema.nullable() })
+      .strict(),
   })
   .strict();
 
@@ -351,6 +413,7 @@ export const ResponseOkMessageSchema = RequestEnvelopeSchema.extend({
     WorkerReconcileResponseOkPayloadSchema,
     WorkerEgressApplyResponseOkPayloadSchema,
     WorkspaceStorageSetResponseOkPayloadSchema,
+    WorkspaceModelKeyResponseOkPayloadSchema,
   ]),
 }).strict();
 
@@ -414,6 +477,8 @@ export const ControlToWorkerMessageSchema = z.discriminatedUnion("type", [
   WorkspaceDeleteMessageSchema,
   WorkspaceInspectMessageSchema,
   WorkspaceStorageSetMessageSchema,
+  WorkspaceModelKeySetMessageSchema,
+  WorkspaceModelKeyClearMessageSchema,
 ]);
 
 export type Architecture = z.infer<typeof ArchitectureSchema>;
@@ -440,3 +505,4 @@ export type WorkerReconciliationReport = z.infer<
   typeof WorkerReconciliationReportSchema
 >;
 export type WorkerRecoveryIssue = z.infer<typeof WorkerRecoveryIssueSchema>;
+export type WorkerModelKeyHolding = z.infer<typeof WorkerModelKeyHoldingSchema>;

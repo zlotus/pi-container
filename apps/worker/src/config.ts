@@ -105,6 +105,23 @@ export const WorkerConfigSchema = z
       .default(2 * 1024 ** 3),
     WORKSPACE_PI_INODE_LIMIT: z.coerce.number().int().min(1_000).max(2 ** 32).default(200_000),
     WORKSPACE_NOFILE_LIMIT: z.coerce.number().int().min(1_024).max(1_048_576).default(65_536),
+    /** The model gateway origin this Worker relays to; unset disables the relay (Phase 16). */
+    WORKER_MODEL_GATEWAY_URL: z
+      .string()
+      .url()
+      .refine((value) => /^https?:\/\//.test(value), "WORKER_MODEL_GATEWAY_URL must use http or https")
+      .refine((value) => {
+        const url = new URL(value);
+        return url.username === "" && url.password === "" && url.search === "" && url.hash === "";
+      }, "WORKER_MODEL_GATEWAY_URL must not carry credentials, a query or a fragment")
+      .optional(),
+    WORKER_MODEL_RELAY_PORT: z.coerce.number().int().min(1).max(65_535).default(3_101),
+    WORKER_MODEL_RELAY_MAX_BODY_BYTES: z.coerce
+      .number()
+      .int()
+      .min(1024 ** 2)
+      .max(256 * 1024 ** 2)
+      .default(32 * 1024 ** 2),
     WORKSPACE_START_TIMEOUT_MS: z.coerce
       .number()
       .int()
@@ -122,6 +139,12 @@ export const WorkerConfigSchema = z
       (value.WORKER_GATEWAY_TLS_CERT_PATH === undefined) ===
       (value.WORKER_GATEWAY_TLS_KEY_PATH === undefined),
     "Worker Gateway TLS certificate and key must be configured together",
+  )
+  .refine(
+    (value) =>
+      value.WORKER_MODEL_GATEWAY_URL === undefined ||
+      value.WORKER_MODEL_RELAY_PORT !== value.WORKER_GATEWAY_PORT,
+    "WORKER_MODEL_RELAY_PORT must differ from WORKER_GATEWAY_PORT",
   )
   .refine(
     (value) => value.WORKER_GATEWAY_TOKEN !== value.WORKER_TOKEN,

@@ -1,6 +1,6 @@
 # Project Progress
 
-Last reviewed: 2026-10-06
+Last reviewed: 2026-10-08
 
 ## Current Milestone
 
@@ -16,6 +16,17 @@ API error code 中文化。
 Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立可用。
 
 ## Current Baseline
+
+- Phase 16（已验收，`v1.0.0-alpha.4`，2026-10-09 负责人人工验收通过）：模型网关与凭据托管。LiteLLM Proxy 1.104.1
+  （pin digest，独立 `litellm` 库）持有 DeepSeek 上游 key；Control Plane 以 master key 为每个 Workspace 签发
+  `llm_api` 虚拟 key（按平台用户计量与预算），只交给 Worker。**Worker 模型中继**按 TCP 连接的（本地地址、对端地址）
+  识别 Workspace，只转发推理路径、丢弃客户端认证头并注入虚拟 key；虚拟 key 不进入容器，网关对 Workspace 网络不可达
+  （出口表只放行中继端口，`relay_input` 拒绝非 `arw-*` 接口）。Worker 在容器未运行时把平台 provider 写入
+  `/agent/pi/models.json`（不跟随符号链接，保留用户自有配置）。吊销 fail-closed：禁用用户、删除 Workspace 由数据库
+  触发器在同一事务发起，Worker 立即停用，网关确认删除后才算吊销。协议 v4，migration `0012_model_gateway`，Portal 显示
+  模型可用状态、用量、预算与网关状态。验证：真实 PostgreSQL 并发/触发器测试、真实内核出口测试、真实 LiteLLM + mock
+  上游（`pnpm test:model-gateway`）、真实 Pi 0.85.1 经中继调用真实 DeepSeek（`tools/dev/model-relay-smoke.ts`）、
+  19 项变异检查。MiMo 延后到 Phase 18。运维见 `docs/model-gateway-runbook.md`。
 
 - Phase 15（已验收，`v1.0.0-alpha.3`）：资源与认证防护。
   **磁盘配额**：`WORKER_MANAGED_ROOT` 必须是以 `prjquota` 挂载的独立 XFS；每个 Workspace 一个 data project

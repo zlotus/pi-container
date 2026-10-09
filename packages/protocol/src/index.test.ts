@@ -11,7 +11,7 @@ const workspaceId = "90b38efc-aa9a-4bc6-8eee-528b4e0c7c60";
 describe("worker protocol", () => {
   it("accepts a versioned worker hello", () => {
     const parsed = WorkerToControlMessageSchema.parse({
-      version: 3,
+      version: 4,
       type: "worker.hello",
       requestId,
       payload: {
@@ -36,6 +36,7 @@ describe("worker protocol", () => {
         },
         egress: { enforced: true, revision: null },
         storage: { enforced: true, fsType: "xfs", totalBytes: 1_000, freeBytes: 500 },
+        modelRelay: { enabled: false, port: null, listening: false },
       },
     });
 
@@ -60,7 +61,7 @@ describe("worker protocol", () => {
   it("validates storage status, disk usage samples and disk limits", () => {
     const heartbeat = (payload: Record<string, unknown>) =>
       WorkerToControlMessageSchema.safeParse({
-        version: 3,
+        version: 4,
         type: "worker.heartbeat",
         requestId,
         payload: {
@@ -68,6 +69,7 @@ describe("worker protocol", () => {
           allocatedWorkspaces: 0,
           egress: { enforced: true, revision: 0 },
           storage: { enforced: true, fsType: "xfs", totalBytes: 10, freeBytes: 5 },
+          modelRelay: { enabled: false, port: null, listening: false },
           observedAt: "2026-10-06T08:00:00.000Z",
           ...payload,
         },
@@ -88,7 +90,7 @@ describe("worker protocol", () => {
 
     const storageSet = (diskLimitBytes: unknown) =>
       ControlToWorkerMessageSchema.safeParse({
-        version: 3,
+        version: 4,
         type: "workspace.storage.set",
         requestId,
         payload: { workspaceId, diskLimitBytes },
@@ -99,7 +101,7 @@ describe("worker protocol", () => {
     }
     const ensure = (storage: unknown) =>
       ControlToWorkerMessageSchema.safeParse({
-        version: 3,
+        version: 4,
         type: "workspace.ensure",
         requestId,
         payload: {
@@ -107,6 +109,7 @@ describe("worker protocol", () => {
           runtimeImage: "agent-runtime:test",
           resources: { cpuCount: 2, memoryBytes: 1024, pidsLimit: 64 },
           storage,
+          modelGateway: null,
         },
       }).success;
     expect(ensure({ diskLimitBytes: 20 * 1024 ** 3 })).toBe(true);
@@ -127,7 +130,7 @@ describe("worker protocol", () => {
 
   it("rejects a Worker claiming more allocations than its capacity", () => {
     const result = WorkerToControlMessageSchema.safeParse({
-      version: 3,
+      version: 4,
       type: "worker.hello",
       requestId,
       payload: {
@@ -156,7 +159,7 @@ describe("worker protocol", () => {
 
   it("does not accept host paths or container ids in infrastructure commands", () => {
     const result = ControlToWorkerMessageSchema.safeParse({
-      version: 3,
+      version: 4,
       type: "workspace.delete",
       requestId,
       payload: {
@@ -171,7 +174,7 @@ describe("worker protocol", () => {
 
   it("accepts a correlated response without exposing infrastructure details", () => {
     const parsed = WorkerToControlMessageSchema.parse({
-      version: 3,
+      version: 4,
       type: "response.ok",
       requestId,
       payload: {
@@ -191,7 +194,7 @@ describe("worker protocol", () => {
   it("accepts a bounded authoritative recovery command and typed inventory", () => {
     expect(
       ControlToWorkerMessageSchema.parse({
-        version: 3,
+        version: 4,
         type: "worker.reconcile",
         requestId,
         payload: {
@@ -209,7 +212,7 @@ describe("worker protocol", () => {
 
     expect(
       WorkerToControlMessageSchema.parse({
-        version: 3,
+        version: 4,
         type: "response.ok",
         requestId,
         payload: {
@@ -227,6 +230,7 @@ describe("worker protocol", () => {
               },
             ],
             issues: [],
+            modelKeys: [],
             observedAt: "2026-09-10T08:00:00.000Z",
           },
         },
@@ -242,7 +246,7 @@ describe("worker protocol", () => {
     };
     expect(
       ControlToWorkerMessageSchema.safeParse({
-        version: 3,
+        version: 4,
         type: "worker.reconcile",
         requestId,
         payload: { assignments: [assignment, assignment] },
@@ -252,7 +256,7 @@ describe("worker protocol", () => {
 
   it("rejects stack traces and arbitrary fields in protocol errors", () => {
     const result = WorkerToControlMessageSchema.safeParse({
-      version: 3,
+      version: 4,
       type: "response.error",
       requestId,
       payload: {

@@ -1,5 +1,6 @@
 import type {
   Architecture,
+  ModelRelayStatus,
   WorkerCapabilities,
   WorkerEgressStatus,
   WorkerStorageStatus,
@@ -39,6 +40,8 @@ export interface WorkerRecord {
   };
   /** Last reported quota filesystem state (specs.md Phase 15). */
   storage: WorkerStorageStatus & { checkedAt: Date | null };
+  /** Last reported model relay state (specs.md Phase 16). */
+  modelRelay: ModelRelayStatus;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -71,6 +74,9 @@ interface WorkerRow {
   storage_total_bytes: string | null;
   storage_free_bytes: string | null;
   storage_checked_at: Date | null;
+  model_relay_enabled: boolean;
+  model_relay_port: number | null;
+  model_relay_listening: boolean;
   created_at: Date;
   updated_at: Date;
 }
@@ -105,6 +111,11 @@ function mapWorker(row: WorkerRow): WorkerRecord {
       totalBytes: row.storage_total_bytes === null ? null : Number(row.storage_total_bytes),
       freeBytes: row.storage_free_bytes === null ? null : Number(row.storage_free_bytes),
       checkedAt: row.storage_checked_at,
+    },
+    modelRelay: {
+      enabled: row.model_relay_enabled,
+      port: row.model_relay_port,
+      listening: row.model_relay_listening,
     },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -165,6 +176,7 @@ export function createWorkerRepository(database: DatabaseClient) {
       systemResources: WorkerSystemResources;
       egress: WorkerEgressStatus;
       storage: WorkerStorageStatus;
+      modelRelay: ModelRelayStatus;
       receivedAt: Date;
     }): Promise<boolean> {
       const capabilities = database.json(input.capabilities);
@@ -185,6 +197,9 @@ export function createWorkerRepository(database: DatabaseClient) {
             allocated_workspaces = ${input.allocatedWorkspaces},
             cpu_capacity = ${cpuCapacity},
             memory_bytes = ${input.systemResources.memoryBytes},
+            model_relay_enabled = ${input.modelRelay.enabled},
+            model_relay_port = ${input.modelRelay.port},
+            model_relay_listening = ${input.modelRelay.listening},
             last_heartbeat_at = ${input.receivedAt},
             updated_at = ${input.receivedAt}
           where id = ${input.workerId}
@@ -209,6 +224,7 @@ export function createWorkerRepository(database: DatabaseClient) {
       allocatedWorkspaces: number;
       egress: WorkerEgressStatus;
       storage: WorkerStorageStatus;
+      modelRelay: ModelRelayStatus;
       workspaceDisk: readonly WorkspaceDiskUsage[];
       receivedAt: Date;
     }): Promise<{ ignoredDiskSamples: number } | null> {
@@ -218,6 +234,9 @@ export function createWorkerRepository(database: DatabaseClient) {
           set
             status = 'ONLINE',
             allocated_workspaces = ${input.allocatedWorkspaces},
+            model_relay_enabled = ${input.modelRelay.enabled},
+            model_relay_port = ${input.modelRelay.port},
+            model_relay_listening = ${input.modelRelay.listening},
             last_heartbeat_at = ${input.receivedAt},
             updated_at = ${input.receivedAt}
           where id = ${input.workerId}
@@ -246,6 +265,7 @@ export function createWorkerRepository(database: DatabaseClient) {
           egress_checked_at, storage_enforced, storage_fs_type,
           storage_total_bytes::text as storage_total_bytes,
           storage_free_bytes::text as storage_free_bytes, storage_checked_at,
+          model_relay_enabled, model_relay_port, model_relay_listening,
           created_at, updated_at
         from workers
         order by id asc

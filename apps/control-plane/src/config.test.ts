@@ -220,3 +220,42 @@ describe("Phase 11 OAuth2 UserInfo configuration", () => {
     ).toThrow("provider IDs must be distinct");
   });
 });
+
+describe("model gateway configuration (Phase 16.8)", () => {
+  const GATEWAY = {
+    MODEL_GATEWAY_ADMIN_URL: "http://127.0.0.1:4400",
+    MODEL_GATEWAY_MASTER_KEY: "sk-0123456789abcdef0123456789abcdef",
+    MODEL_GATEWAY_CATALOG_FILE: "/etc/agent-runtime/catalog.json",
+  };
+
+  it("is off by default and parses the full configuration", () => {
+    expect(parseServerConfig(REQUIRED_ENV)).toMatchObject({
+      MODEL_GATEWAY_ADMIN_URL: "",
+      MODEL_GATEWAY_USER_BUDGET_USD: null,
+      MODEL_GATEWAY_BUDGET_DURATION: "30d",
+      MODEL_GATEWAY_KEY_RPM: 60,
+      MODEL_GATEWAY_KEY_TPM: null,
+    });
+    expect(
+      parseServerConfig({ ...REQUIRED_ENV, ...GATEWAY, MODEL_GATEWAY_USER_BUDGET_USD: "25", MODEL_GATEWAY_KEY_TPM: "100000" }),
+    ).toMatchObject({ MODEL_GATEWAY_USER_BUDGET_USD: 25, MODEL_GATEWAY_KEY_TPM: 100_000 });
+  });
+
+  it.each([
+    { MODEL_GATEWAY_MASTER_KEY: "sk-x" },
+    { MODEL_GATEWAY_MASTER_KEY: "not-a-litellm-key-0123456789" },
+    { MODEL_GATEWAY_CATALOG_FILE: "catalog.json" },
+    { MODEL_GATEWAY_ADMIN_URL: "http://gateway.internal:4000" },
+    { MODEL_GATEWAY_ADMIN_URL: "https://user:pass@gateway.internal" },
+    { MODEL_GATEWAY_USER_BUDGET_USD: "-1" },
+    { MODEL_GATEWAY_BUDGET_DURATION: "monthly" },
+    { MODEL_GATEWAY_KEY_TPM: "1.5" },
+  ])("rejects an unsafe or invalid gateway setting: %o", (override) => {
+    expect(() => parseServerConfig({ ...REQUIRED_ENV, ...GATEWAY, ...override })).toThrow();
+  });
+
+  it("rejects a partial configuration instead of silently disabling it", () => {
+    expect(() => parseServerConfig({ ...REQUIRED_ENV, MODEL_GATEWAY_MASTER_KEY: GATEWAY.MODEL_GATEWAY_MASTER_KEY })).toThrow();
+    expect(() => parseServerConfig({ ...REQUIRED_ENV, MODEL_GATEWAY_ADMIN_URL: GATEWAY.MODEL_GATEWAY_ADMIN_URL })).toThrow();
+  });
+});

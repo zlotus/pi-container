@@ -127,6 +127,14 @@ class FakeDocker {
         Id: container.id,
         Names: [`/${name}`],
         Labels: container.inspection.Config.Labels,
+        NetworkSettings: {
+          Networks: Object.fromEntries(
+            Object.keys(container.inspection.NetworkSettings.Networks).map((network) => [
+              network,
+              { IPAddress: "172.22.0.2", Gateway: "172.22.0.1" },
+            ]),
+          ),
+        },
       }));
   }
 
@@ -221,6 +229,7 @@ class FakeNetwork {
       Attachable: false,
       Labels: this.labels,
       Options: this.options,
+      IPAM: { Config: [{ Subnet: "172.22.0.0/16", Gateway: "172.22.0.1" }] },
     } as Docker.NetworkInspectInfo;
   }
 
@@ -1222,5 +1231,67 @@ describe("Docker Workspace Runtime disk quotas and container limits (Phase 15)",
     await expect(runtime.setDiskLimit(WORKSPACE_ID, 6 * GIB)).rejects.toMatchObject<
       Partial<WorkspaceRuntimeError>
     >({ code: "STORAGE_QUOTA_UNENFORCED" });
+  });
+});
+
+describe("Docker Workspace Runtime model access (Phase 16.4, 16.5)", () => {
+  const catalog = {
+    providerId: "platform",
+    defaultModel: "deepseek-v4-flash",
+    models: [{ id: "deepseek-v4-flash", api: "openai-completions" as const }],
+  };
+
+  it("writes the provider with the bridge gateway address only while stopped", async () => {
+    const { root, config, docker, runtime } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    await expect(runtime.configureModelProvider(WORKSPACE_ID, catalog, 3101)).resolves.toBe("applied");
+    const pi = join(root, "workspaces", WORKSPACE_ID, "pi");
+    const models = JSON.parse(await readFile(join(pi, "models.json"), "utf8"));
+    expect(models.providers.platform.baseUrl).toBe("http://172.22.0.1:3101/v1");
+    const metadataFile = join(root, "workspaces", WORKSPACE_ID, "metadata", "managed.json");
+    expect(JSON.parse(await readFile(metadataFile, "utf8")).modelProviderId).toBe("platform");
+
+    await runtime.start(WORKSPACE_ID);
+    await expect(runtime.configureModelProvider(WORKSPACE_ID, null, 3101)).resolves.toBe("unchanged_running");
+    expect(JSON.parse(await readFile(join(pi, "models.json"), "utf8")).providers.platform).toBeDefined();
+
+    await runtime.stop(WORKSPACE_ID);
+    // The gateway was switched off: the remembered entry is removed.
+    await expect(runtime.configureModelProvider(WORKSPACE_ID, null, 3101)).resolves.toBe("removed");
+    expect(JSON.parse(await readFile(join(pi, "models.json"), "utf8")).providers.platform).toBeUndefined();
+    expect(JSON.parse(await readFile(metadataFile, "utf8")).modelProviderId).toBeUndefined();
+    void docker;
+  });
+
+  it("lists only running managed Workspaces on their own network as relay endpoints", async () => {
+    const { config, docker, runtime } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    await expect(runtime.relayEndpoints()).resolves.toEqual([]);
+    await runtime.start(WORKSPACE_ID);
+    await expect(runtime.relayEndpoints()).resolves.toEqual([
+      { workspaceId: WORKSPACE_ID, gatewayAddress: "172.22.0.1", containerAddress: "172.22.0.2" },
+    ]);
+
+    // A container that claims the Workspace label under another name is not an endpoint.
+    const container = docker.containers.get(`agent-runtime-${WORKSPACE_ID}`);
+    if (container === undefined) throw new Error("container fixture missing");
+    docker.containers.delete(`agent-runtime-${WORKSPACE_ID}`);
+    docker.containers.set("impostor", container);
+    await expect(runtime.relayEndpoints()).resolves.toEqual([]);
+    docker.containers.delete("impostor");
+    docker.containers.set(`agent-runtime-${WORKSPACE_ID}`, container);
+
+    // Labels from another Worker are not endpoints either.
+    container.inspection.Config.Labels = { ...container.inspection.Config.Labels, worker_id: "worker-02" };
+    await expect(runtime.relayEndpoints()).resolves.toEqual([]);
+  });
+
+  it("returns the private metadata directory only for managed Workspaces", async () => {
+    const { root, config, runtime } = await fixture();
+    await expect(runtime.modelKeyDirectory(WORKSPACE_ID)).rejects.toMatchObject({ code: "WORKSPACE_NOT_MANAGED" });
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    await expect(runtime.modelKeyDirectory(WORKSPACE_ID)).resolves.toBe(
+      join(root, "workspaces", WORKSPACE_ID, "metadata"),
+    );
   });
 });

@@ -40,6 +40,12 @@ export const REDACT_PATHS = [
   "*.code_verifier",
   "body",
   "*.body",
+  // Model gateway virtual keys and master key (specs.md Phase 16.9).
+  "secret",
+  "*.secret",
+  "payload.secret",
+  "masterKey",
+  "*.masterKey",
 ];
 
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

@@ -1,0 +1,44 @@
+# Model gateway (LiteLLM Proxy 1.104.1) for the Containerized Agent Runtime Platform.
+# specs.md Phase 16.3. Real upstream keys come only from the gateway container's environment
+# (env_file, mode 0600); this file contains none. Model names must match the platform catalog
+# (catalog.example.json) one to one.
+#
+# Every model uses the generic `litellm_proxy/` route: it forwards the OpenAI-compatible request
+# unchanged, which Pi's DeepSeek thinking format needs (`thinking`, `reasoning_effort`, tools and
+# replayed `reasoning_content`). The provider-specific routes rewrite it: `deepseek/` drops
+# `reasoning_effort`, `openai/` rejects `thinking` (Phase 16.15). Xiaomi MiMo is deferred to
+# Phase 18 (verified notes in specs.md Phase 16.15).
+# This route has no built-in prices, so `model_info` carries them (USD per token).
+model_list:
+  - model_name: deepseek-v4-flash
+    litellm_params:
+      model: litellm_proxy/deepseek-v4-flash
+      api_base: https://api.deepseek.com
+      api_key: os.environ/DEEPSEEK_API_KEY
+    model_info:
+      input_cost_per_token: 3.0e-07
+      output_cost_per_token: 1.2e-06
+      cache_read_input_token_cost: 6.0e-09
+  - model_name: deepseek-v4-pro
+    litellm_params:
+      model: litellm_proxy/deepseek-v4-pro
+      api_base: https://api.deepseek.com
+      api_key: os.environ/DEEPSEEK_API_KEY
+    model_info:
+      input_cost_per_token: 1.32e-06
+      output_cost_per_token: 3.96e-06
+      cache_read_input_token_cost: 4.4e-08
+
+litellm_settings:
+  # Never rewrite or drop request parameters silently.
+  drop_params: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  # Models come only from this file.
+  store_model_in_db: false
+  # Spend logs keep usage only, never prompts or responses.
+  store_prompts_in_spend_logs: false
+  # Clients must not supply upstream credentials or base URLs.
+  allow_client_side_credentials: false

@@ -92,3 +92,14 @@ export {
   type WorkerStatus,
 } from "./workers.js";
 export { type AdminWorkspaceRecord } from "./workspaces.js";
+export {
+  type BeginModelKeyIssueResult,
+  type ModelKeyIssue,
+  type ModelKeyIssueReason,
+  type ModelKeyOverview,
+  type ModelKeyRevokeReason,
+  type ModelKeyStatus,
+  modelKeyRetryDelaySeconds,
+  type PendingModelKeyRevocation,
+  type WorkspaceModelKeyState,
+} from "./model-keys.js";

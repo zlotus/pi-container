@@ -77,6 +77,7 @@ export interface TestControlPlaneDependencies extends ControlPlaneDependencies {
 export async function createTestDependencies(
   initialWorkspaces: WorkspaceRecord[] = [],
 ): Promise<TestControlPlaneDependencies> {
+  const modelBudgets = new Map<string, number | null>();
   const users: UserRecord[] = [
     {
       id: USER_A_ID,
@@ -175,6 +176,7 @@ export async function createTestDependencies(
         freeBytes: null,
         checkedAt: null,
       },
+      modelRelay: { enabled: false, port: null, listening: false },
       createdAt: NOW,
       updatedAt: NOW,
     }),
@@ -485,6 +487,27 @@ export async function createTestDependencies(
             );
           })
           .slice(0, input.limit);
+      },
+      async findUserModelBudget(userId) {
+        const user = users.find((candidate) => candidate.id === userId);
+        return { found: user !== undefined, budgetUsd: user === undefined ? null : (modelBudgets.get(userId) ?? null) };
+      },
+      async setUserModelBudget(input) {
+        const user = users.find((candidate) => candidate.id === input.userId);
+        if (user === undefined) return { found: false, previousUsd: null };
+        const previousUsd = modelBudgets.get(input.userId) ?? null;
+        modelBudgets.set(input.userId, input.budgetUsd);
+        auditEvents.unshift({
+          id: String(auditEvents.length + 1),
+          eventType: "model.budget_changed",
+          actorUserId: input.actorUserId,
+          ownerUserId: input.userId,
+          workspaceId: null,
+          workerId: null,
+          details: { fromUsd: previousUsd, toUsd: input.budgetUsd, requestId: input.requestId },
+          createdAt: NOW,
+        });
+        return { found: true, previousUsd };
       },
       async updateWorkspaceDiskLimit(input) {
         const workspace = workspaces.find(
@@ -1356,7 +1379,7 @@ export async function beginOAuth2Login(app: ReturnType<typeof buildControlPlane>
 
 export function workerHello(workerId: string) {
   return {
-    version: 3,
+    version: 4,
     type: "worker.hello",
     requestId: randomUUID(),
     payload: {
@@ -1381,6 +1404,7 @@ export function workerHello(workerId: string) {
       },
       egress: { enforced: true, revision: 0 },
       storage: { enforced: true, fsType: "xfs", totalBytes: 2 ** 40, freeBytes: 2 ** 39 },
+      modelRelay: { enabled: false, port: null, listening: false },
     },
   };
 }
@@ -1402,7 +1426,7 @@ export function answerEgressApply(
   if (command.type !== "worker.egress.apply") return false;
   socket.send(
     JSON.stringify({
-      version: 3,
+      version: 4,
       type: "response.ok",
       requestId: command.requestId,
       payload: {
@@ -1428,7 +1452,7 @@ export type ReconcileOkResponse = Omit<WorkerOkResponse, "payload"> & {
 
 export function emptyReconciliation(requestId: string): ReconcileOkResponse {
   return {
-    version: 3,
+    version: 4,
     type: "response.ok",
     requestId,
     payload: {
@@ -1436,6 +1460,7 @@ export function emptyReconciliation(requestId: string): ReconcileOkResponse {
       reconciliation: {
         workspaces: [],
         issues: [],
+        modelKeys: [],
         observedAt: NOW.toISOString(),
       },
     },

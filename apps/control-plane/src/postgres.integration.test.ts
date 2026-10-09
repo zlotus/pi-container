@@ -644,6 +644,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         },
         egress: { enforced: true, revision: await currentEgressRevision() },
       storage: STORAGE_ENFORCED,
+      modelRelay: { enabled: false, port: null, listening: false },
         receivedAt: NOW,
       }),
     ).toBe(true);
@@ -703,6 +704,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         },
         egress: { enforced: true, revision: await currentEgressRevision() },
       storage: STORAGE_ENFORCED,
+      modelRelay: { enabled: false, port: null, listening: false },
         receivedAt: NOW,
       }),
     ).toBe(true);
@@ -951,6 +953,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       },
       egress: { enforced: true, revision: await currentEgressRevision() },
       storage: STORAGE_ENFORCED,
+      modelRelay: { enabled: false, port: null, listening: false },
       receivedAt: NOW,
     });
     const workspace = await repository.createWorkspace({
@@ -1091,6 +1094,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         },
         egress: { enforced: true, revision: await currentEgressRevision() },
       storage: STORAGE_ENFORCED,
+      modelRelay: { enabled: false, port: null, listening: false },
         receivedAt: NOW,
       });
     }
@@ -1270,6 +1274,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         systemResources: { logicalCpuCount: 8, memoryBytes: 16 * 1024 ** 3 },
         egress: { enforced: true, revision: await currentEgressRevision() },
       storage: STORAGE_ENFORCED,
+      modelRelay: { enabled: false, port: null, listening: false },
         receivedAt: NOW,
       });
     }
@@ -1527,6 +1532,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         allocatedWorkspaces: 1,
         egress: { enforced, revision: start + 2 },
         storage: STORAGE_ENFORCED,
+        modelRelay: { enabled: false, port: null, listening: false },
         workspaceDisk: [],
         receivedAt: NOW,
       }).then((result) => result !== null);
@@ -1759,6 +1765,7 @@ describeWithPostgres("Phase 15 storage PostgreSQL integration", () => {
         allocatedWorkspaces: 1,
         egress: { enforced: true, revision: 0 },
         storage: { ...STORAGE_ENFORCED, enforced },
+        modelRelay: { enabled: false, port: null, listening: false },
         workspaceDisk: [sample(own.id), sample(foreign.id)],
         receivedAt: NOW,
       });
@@ -1893,6 +1900,7 @@ describeWithPostgres("Phase 15 storage PostgreSQL integration", () => {
         allocatedWorkspaces: 1,
         egress: { enforced: true, revision: 0 },
         storage: { enforced, fsType: "xfs", totalBytes: 100 * GIB, freeBytes: 60 * GIB },
+        modelRelay: { enabled: false, port: null, listening: false },
         workspaceDisk: [usage(ownId), usage(foreignId)],
         receivedAt: NOW,
       });

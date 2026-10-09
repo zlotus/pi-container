@@ -288,6 +288,8 @@ export function registerAdminUserRoutes(app: FastifyInstance, context: RouteCont
     }
     if (result.user.status === "disabled") {
       dependencies.sessionConnections?.closeUser(result.user.id);
+      // Its keys were marked revoking in the same transaction; delete them now.
+      dependencies.modelGateway?.kick();
     }
     reply.header("cache-control", "no-store");
     return { user: publicAdminUser(result.user) };
@@ -383,6 +385,6 @@ export function registerAdminUserRoutes(app: FastifyInstance, context: RouteCont
         .send(errorBody("USER_NOT_FOUND", "User was not found"));
     }
     reply.header("cache-control", "no-store");
-    return { workspaces: workspaces.map(publicWorkspace) };
+    return { workspaces: workspaces.map((workspace) => publicWorkspace(workspace)) };
   });
 }

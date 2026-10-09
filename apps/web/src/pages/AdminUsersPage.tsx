@@ -4,6 +4,7 @@ import { api, ApiError, apiErrorText } from "../api.js";
 import { AuthLocksPanel } from "../components/AuthLocksPanel.js";
 import { Modal, useConfirm, useTextPrompt } from "../components/Modal.js";
 import { RelativeTime } from "../components/RelativeTime.js";
+import { UserModelPanel } from "../components/UserModelPanel.js";
 import { formatAbsoluteTime, roleLabel, userStatusLabel, workspaceStateLabel } from "../labels.js";
 import type {
   AdminUser,
@@ -477,6 +478,7 @@ export function AdminUsersPage({
                             <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void revokeManagedSessions(user)}>撤销会话</button>
                             <button className="secondary" disabled={pendingUserId === user.id} onClick={() => void toggleManagedWorkspaces(user)}>Workspace 信息</button>
                           </div>
+                          <UserModelPanel session={session} userId={user.id} />
                           {workspaceUserId === user.id ? (
                             <div className="detail-block">
                               <strong>Workspace 信息</strong>
