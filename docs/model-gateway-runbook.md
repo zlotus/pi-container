@@ -30,6 +30,10 @@ LITELLM_ENV_FILE=~/.config/agent-runtime/litellm.env docker compose -f deploy/mo
 
 开发网关监听 `127.0.0.1:4400`（Q8B 的 4000 已被占用）。生产部署模板见 Phase 19。
 
+`config.yaml` 以相对路径挂载，Docker 在**创建**容器时把它解析为绝对路径并记录在容器上。若仓库目录移动或删除
+（例如换用另一个 worktree），`docker start` 会因源文件不存在而失败；在新的仓库目录下执行
+`docker compose -f deploy/model-gateway/compose.yml up -d --force-recreate` 重建容器即可（数据在 `litellm` 库中，不受影响）。
+
 Control Plane：
 
 ```bash

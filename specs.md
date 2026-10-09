@@ -4793,8 +4793,10 @@ LiteLLM + 测试库 + **mock 上游**（本地 HTTP 服务，记录收到的请�
    同时多出平台 provider；两种方式都可用。
 4. 计量：Portal 显示本用户的用量，与网关管理端一致；admin 把该用户预算调到极低值后，下一次请求被拒绝并在 pi-web
    中显示原因；恢复后可用；Audit 有 `model.budget_changed`。
-5. 吊销：(a) 禁用用户 → 该用户运行中 Workspace 的 Agent 下一次模型请求失败（`MODEL_KEY_UNAVAILABLE`），网关中
-   对应 key 已删除；重新启用后再次可用。(b) admin 撤销该用户 session → 浏览器立即失去 Workspace 访问，正在运行的
+5. 吊销：(a) 禁用用户 → 浏览器中的 pi-web 立即断开（Phase 9–12 的 fail-closed，预期现象）；在宿主机上
+   `docker exec agent-runtime-<workspaceId> curl -s -X POST http://<bridge 网关>:3101/v1/chat/completions -d '{}'`
+   返回 403 `MODEL_KEY_UNAVAILABLE`，`model_keys` 中该用户的 key 为 `revoked`（`user_disabled`），Audit 有
+   `model.key_revoke_requested` / `model.key_revoked`；重新启用后 30 秒内签发新 key，再次可用。(b) admin 撤销该用户 session → 浏览器立即失去 Workspace 访问，正在运行的
    Agent 任务继续可用，key 不变；admin 执行“轮换模型凭据” → 网关中旧 key 删除、新 key 生效，Agent 任务继续可用。
    (c) 删除 Workspace → 对应 key 删除。Audit 均有记录。
 6. 网关不可用：`docker compose stop`，启动 Workspace 仍成功、Portal 显示平台模型暂不可用；此时禁用一个用户，Admin
