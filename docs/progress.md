@@ -17,7 +17,7 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
 
 ## Current Baseline
 
-- Phase 16（已实现，待人工验收；分支 `phase-16-model-gateway`）：模型网关与凭据托管。LiteLLM Proxy 1.104.1
+- Phase 16（已验收，`v1.0.0-alpha.4`，2026-10-09 负责人人工验收通过）：模型网关与凭据托管。LiteLLM Proxy 1.104.1
   （pin digest，独立 `litellm` 库）持有 DeepSeek 上游 key；Control Plane 以 master key 为每个 Workspace 签发
   `llm_api` 虚拟 key（按平台用户计量与预算），只交给 Worker。**Worker 模型中继**按 TCP 连接的（本地地址、对端地址）
   识别 Workspace，只转发推理路径、丢弃客户端认证头并注入虚拟 key；虚拟 key 不进入容器，网关对 Workspace 网络不可达

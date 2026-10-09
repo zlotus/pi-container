@@ -19,6 +19,10 @@ Phase 14（`specs.md` 第 64 节 Phase 14）的运维说明：Workspace 默认�
 
 Workspace bridge 名为 `arw-<Workspace UUID 去掉连字符后的前 11 位>`（agent-runtime workspace）。
 
+Phase 16 起，配置了 `WORKER_MODEL_GATEWAY_URL` 的 Worker 在同一张表中增加平台模型中继的受限例外：
+`ws_prerouting` 只放行发往宿主机的中继 TCP 端口（默认 3101），新增 `relay_input` 链丢弃来自非 `arw-*`
+接口的该端口连接；模型网关地址加入保护地址。详见 `docs/model-gateway-runbook.md`。
+
 ## 2. 配置
 
 Worker：

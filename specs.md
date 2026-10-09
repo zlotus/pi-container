@@ -4299,7 +4299,7 @@ API 与 Portal：
 
 ## Phase 16：模型网关与凭据托管
 
-状态：**已实现，待人工验收（2026-10-08）**，分支 `phase-16-model-gateway`；运维见 `docs/model-gateway-runbook.md`。本 Phase 只接入 DeepSeek，Xiaomi MiMo 延后到 Phase 18（负责人 2026-10-08 决定，16.17）。实现中的调整见 16.16。Q1–Q9 全部确认（Q4 改为“session 撤销不改变 key”，16.14）。方向见第 43.1 节与 `docs/v1-roadmap.md` Phase 16、决策 D4、D7。
+状态：**已验收（2026-10-09）**，经 PR #4 合入 master，tag `v1.0.0-alpha.4`；运维见 `docs/model-gateway-runbook.md`。本 Phase 只接入 DeepSeek，Xiaomi MiMo 延后到 Phase 18（负责人 2026-10-08 决定，16.17）。实现中的调整见 16.16。Q1–Q9 全部确认（Q4 改为“session 撤销不改变 key”，16.14）。方向见第 43.1 节与 `docs/v1-roadmap.md` Phase 16、决策 D4、D7。
 
 目标：用户在 Workspace 中无需自己填写 API Key 即可使用平台提供的模型；真实上游 key 只存在于模型网关；每次调用
 按平台用户计量，可设预算；用户禁用、Workspace 删除时对应凭据失效，session 撤销后被撤销者无法再使用该凭据（16.6）；Workspace 无法访问网关的
