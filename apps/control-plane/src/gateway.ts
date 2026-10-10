@@ -29,6 +29,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { z } from "zod";
 
+import type { PlatformMetrics } from "./metrics/platform-metrics.js";
 import type { WorkspaceSessionExchange } from "./session-exchange.js";
 import type { SessionConnectionRegistry } from "./session-connections.js";
 
@@ -52,6 +53,7 @@ export interface WorkspaceGatewayDependencies {
   sessionConnections?: SessionConnectionRegistry;
   now?: () => Date;
   log?: Logger;
+  metrics?: PlatformMetrics;
 }
 
 interface AuthorizedWorkspace {
@@ -280,6 +282,7 @@ async function handleExchange(
     (request.headers["sec-fetch-dest"] !== undefined &&
       request.headers["sec-fetch-dest"] !== "document")
   ) {
+    dependencies.metrics?.recordExchange("invalid");
     sendJsonError(response, 400, "INVALID_EXCHANGE", "Invalid session exchange");
     return;
   }
@@ -287,10 +290,10 @@ async function handleExchange(
   try {
     parsed = ExchangeBodySchema.safeParse(await readExchangeBody(request));
   } catch {
-    sendJsonError(response, 400, "INVALID_EXCHANGE", "Invalid session exchange");
-    return;
+    parsed = null;
   }
-  if (!parsed.success) {
+  if (parsed === null || !parsed.success) {
+    dependencies.metrics?.recordExchange("invalid");
     sendJsonError(response, 400, "INVALID_EXCHANGE", "Invalid session exchange");
     return;
   }
@@ -301,6 +304,7 @@ async function handleExchange(
     currentTime,
   );
   if (record === null) {
+    dependencies.metrics?.recordExchange("expired");
     sendJsonError(response, 401, "INVALID_EXCHANGE", "Session exchange is invalid or expired");
     return;
   }
@@ -318,9 +322,11 @@ async function handleExchange(
     workspace === null ||
     workspace.state !== "RUNNING"
   ) {
+    dependencies.metrics?.recordExchange("expired");
     sendJsonError(response, 401, "INVALID_EXCHANGE", "Session exchange is invalid or expired");
     return;
   }
+  dependencies.metrics?.recordExchange("ok");
   const cookieName = dependencies.secureCookies
     ? "__Host-platform-session"
     : "platform-session";
@@ -358,6 +364,17 @@ export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies
     if (dependencies.log !== undefined) {
       observeWorkspaceHttp(dependencies.log, request, response, { requestId, workspaceId });
     }
+    // Header time, not total time: SSE and downloads would only measure their own lifetime.
+    const startedAt = performance.now();
+    let upstreamHeaderSeconds: number | null = null;
+    response.once("close", () => {
+      if (!response.headersSent) return;
+      dependencies.metrics?.recordGatewayResponse(
+        upstreamHeaderSeconds === null ? "platform" : "upstream",
+        response.statusCode,
+        upstreamHeaderSeconds ?? (performance.now() - startedAt) / 1_000,
+      );
+    });
     void (async () => {
       if (workspaceId === null) {
         sendJsonError(response, 404, "WORKSPACE_NOT_FOUND", "Workspace was not found");
@@ -383,6 +400,9 @@ export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies
         publicOrigin,
         onConnected: (disconnect) =>
           trackSessionConnection(dependencies, authorized, disconnect),
+        onUpstreamResponse: () => {
+          upstreamHeaderSeconds = (performance.now() - startedAt) / 1_000;
+        },
       });
     })().catch((error: unknown) => {
       dependencies.log?.error({ err: error, requestId, workspaceId }, "workspace gateway request failed");
@@ -392,18 +412,32 @@ export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies
   server.on("upgrade", (request, socket, head) => {
     const requestId = newRequestId();
     const workspaceId = workspaceIdFromHost(request.headers.host, base);
-    const observed = dependencies.log === undefined
+    const logged = dependencies.log === undefined
       ? undefined
       : observeWorkspaceUpgrade(dependencies.log, request, socket, { requestId, workspaceId });
+    const metrics = dependencies.metrics;
+    const observed = {
+      rejected(statusCode: number): void {
+        logged?.rejected(statusCode);
+        metrics?.recordUpgrade("rejected", statusCode);
+      },
+      connected(): void {
+        logged?.connected();
+        if (metrics === undefined) return;
+        metrics.recordUpgrade("connected", 101);
+        metrics.gatewayWebSockets.inc();
+        socket.once("close", () => metrics.gatewayWebSockets.dec());
+      },
+    };
     void (async () => {
       if (workspaceId === null) {
-        observed?.rejected(404);
+        observed.rejected(404);
         rejectUpgrade(socket, 404, "Workspace was not found");
         return;
       }
       const expectedOrigin = workspaceOrigin(workspaceId, base);
       if (request.headers.origin !== expectedOrigin) {
-        observed?.rejected(403);
+        observed.rejected(403);
         rejectUpgrade(socket, 403, "WebSocket Origin is not allowed");
         return;
       }
@@ -413,7 +447,7 @@ export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies
         dependencies,
       );
       if (authorized === null) {
-        observed?.rejected(404);
+        observed.rejected(404);
         rejectUpgrade(socket, 404, "Workspace was not found or is unavailable");
         return;
       }
@@ -421,13 +455,14 @@ export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies
         target: authorized.workerGatewayBaseUrl,
         requestHeaders: workerRequestHeaders(request, authorized, expectedOrigin, requestId),
         onConnected: (disconnect) => {
-          observed?.connected();
+          observed.connected();
           return trackSessionConnection(dependencies, authorized, disconnect);
         },
+        onRejected: (statusCode) => metrics?.recordUpgrade("rejected", statusCode),
       });
     })().catch((error: unknown) => {
       dependencies.log?.error({ err: error, requestId, workspaceId }, "workspace gateway upgrade failed");
-      observed?.rejected(503);
+      observed.rejected(503);
       rejectUpgrade(socket, 503, "Workspace Gateway is unavailable");
     });
   });

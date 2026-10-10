@@ -3,7 +3,7 @@ import { generateOpaqueToken, hashOpaqueToken } from "@agent-runtime/auth";
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
-import type { RouteContext } from "../context.js";
+import { loginProtocol, type RouteContext } from "../context.js";
 import type { ExternalIdentityProfile } from "../external-auth.js";
 import { errorBody, parseCookie, sessionCookie } from "../http.js";
 
@@ -42,6 +42,7 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
     clientAddress,
     sendRateLimited,
     sendThrottleUnavailable,
+    recordThrottleHits,
   } = context;
   const guard = dependencies.loginGuard;
 
@@ -62,10 +63,10 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
         now(),
       );
       if (lockedUntil !== null) {
-        sendRateLimited(reply, lockedUntil);
+        sendRateLimited(reply, lockedUntil, "sso_start", protocol);
         return false;
       }
-      await dependencies.store.recordAuthThrottleHits({
+      await recordThrottleHits({
         hits: [guard.ssoStartHit(address)],
         now: now(),
         audit: authenticationAudit(request, protocol, providerId),
@@ -79,14 +80,18 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
   }
 
   /** A locked address is turned away before its callback consumes a transaction. */
-  async function admitCallback(request: FastifyRequest, reply: FastifyReply): Promise<boolean> {
+  async function admitCallback(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    protocol: "OIDC" | "OAUTH2",
+  ): Promise<boolean> {
     try {
       const lockedUntil = await dependencies.store.findAuthLock(
         guard.addressKeys(clientAddress(request)),
         now(),
       );
       if (lockedUntil === null) return true;
-      sendRateLimited(reply, lockedUntil);
+      sendRateLimited(reply, lockedUntil, "sso_callback", protocol);
       return false;
     } catch (error) {
       request.log.error({ err: error }, "login throttle unavailable");
@@ -103,7 +108,7 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
     providerId: string,
   ): Promise<boolean> {
     try {
-      await dependencies.store.recordAuthThrottleHits({
+      await recordThrottleHits({
         hits: [guard.addressFailureHit(clientAddress(request))],
         now: now(),
         audit: authenticationAudit(request, protocol, providerId),
@@ -158,7 +163,9 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
         input.providerId,
       ),
     });
+    const protocol = loginProtocol(input.protocol);
     if (result.outcome === "UNKNOWN_IDENTITY") {
+      context.metrics.recordLoginFailure(protocol, "identity_not_bound");
       return input.reply
         .code(403)
         .send(
@@ -169,6 +176,7 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
         );
     }
     if (result.outcome === "PROVISIONING_NOT_ALLOWED") {
+      context.metrics.recordLoginFailure(protocol, "provisioning_not_allowed");
       return input.reply
         .code(403)
         .send(
@@ -179,6 +187,7 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
         );
     }
     if (result.outcome === "USER_DISABLED") {
+      context.metrics.recordLoginFailure(protocol, "user_disabled");
       return input.reply
         .code(403)
         .send(
@@ -188,6 +197,7 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
           ),
         );
     }
+    context.metrics.recordLogin(protocol, "success");
     input.reply.header("set-cookie", [
       input.clearedTransactionCookie,
       sessionCookie(
@@ -264,7 +274,7 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
         .code(404)
         .send(errorBody("OIDC_DISABLED", "OIDC login is not enabled"));
     }
-    if (!(await admitCallback(request, reply))) {
+    if (!(await admitCallback(request, reply, "OIDC"))) {
       return reply;
     }
     const clearedTransactionCookie = sessionCookie(
@@ -412,7 +422,7 @@ export function registerExternalAuthRoutes(app: FastifyInstance, context: RouteC
         .code(404)
         .send(errorBody("OAUTH2_DISABLED", "OAuth2 login is not enabled"));
     }
-    if (!(await admitCallback(request, reply))) {
+    if (!(await admitCallback(request, reply, "OAUTH2"))) {
       return reply;
     }
     const clearedTransactionCookie = sessionCookie(

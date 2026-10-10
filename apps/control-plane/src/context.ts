@@ -25,6 +25,12 @@ import {
   retryAfterSeconds,
 } from "./login-guard.js";
 import type { ModelAccessService } from "./model-gateway/key-manager.js";
+import {
+  PlatformMetrics,
+  type LoginProtocol,
+  type RateLimitedEndpoint,
+} from "./metrics/platform-metrics.js";
+import { UsageRegistry } from "./metrics/usage-registry.js";
 import type { OAuth2Runtime } from "./oauth2.js";
 import type { OidcRuntime } from "./oidc.js";
 import type { SessionConnectionRegistry } from "./session-connections.js";
@@ -123,6 +129,18 @@ export interface ControlPlaneDependencies {
   now?: () => Date;
   /** Structured logger; request logging is disabled when omitted (unit tests). */
   log?: Logger;
+  /** Prometheus instruments (specs.md Phase 17.4); a private registry when omitted. */
+  metrics?: PlatformMetrics;
+  /** Latest Worker-reported usage (Phase 17.7); an empty registry when omitted. */
+  usage?: UsageRegistry;
+}
+
+type AuditProtocol = AuthenticationAuditMetadata["protocol"];
+
+export function loginProtocol(protocol: AuditProtocol): LoginProtocol {
+  if (protocol === "OIDC") return "oidc";
+  if (protocol === "OAUTH2") return "oauth2";
+  return "local";
 }
 
 export interface AuthContext {
@@ -136,6 +154,14 @@ export interface AuthContext {
  */
 export function createRouteContext(dependencies: ControlPlaneDependencies) {
   const now = dependencies.now ?? (() => new Date());
+  const metrics = dependencies.metrics ?? new PlatformMetrics();
+  const usage =
+    dependencies.usage ??
+    new UsageRegistry(
+      dependencies.workerOfflineAfterMs,
+      (workerId) => dependencies.workerChannel?.isConnected(workerId) ?? false,
+      now,
+    );
   const workspaceBaseUrl = parseWorkspaceBaseUrl(dependencies.workspaceBaseUrl);
   const cookieName = dependencies.secureCookies
     ? "__Host-platform-session"
@@ -162,7 +188,13 @@ export function createRouteContext(dependencies: ControlPlaneDependencies) {
   }
 
   /** One response for every kind of lock, so it does not tell which counter tripped. */
-  function sendRateLimited(reply: FastifyReply, lockedUntil: Date): FastifyReply {
+  function sendRateLimited(
+    reply: FastifyReply,
+    lockedUntil: Date,
+    endpoint: RateLimitedEndpoint,
+    protocol: AuditProtocol,
+  ): FastifyReply {
+    metrics.recordRateLimited(endpoint, loginProtocol(protocol));
     return reply
       .code(429)
       .header("retry-after", String(retryAfterSeconds(lockedUntil, now())))
@@ -194,12 +226,21 @@ export function createRouteContext(dependencies: ControlPlaneDependencies) {
     };
   }
 
+  /** Counts throttle hits; every newly locked counter is one lockout (Phase 17.4). */
+  async function recordThrottleHits(
+    input: Parameters<Phase1Store["recordAuthThrottleHits"]>[0],
+  ): Promise<void> {
+    const locked = await dependencies.store.recordAuthThrottleHits(input);
+    for (const scope of locked) metrics.recordLockout(scope);
+  }
+
   async function recordAuthenticationFailure(
     request: FastifyRequest,
     protocol: AuthenticationAuditMetadata["protocol"],
     providerId: string,
     category: AuthenticationFailureCategory,
   ): Promise<void> {
+    metrics.recordLoginFailure(loginProtocol(protocol), category);
     await dependencies.store.recordAuthenticationFailure({
       category,
       audit: authenticationAudit(request, protocol, providerId),
@@ -284,6 +325,9 @@ export function createRouteContext(dependencies: ControlPlaneDependencies) {
   return {
     dependencies,
     now,
+    metrics,
+    usage,
+    recordThrottleHits,
     workspaceBaseUrl,
     cookieName,
     oidcTransactionCookieName,

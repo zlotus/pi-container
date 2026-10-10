@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import type { ModelGatewayOperation, ModelGatewayResult } from "../metrics/platform-metrics.js";
+
 /**
  * The model gateway's management API as the Control Plane uses it (specs.md Phase 16.3,
  * verified against LiteLLM 1.104.1 in Phase 16.15). Only the Control Plane holds the master
@@ -164,4 +166,31 @@ export class LiteLlmAdminClient implements ModelGatewayAdmin {
       budgetResetAt: info.budget_reset_at ?? null,
     };
   }
+}
+
+/** Counts every management call by operation and result (specs.md Phase 17.4). */
+export function meteredModelGatewayAdmin(
+  admin: ModelGatewayAdmin,
+  record: (operation: ModelGatewayOperation, result: ModelGatewayResult) => void,
+): ModelGatewayAdmin {
+  async function metered<T>(operation: ModelGatewayOperation, call: () => Promise<T>): Promise<T> {
+    try {
+      const value = await call();
+      record(operation, "ok");
+      return value;
+    } catch (error) {
+      record(
+        operation,
+        error instanceof ModelGatewayError && error.code === "MODEL_GATEWAY_UNAVAILABLE" ? "unreachable" : "error",
+      );
+      throw error;
+    }
+  }
+  return {
+    ensureUser: (userId, budget) => metered("ensure_user", () => admin.ensureUser(userId, budget)),
+    generateKey: (input) => metered("generate_key", () => admin.generateKey(input)),
+    deleteKey: (keyAlias) => metered("delete_key", () => admin.deleteKey(keyAlias)),
+    listModels: () => metered("list_models", () => admin.listModels()),
+    userUsage: (userId) => metered("user_info", () => admin.userUsage(userId)),
+  };
 }

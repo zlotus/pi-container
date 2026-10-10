@@ -52,7 +52,11 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
   }
 
   async function present<T extends Parameters<typeof publicWorkspace>[0]>(workspace: T) {
-    return publicWorkspace(workspace, (await modelAccessOf([workspace])).get(workspace.id));
+    return publicWorkspace(
+      workspace,
+      (await modelAccessOf([workspace])).get(workspace.id),
+      context.usage.workspace(workspace.id, workspace.workerId),
+    );
   }
 
   app.get("/api/workspaces", async (request, reply) => {
@@ -65,7 +69,13 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
     );
     const access = await modelAccessOf(workspaces);
     return {
-      workspaces: workspaces.map((workspace) => publicWorkspace(workspace, access.get(workspace.id))),
+      workspaces: workspaces.map((workspace) =>
+        publicWorkspace(
+          workspace,
+          access.get(workspace.id),
+          context.usage.workspace(workspace.id, workspace.workerId),
+        ),
+      ),
     };
   });
 

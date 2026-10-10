@@ -4,6 +4,8 @@ import {
   type WorkerToControlMessage,
 } from "@agent-runtime/protocol";
 
+import type { PlatformMetrics, WorkerCommandResult } from "./metrics/platform-metrics.js";
+
 interface ChannelSocket {
   readonly readyState: number;
   send(data: string): void;
@@ -18,6 +20,7 @@ type WorkerResponse = Extract<
 interface PendingCommand {
   workerId: string;
   requestType: ControlToWorkerMessage["type"];
+  startedAt: number;
   timer: NodeJS.Timeout;
   resolve: (message: WorkerResponse) => void;
   reject: (error: Error) => void;
@@ -41,7 +44,14 @@ export class WorkerChannel {
   readonly #connections = new Map<string, ChannelSocket>();
   readonly #pending = new Map<string, PendingCommand>();
 
-  constructor(readonly commandTimeoutMs: number) {}
+  constructor(
+    readonly commandTimeoutMs: number,
+    readonly metrics?: PlatformMetrics,
+  ) {}
+
+  #record(command: string, result: WorkerCommandResult, startedAt: number): void {
+    this.metrics?.recordWorkerCommand(command, result, (performance.now() - startedAt) / 1_000);
+  }
 
   isConnected(workerId: string): boolean {
     return this.#connections.get(workerId)?.readyState === 1;
@@ -68,6 +78,7 @@ export class WorkerChannel {
     for (const [requestId, pending] of this.#pending) {
       if (pending.workerId !== workerId) continue;
       clearTimeout(pending.timer);
+      this.#record(pending.requestType, "connection_closed", pending.startedAt);
       pending.reject(
         new WorkerChannelError(
           "WORKER_CONNECTION_CLOSED",
@@ -84,7 +95,9 @@ export class WorkerChannel {
   ): Promise<WorkerResponse> {
     const parsed = ControlToWorkerMessageSchema.parse(message);
     const socket = this.#connections.get(workerId);
+    const startedAt = performance.now();
     if (socket === undefined || socket.readyState !== 1) {
+      this.#record(parsed.type, "not_connected", startedAt);
       return Promise.reject(
         new WorkerChannelError(
           "WORKER_NOT_CONNECTED",
@@ -104,6 +117,7 @@ export class WorkerChannel {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(parsed.requestId);
+        this.#record(parsed.type, "timeout", startedAt);
         reject(
           new WorkerChannelError(
             "WORKER_COMMAND_TIMEOUT",
@@ -114,6 +128,7 @@ export class WorkerChannel {
       this.#pending.set(parsed.requestId, {
         workerId,
         requestType: parsed.type,
+        startedAt,
         timer,
         resolve,
         reject,
@@ -123,6 +138,7 @@ export class WorkerChannel {
       } catch {
         clearTimeout(timer);
         this.#pending.delete(parsed.requestId);
+        this.#record(parsed.type, "connection_closed", startedAt);
         reject(
           new WorkerChannelError(
             "WORKER_CONNECTION_CLOSED",
@@ -140,6 +156,7 @@ export class WorkerChannel {
     if (pending.requestType !== message.payload.requestType) {
       clearTimeout(pending.timer);
       this.#pending.delete(message.requestId);
+      this.#record(pending.requestType, "mismatch", pending.startedAt);
       pending.reject(
         new WorkerChannelError(
           "WORKER_RESPONSE_MISMATCH",
@@ -151,6 +168,12 @@ export class WorkerChannel {
 
     clearTimeout(pending.timer);
     this.#pending.delete(message.requestId);
+    if (message.type === "response.error") {
+      this.#record(pending.requestType, "error", pending.startedAt);
+      this.metrics?.recordWorkerCommandError(pending.requestType, message.payload.code);
+    } else {
+      this.#record(pending.requestType, "ok", pending.startedAt);
+    }
     pending.resolve(message);
     return true;
   }

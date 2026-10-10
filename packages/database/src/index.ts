@@ -91,6 +91,7 @@ export {
   type WorkerRecord,
   type WorkerStatus,
 } from "./workers.js";
+export { type MetricsSnapshot } from "./metrics.js";
 export { type AdminWorkspaceRecord } from "./workspaces.js";
 export {
   type BeginModelKeyIssueResult,

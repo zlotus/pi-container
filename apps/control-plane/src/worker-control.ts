@@ -7,6 +7,8 @@ import {
 import type { Logger } from "@agent-runtime/logging";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 
+import type { PlatformMetrics } from "./metrics/platform-metrics.js";
+import type { UsageRegistry } from "./metrics/usage-registry.js";
 import type { WorkerChannel } from "./worker-channel.js";
 
 export type WorkerControlStore = Pick<
@@ -14,6 +16,7 @@ export type WorkerControlStore = Pick<
   | "findWorkerByCredentialHash"
   | "recordWorkerHello"
   | "recordWorkerHeartbeat"
+  | "activeAssignedWorkspaceIds"
 >;
 
 interface WorkerConnectionIdentity {
@@ -37,6 +40,8 @@ export function registerWorkerControlChannel(
     now: () => Date;
     onHelloAccepted?: (workerId: string) => void;
     log?: Logger;
+    metrics?: PlatformMetrics;
+    usage?: UsageRegistry;
   },
 ): void {
   const identities = new WeakMap<FastifyRequest, WorkerConnectionIdentity>();
@@ -166,12 +171,39 @@ export function registerWorkerControlChannel(
                 receivedAt: dependencies.now(),
               });
               if (recorded === null) {
+                dependencies.metrics?.recordHeartbeat(identity.workerId, "rejected");
                 closeForPolicy();
-              } else if (recorded.ignoredDiskSamples > 0) {
+                return;
+              }
+              dependencies.metrics?.recordHeartbeat(identity.workerId, "accepted");
+              if (recorded.ignoredDiskSamples > 0) {
                 dependencies.log?.warn(
                   { workerId: identity.workerId, ignored: recorded.ignoredDiskSamples },
                   "worker reported disk usage for Workspaces it is not assigned",
                 );
+              }
+              if (dependencies.usage !== undefined) {
+                // Usage is observation only: only Workspaces assigned to and running on
+                // this Worker are kept (specs.md Phase 17.6).
+                const reported = message.payload.workspaceUsage ?? [];
+                const assigned = await dependencies.store.activeAssignedWorkspaceIds(
+                  identity.workerId,
+                  reported.map((sample) => sample.workspaceId),
+                );
+                const { ignored } = dependencies.usage.record({
+                  workerId: identity.workerId,
+                  receivedAt: dependencies.now(),
+                  host: message.payload.host,
+                  relay: message.payload.modelRelay.stats ?? null,
+                  workspaces: reported,
+                  assigned,
+                });
+                if (ignored > 0) {
+                  dependencies.log?.warn(
+                    { workerId: identity.workerId, ignored },
+                    "worker reported usage for Workspaces it is not running",
+                  );
+                }
               }
               return;
             }
@@ -204,6 +236,9 @@ export function registerWorkerControlChannel(
         rejected = true;
         if (helloAccepted) {
           dependencies.channel.unregister(identity.workerId, socket);
+          if (!dependencies.channel.isConnected(identity.workerId)) {
+            dependencies.usage?.forget(identity.workerId);
+          }
         }
       });
     },

@@ -7,6 +7,8 @@ import type {
   WorkspaceRecord,
 } from "@agent-runtime/database";
 
+import type { WorkerUsageView, WorkspaceUsageView } from "./metrics/usage-registry.js";
+
 // API response shapes. Keep these as the only place records are converted for the Browser.
 export function publicUser(user: Omit<UserRecord, "passwordHash">) {
   return {
@@ -60,6 +62,8 @@ const MODEL_ACCESS_DISABLED: PublicModelAccess = { status: "disabled", reason: n
 export function publicWorkspace(
   workspace: WorkspaceRecord,
   modelAccess: PublicModelAccess = MODEL_ACCESS_DISABLED,
+  /** Observed container usage (specs.md Phase 17.7); shown only while RUNNING. */
+  usage: WorkspaceUsageView | null = null,
 ) {
   return {
     id: workspace.id,
@@ -78,6 +82,7 @@ export function publicWorkspace(
       sampledAt: workspace.disk.sampledAt?.toISOString() ?? null,
     },
     modelAccess,
+    usage: workspace.state === "RUNNING" ? usage : null,
   };
 }
 
@@ -98,6 +103,7 @@ export function publicWorker(
   worker: WorkerPlacementRecord,
   currentTime: Date,
   offlineAfterMs: number,
+  usage: WorkerUsageView | null = null,
 ) {
   const status = !worker.enabled
     ? "DISABLED"
@@ -134,5 +140,6 @@ export function publicWorker(
       allocatedLimitBytes: worker.allocatedDiskLimitBytes,
     },
     modelRelay: worker.modelRelay,
+    usage: status === "ONLINE" ? usage : null,
   };
 }

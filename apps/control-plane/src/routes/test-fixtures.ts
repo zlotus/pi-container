@@ -307,6 +307,18 @@ export async function createTestDependencies(
     trustedProxies: new AddressSet([]),
     now: () => NOW,
     workerStore: {
+      async activeAssignedWorkspaceIds(workerId, workspaceIds) {
+        return new Set(
+          workspaces
+            .filter(
+              (workspace) =>
+                workspace.workerId === workerId &&
+                (workspace.state === "RUNNING" || workspace.state === "STARTING") &&
+                workspaceIds.includes(workspace.id),
+            )
+            .map((workspace) => workspace.id),
+        );
+      },
       async findWorkerByCredentialHash(credentialHash) {
         const workerId = credentials.get(credentialHash);
         if (workerId === undefined) return null;
@@ -1379,7 +1391,7 @@ export async function beginOAuth2Login(app: ReturnType<typeof buildControlPlane>
 
 export function workerHello(workerId: string) {
   return {
-    version: 4,
+    version: 5,
     type: "worker.hello",
     requestId: randomUUID(),
     payload: {
@@ -1426,7 +1438,7 @@ export function answerEgressApply(
   if (command.type !== "worker.egress.apply") return false;
   socket.send(
     JSON.stringify({
-      version: 4,
+      version: 5,
       type: "response.ok",
       requestId: command.requestId,
       payload: {
@@ -1452,7 +1464,7 @@ export type ReconcileOkResponse = Omit<WorkerOkResponse, "payload"> & {
 
 export function emptyReconciliation(requestId: string): ReconcileOkResponse {
   return {
-    version: 4,
+    version: 5,
     type: "response.ok",
     requestId,
     payload: {

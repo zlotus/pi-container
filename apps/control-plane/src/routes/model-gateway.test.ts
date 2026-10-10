@@ -214,7 +214,7 @@ describe("model gateway routes (Phase 16.8)", () => {
       if (command.type === "workspace.ensure") ensurePayload = command.payload;
       worker.send(
         JSON.stringify({
-          version: 4,
+          version: 5,
           type: "response.ok",
           requestId: command.requestId,
           payload: {

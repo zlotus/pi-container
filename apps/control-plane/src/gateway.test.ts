@@ -17,6 +17,7 @@ import {
   buildWorkspaceGateway,
   type WorkspaceGatewayStore,
 } from "./gateway.js";
+import { PlatformMetrics } from "./metrics/platform-metrics.js";
 import { TEST_WORKSPACE_DISK } from "./routes/test-fixtures.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
 import { SessionConnectionRegistry } from "./session-connections.js";
@@ -877,5 +878,101 @@ describe("Workspace Gateway logging", () => {
     expect(forwardedRequestId).toBe(proxiedLog?.requestId);
     expect(forwardedRequestId).not.toBe(spoofedRequestId);
     expect(records.some((record) => record.path === "/_platform")).toBe(true);
+  });
+});
+
+describe("Workspace Gateway metrics (Phase 17.4)", () => {
+  async function value(metrics: PlatformMetrics, series: string): Promise<number> {
+    const text = await metrics.registry.metrics();
+    const line = text.split("\n").find((candidate) => candidate.startsWith(`${series} `));
+    return line === undefined ? 0 : Number(line.slice(series.length + 1));
+  }
+
+  it("counts by source and status class, times headers not streams, and tracks WebSockets", async () => {
+    const wss = new WebSocketServer({ noServer: true });
+    const upstream = createServer((request, response) => {
+      if (request.url === "/stream") {
+        // Headers right away, then a long-lived body like SSE.
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.write("data: 1\n\n");
+        setTimeout(() => response.end("data: 2\n\n"), 400);
+        return;
+      }
+      response.writeHead(500);
+      response.end("pi-web failed");
+    });
+    upstream.on("upgrade", (request, socket, head) => {
+      wss.handleUpgrade(request, socket, head, () => undefined);
+    });
+    const upstreamPort = await listen(upstream);
+    let workerReachable = true;
+    const metrics = new PlatformMetrics();
+    const exchanges = new WorkspaceSessionExchange(60_000);
+    const gateway = buildWorkspaceGateway({
+      store: {
+        async findActiveSession(tokenHash) {
+          return tokenHash === hashOpaqueToken(SESSION_A) ? session(USER_A_ID) : null;
+        },
+        async findOwnedWorkspace(id, userId) {
+          return id === WORKSPACE_ID && userId === USER_A_ID ? workspace() : null;
+        },
+        async findWorkerGatewayRoute() {
+          return {
+            workerId: WORKER_ID,
+            gatewayBaseUrl: workerReachable ? `http://127.0.0.1:${upstreamPort}` : "http://127.0.0.1:1",
+          };
+        },
+      },
+      exchanges,
+      portalOrigin: "http://portal.test",
+      workspaceBaseUrl: "http://agent.test",
+      secureCookies: false,
+      sessionTtlMs: 60_000,
+      workerOfflineAfterMs: 35_000,
+      workerGatewayTokens: { [WORKER_ID]: GATEWAY_TOKEN },
+      now: () => NOW,
+      metrics,
+    });
+    const port = await listen(gateway);
+    const owner = { host: PUBLIC_HOST, cookie: `platform-session=${SESSION_A}` };
+
+    expect((await request({ port, path: "/stream", headers: owner })).statusCode).toBe(200);
+    expect((await request({ port, path: "/broken", headers: owner })).statusCode).toBe(500);
+    expect((await request({ port, path: "/", headers: { host: PUBLIC_HOST } })).statusCode).toBe(404);
+    workerReachable = false;
+    expect((await request({ port, path: "/x", headers: owner })).statusCode).toBe(502);
+    workerReachable = true;
+    const form = { host: PUBLIC_HOST, origin: "http://portal.test", "content-type": "application/x-www-form-urlencoded" };
+    expect((await request({ port, method: "POST", path: "/_platform/session", headers: form, body: "code=" + "x".repeat(40) })).statusCode).toBe(401);
+    expect((await request({ port, method: "POST", path: "/_platform/session", headers: { host: PUBLIC_HOST }, body: "" })).statusCode).toBe(400);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(await value(metrics, 'agent_runtime_gateway_http_requests_total{source="upstream",status_class="2xx"}')).toBe(1);
+    expect(await value(metrics, 'agent_runtime_gateway_http_requests_total{source="upstream",status_class="5xx"}')).toBe(1);
+    expect(await value(metrics, 'agent_runtime_gateway_http_requests_total{source="platform",status_class="4xx"}')).toBe(3);
+    expect(await value(metrics, 'agent_runtime_gateway_http_requests_total{source="platform",status_class="5xx"}')).toBe(1);
+    // The 400 ms stream body is not part of the header time.
+    expect(await value(metrics, 'agent_runtime_gateway_http_response_header_seconds_bucket{le="0.25",source="upstream"}')).toBe(2);
+    expect(await value(metrics, 'agent_runtime_gateway_session_exchanges_total{result="expired"}')).toBe(1);
+    expect(await value(metrics, 'agent_runtime_gateway_session_exchanges_total{result="invalid"}')).toBe(1);
+
+    await expect(
+      rejectedWebSocketStatus(`ws://127.0.0.1:${port}/socket`, {
+        host: PUBLIC_HOST,
+        origin: "http://attacker.test",
+        cookie: `platform-session=${SESSION_A}`,
+      }),
+    ).resolves.toBe(403);
+    const client = new WebSocket(`ws://127.0.0.1:${port}/socket`, {
+      headers: { ...owner, origin: PUBLIC_ORIGIN },
+    });
+    await once(client, "open");
+    await expect.poll(() => value(metrics, "agent_runtime_gateway_websocket_connections")).toBe(1);
+    client.close();
+    await expect.poll(() => value(metrics, "agent_runtime_gateway_websocket_connections")).toBe(0);
+    expect(await value(metrics, 'agent_runtime_gateway_websocket_upgrades_total{result="connected",status_class="1xx"}')).toBe(1);
+    expect(await value(metrics, 'agent_runtime_gateway_websocket_upgrades_total{result="rejected",status_class="4xx"}')).toBe(1);
+    expect(await metrics.registry.metrics()).not.toContain("/stream");
+    wss.close();
   });
 });

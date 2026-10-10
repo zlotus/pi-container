@@ -123,6 +123,7 @@ describe.skipIf(!enabled)("pinned LiteLLM gateway", { timeout: 180_000 }, () => 
         `      api_key: ${UPSTREAM_KEY}`,
         "litellm_settings:",
         "  drop_params: false",
+        '  callbacks: ["prometheus"]',
         "general_settings:",
         "  master_key: os.environ/LITELLM_MASTER_KEY",
         "  database_url: os.environ/DATABASE_URL",
@@ -284,5 +285,66 @@ describe.skipIf(!enabled)("pinned LiteLLM gateway", { timeout: 180_000 }, () => 
     const request = { model: "deepseek-mock", stream: true, messages: [{ role: "user", content: "x" }, { role: "tool", tool_call_id: "c", content: "y" }] };
     expect((await chat(key, request)).status).toBe(200);
     await expect.poll(async () => (await chat(key, request)).status, { timeout: 40_000, interval: 3_000 }).toBe(422);
+  });
+
+  it("exposes Prometheus metrics only to a /metrics-only key (Phase 17.11 spike)", async () => {
+    // The key Prometheus uses (docs/observability-runbook.md): no models, one allowed route.
+    const generated = await fetch(`${origin}/key/generate`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${MASTER_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        key_alias: `prometheus-metrics-${suffix}`,
+        allowed_routes: ["/metrics"],
+        models: ["no-default-models"],
+      }),
+    });
+    expect(generated.status).toBe(200);
+    const metricsKey = ((await generated.json()) as { key: string }).key;
+    const scrape = (key?: string) =>
+      fetch(`${origin}/metrics`, key === undefined ? {} : { headers: { authorization: `Bearer ${key}` } });
+
+    const scraped = await scrape(metricsKey);
+    expect(scraped.status).toBe(200);
+    const text = await scraped.text();
+    expect(text).toMatch(/^litellm_/m);
+    // Recorded by the inference test above: per-user token counters labelled with the user UUID.
+    expect(text).toMatch(/^litellm_input_tokens_metric_total\{.*user="[0-9a-f-]{36}"/m);
+    expect(text).not.toContain("call read_marker");
+    expect(text).not.toContain(UPSTREAM_KEY);
+    expect(text).not.toContain(MASTER_KEY);
+
+    expect((await scrape()).status).toBe(401);
+    for (const [method, path] of [
+      ["GET", "/key/list"],
+      ["GET", "/user/list"],
+      ["GET", "/user/info"],
+      ["GET", "/spend/logs"],
+      ["GET", "/global/spend"],
+      ["GET", "/model/info"],
+      ["GET", "/v1/models"],
+      ["POST", "/key/generate"],
+      ["POST", "/user/new"],
+    ] as const) {
+      const response = await fetch(`${origin}${path}`, {
+        method,
+        headers: { authorization: `Bearer ${metricsKey}`, "content-type": "application/json" },
+        ...(method === "POST" ? { body: "{}" } : {}),
+      });
+      expect(response.status, path).toBe(403);
+    }
+    expect((await chat(metricsKey, { model: "deepseek-mock", messages: [{ role: "user", content: "x" }] })).status).toBe(403);
+
+    // A Workspace's inference key cannot read the gateway's metrics.
+    const userId = randomUUID();
+    await admin.ensureUser(userId, { maxBudgetUsd: null, budgetDuration: "30d" });
+    const workspaceKey = await admin.generateKey({
+      userId,
+      workspaceId: randomUUID(),
+      keyAlias: `arw-${randomUUID()}-1`,
+      models: ["deepseek-mock"],
+      rpmLimit: 60,
+      tpmLimit: null,
+    });
+    expect((await scrape(workspaceKey)).status).toBe(401);
   });
 });

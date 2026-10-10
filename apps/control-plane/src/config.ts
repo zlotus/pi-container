@@ -220,6 +220,21 @@ export const ServerConfigSchema = z
     PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
     GATEWAY_HOST: z.string().min(1).default("127.0.0.1"),
     GATEWAY_PORT: z.coerce.number().int().min(1).max(65_535).default(3001),
+    /** Prometheus metrics listener (specs.md Phase 17.7); unset port = no listener. */
+    METRICS_HOST: z.string().min(1).default("127.0.0.1"),
+    METRICS_PORT: z
+      .string()
+      .default("")
+      .transform((value, context) => {
+        if (value === "") return null;
+        const port = Number(value);
+        if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+          context.addIssue({ code: "custom", message: "METRICS_PORT must be a TCP port" });
+          return z.NEVER;
+        }
+        return port;
+      }),
+    METRICS_TOKEN_FILE: z.string().default(""),
     PORTAL_ORIGIN: PortalOriginSchema.default("http://127.0.0.1:5173"),
     PORTAL_ALLOWED_ORIGINS: PortalAllowedOriginsSchema,
     /** Platform addresses no egress whitelist may open (specs.md Phase 14.3). */
@@ -431,6 +446,21 @@ export const ServerConfigSchema = z
           });
         }
       }
+    }
+    if (config.METRICS_PORT === null) {
+      if (config.METRICS_TOKEN_FILE !== "") {
+        context.addIssue({
+          code: "custom",
+          path: ["METRICS_TOKEN_FILE"],
+          message: "METRICS_TOKEN_FILE requires METRICS_PORT",
+        });
+      }
+    } else if (!config.METRICS_TOKEN_FILE.startsWith("/")) {
+      context.addIssue({
+        code: "custom",
+        path: ["METRICS_TOKEN_FILE"],
+        message: "METRICS_PORT requires METRICS_TOKEN_FILE (an absolute path); metrics are never unauthenticated",
+      });
     }
     if (config.WORKSPACE_DISK_LIMIT_BYTES > config.WORKSPACE_DISK_LIMIT_MAX_BYTES) {
       context.addIssue({
