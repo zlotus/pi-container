@@ -4916,11 +4916,521 @@ key 只写入负责人本机的 `0600` 文件，不进入仓库、对话或日�
 
 ## Phase 17：可观测性
 
-状态：待开工设计。
+状态：**实现完成，待负责人人工验收**（2026-10-10），分支 `phase-17-observability`；运维见 `docs/observability-runbook.md`。17.13 的 Q1–Q12 负责人于 2026-10-10 确认全部按建议执行；实现中的调整见 17.14。方向见
+`docs/v1-roadmap.md` Phase 17（G4）。
 
-- Prometheus 指标（Workspace 状态、Worker 心跳、Gateway 请求/延迟/错误、命令超时、容器 CPU/内存/磁盘）、
-  Portal 实际用量、示例告警与面板。
-- 验收要点：制造 Worker 离线与磁盘接近上限时告警触发；Portal 数字与 `docker stats` 一致。
+目标：运维人员能从一处看到平台是否健康——Worker 是否在线、出口与配额是否生效、Workspace 状态分布、Gateway
+请求量/延迟/错误、Worker 命令是否超时、每个 Workspace 容器的 CPU/内存/磁盘/网络**实际用量**、认证防护与模型
+凭据吊销是否卡住；关键异常有告警规则；用户与管理员在 Portal 中看到实际用量（而不只是 assignment 数）。指标端点
+不能被 Workspace 或普通用户访问，指标中不出现内容、凭据或个人信息。
+
+### 17.1 开工环境核查（Q8B，2026-10-09，只读）
+
+**现有可复用的状态数据**（代码，`master` @ `d468a6c`）：
+
+| 来源 | 已有内容 | 对设计的影响 |
+|---|---|---|
+| `workers` 表 | `status`（REGISTERED/ONLINE/OFFLINE/DISABLED）、`enabled`、`schedulable`、`last_heartbeat_at`、`allocated_workspaces`/`max_workspaces`、`egress_enforced`/`egress_revision`、`storage_enforced`/`storage_total_bytes`/`storage_free_bytes`、`model_relay_enabled`/`model_relay_listening` | Worker 级状态全部已持久化，scrape 时查询即可，无需新列 |
+| `workspaces` 表 | `state`（9 种）、`desired_state`、`worker_id`、`disk_used_bytes`/`disk_limit_bytes`/`disk_used_inodes`/`pi_used_bytes`/`pi_limit_bytes`/`disk_usage_at`（Phase 15，每 60 s） | 状态分布与磁盘用量直接可用；**没有 CPU/内存/网络**用量 |
+| `model_keys` 表 | `status`、`revoke_requested_at`、`next_attempt_at`、`last_error_code` | 吊销积压与最老待吊销时长可直接算出 |
+| `auth_throttle` 表 | 各维度 `locked_until` | 当前生效锁定数可算；但**锁定期间被拒绝的请求只写日志、不计数**（15.9 留给本 Phase） |
+| Worker 心跳（v4，每 10 s） | `egress`、`storage`、`modelRelay`、`allocatedWorkspaces`、`workspaceDisk`（60 s 一次） | 本 Phase 在同一通道追加容器实际用量与主机用量（17.5） |
+| `WorkerChannel`（Control Plane 内存） | 每条命令的 type、超时（`WORKER_COMMAND_TIMEOUT_MS` 默认 15 s）、`WORKER_NOT_CONNECTED`/`CONNECTION_CLOSED`/`RESPONSE_MISMATCH` 错误 | 命令计数与耗时在这里埋点 |
+| 结构化日志（Phase 13） | `observeWorkspaceHttp` / `observeWorkspaceUpgrade`（两级 Gateway 每请求一行）、Fastify `onResponse`（路由模板）、中继每请求一行 | 指标埋点放在相同位置；标签规则沿用日志的白名单思路（只用路由模板，不用路径） |
+| Portal | Admin Workers“Workspace 容量”= assignment 数 / 上限；“主机资源”= 静态的逻辑 CPU 数与内存总量；Workspace 卡片只有磁盘进度条（`DiskUsage.tsx`） | G4 属实：除磁盘外没有任何实际用量 |
+
+- 没有任何 metrics 依赖；`prom-client`（npm，Apache-2.0，当前 15.1.3，依赖 `tdigest`、`@opentelemetry/api`）可用。
+- 协议各消息为 Zod `.strict()`：心跳增加字段必须升协议版本（17.6）。
+
+**进程与端口**：
+
+- 开发 Control Plane 以 `HOST=0.0.0.0`、`GATEWAY_HOST=0.0.0.0` 运行（3000/3001 在 LAN 与 Tailscale 上可达）；
+  Worker Gateway 3100、中继 3101。**因此 `/metrics` 绝不能挂在 3000（Portal API）或 3001（Workspace Gateway）上**，
+  生产中这两个端口还经反向代理面向全部用户。
+- Grafana 默认端口 3000 **被 Control Plane 占用**；4000 被无关进程占用（16.15）；9090、9464、3300 空闲。
+- 三个 Worker：worker-a（本机）、worker-c（另一台 Q8B，ONLINE，经 Tailscale 连接）、worker-b（OFFLINE 自 2026-09-10，
+  `enabled=true`）。跨主机抓取 Worker 需要 Prometheus 到每台 Worker 的网络路径。
+
+**容器实际用量的来源**：
+
+- Docker 29.8.1，API 1.56，cgroup v2 + systemd driver。Engine API `GET /containers/{id}/stats?stream=false&one-shot=true`
+  对运行中的 Workspace **耗时约 5 ms**；不带 `one-shot` 时要等两次采样，约 1.0 s。
+- 返回字段：`cpu_stats.cpu_usage.total_usage`（累计纳秒）、`online_cpus`、`throttling_data`；`memory_stats.usage`、
+  `limit`、`stats.inactive_file`；`pids_stats.current/limit`；`networks.eth0.rx_bytes/tx_bytes`。**不含 `oom_kill`**
+  （cgroup v2 下 Docker 不转出）。
+- 实测：`docker stats` 显示内存 145.2 MiB = `(usage − inactive_file)` = (170 041 344 − 17 797 120) B，与上面字段一致。
+  `docker stats` 的 CPU% = 两次采样间的核数 × 100（本机最高 800%），Workspace 上限 2 核。
+- 磁盘用量已由 Phase 15 的 `statfs` 采样提供（与 `df` 一致）。
+
+**LiteLLM 1.104.1（运行中的 pinned 镜像，只读检查）**：
+
+- 包含开源的 Prometheus 集成（`integrations/prometheus.py`），未发现 premium/enterprise 判断；`prometheus_client`
+  已安装。需要在 `litellm_settings.callbacks` 中启用 `prometheus` 并重启网关。
+- 提供 `litellm_input_tokens_metric`、`litellm_output_tokens_metric`、`litellm_spend_metric`、
+  `litellm_request_total_latency_metric`、`litellm_llm_api_latency_metric`、`litellm_llm_api_time_to_first_token_metric`、
+  `litellm_proxy_failed_requests_metric`、`litellm_remaining_user_budget_metric`、`litellm_deployment_state` 等，标签含
+  `user`（= 平台 User UUID）、`api_key_alias`（= `arw-<workspaceId>-<n>`）、`model`。
+- `/metrics` **默认要求认证**（`PrometheusAuthMiddleware` → `user_api_key_auth`，`require_auth_for_metrics_endpoint`
+  默认 `True`）。设计时推断“任意有效 key 都能读取”，**开工 spike 推翻了这一点**（17.14）：`llm_api`、`read_only`、
+  `default` 类型的 key 都被路由权限拒绝，只有 master key 与 `allowed_routes` 含 `/metrics` 的 key 能读取。
+
+**Prometheus / Grafana 镜像**（2026-10-09 查询 registry manifest 与 GitHub releases）：
+
+| 组件 | 候选版本 | `linux/arm64` | 备注 |
+|---|---|---|---|
+| Prometheus | `prom/prometheus:v3.13.4`（`sha256:87861b8c…e32e`） | 有 | 3.15.0 为最新；3.13.x 在 3.14/3.15 发布后仍在发补丁（推断为长期支持线） |
+| Grafana | `grafana/grafana:13.2.3`（`sha256:b28bae15…e572`） | 有 | 13.2.3 / 13.1.7 / 13.0.10 / 12.4.12 同日发布 |
+| Alertmanager | `prom/alertmanager:v0.34.1`（`sha256:e9733baf…57a`） | 有 | 是否纳入见 17.13 Q8 |
+
+- 宿主机内存 14 GiB（可用约 7.3 GiB），8 核；Prometheus + Grafana 的常驻内存在百 MB 级，开发设备可承受。
+- 不需要 cAdvisor / node_exporter：前者需要挂载 Docker socket 与宿主机根目录，后者提供的主机指标本 Phase 由 Worker
+  心跳中的少量字段覆盖（17.5）；二者都留给运维按需部署，不在平台验收范围内。
+
+**与 Phase 14 出口规则的关系**（代码核对）：`ws_prerouting` 以 `fib daddr type local` 丢弃一切发往 Worker 宿主机
+地址的包（只放行中继端口），`ws_forward` 丢弃 protected、RFC1918 与追加网段。因此部署在 Worker 宿主机上的指标
+端点、Prometheus、Grafana 对 Workspace 天然不可达；部署在其他主机时，其地址按 RFC1918 默认拒绝，公网地址需加入
+protected（17.8）。
+
+### 17.2 范围与非目标
+
+范围：
+
+- Control Plane 在**独立的指标监听端口**上暴露 Prometheus 指标，Bearer token 认证；不挂在 Portal API 与 Workspace
+  Gateway 端口上（17.3、17.8）。
+- Control Plane 作为**唯一的抓取目标**：平台状态（Workspace、Worker、模型凭据、认证锁定）在 scrape 时查询数据库；
+  进程内计数（Gateway、Portal API、Worker 命令、认证、后台任务）由埋点累计；Worker 侧的容器实际用量、主机用量与
+  中继计数经心跳上报后由 Control Plane 暴露（17.4、17.5，17.13 Q1）。
+- Worker 采样每个运行中 Workspace 容器的 CPU、内存、PID、网络字节（Docker Engine API one-shot stats）与 OOM 事件，
+  以及主机 CPU/内存，随心跳上报；Worker protocol v5（17.5、17.6）。
+- Portal：Workspace 卡片与 Admin Workspaces 显示 CPU/内存实际用量，Admin Workers 显示主机与 Workspace 合计的实际
+  用量（17.7）。
+- 部署产物：开发用 Prometheus + Grafana compose（pin 版本与 digest）、抓取配置、告警规则及其 `promtool` 单元测试、
+  Grafana 数据源与面板 provisioning、runbook（17.9、17.10）。
+- 模型网关：启用 LiteLLM 自带的 Prometheus 指标并纳入抓取与面板（17.13 Q7）。
+
+非目标（v1.0 不做）：
+
+- 告警**通知投递**（邮件、企业微信、钉钉、飞书等）与值班轮换；本 Phase 只交付规则，触发在 Prometheus 中可见
+  （17.13 Q8）。
+- 日志聚合（Loki/ELK）、分布式追踪（OpenTelemetry tracing）；日志仍是 stdout/journald 的结构化 JSON。
+- 按 Workspace 的请求级 Gateway 指标、按路径的指标（路径是用户可控的，标签会无界增长并可能携带文件名）。
+- 出口拦截计数（nft `counter`）与按目的地址的流量统计：需要改动 Phase 14 已验收的规则集，留到 v1.x（17.13 Q10）。
+- 平台内的长期用量存储、报表、计费；空闲判定所需的 CPU 窗口统计（Phase 18 自行设计，决策 D6）。
+- 磁盘 I/O（blkio）指标：cgroup v2 下按 Workspace 的 I/O 字节对配额与告警价值有限。
+- Prometheus/Grafana 的高可用、远程存储、生产部署模板（Phase 19）。
+- 由平台为 Grafana 提供 SSO；Grafana 使用自己的本地管理员账号（只给运维）。
+
+### 17.3 架构
+
+```text
+                     ┌──────────────── Control Plane 进程 ────────────────┐
+Browser ─ :3000 ───► │ Portal API（埋点：路由模板/状态/耗时）              │
+Browser ─ :3001 ───► │ Workspace Gateway（埋点：状态类/首包耗时/WS 连接数） │
+Worker ── ws ──────► │ Worker 控制通道（埋点：命令结果/耗时；               │
+  （心跳 v5：容器与   │   心跳中的容器/主机/中继数据 → 内存中的 live usage）  │
+   主机用量、中继计数）│                                                    │
+                     │ 指标监听 METRICS_HOST:METRICS_PORT（默认 127.0.0.1:9464）
+Prometheus ─ Bearer ►│   GET /metrics：进程内计数 + live usage + scrape 时查询 PostgreSQL
+                     └────────────────────────────────────────────────────┘
+Prometheus ─ Bearer ─► LiteLLM /metrics（17.13 Q7）
+Grafana ───────────► Prometheus（数据源，只读）
+```
+
+- **为什么 Worker 不单独暴露 `/metrics`**（17.13 Q1）：Portal 本来就需要经心跳拿到容器实际用量（Phase 15 的磁盘用量
+  也是这样）；同一份数据既给 Portal 又给 Prometheus，“Portal 数字与指标一致”无需额外对齐。Prometheus 只需到达
+  Control Plane 一个地址，跨主机 Worker（worker-c）不必开放新的入站端口，也不必为 Prometheus 维护 Worker 列表；
+  Worker 宿主机上不新增监听端口，攻击面不变。Worker 离线本身由心跳时间戳与状态反映。代价：Worker 侧计数器经
+  Control Plane 转出，Control Plane 重启后在下一次心跳（≤ 10 s）恢复；路线图“Worker 暴露指标”的含义以此实现。
+- Worker 上报的计数器（CPU 秒、网络字节、OOM 次数、中继请求数）是 **Worker 侧的累计值**，Control Plane 原样转出、
+  不做跨重启累加；Worker 或容器重启导致的归零由 Prometheus `rate()`/`increase()` 的 counter reset 处理。
+
+### 17.4 指标清单
+
+命名前缀 `agent_runtime_`；时间为秒、大小为字节（Prometheus 惯例）。**标签只允许**：`worker_id`、`workspace_id`、
+`user_id`（UUID，仅 17.13 Q3 确认的几项）、枚举值（状态、结果、错误码、协议、路由模板等）。**禁止**作为标签或值：
+email、用户名/显示名、Workspace 名称、请求路径与 query、IP 地址、request ID、User-Agent、宿主路径、任何 token。
+
+**平台状态**（scrape 时一次查询 PostgreSQL，语句超时 2 s）：
+
+| 指标 | 类型 | 标签 | 来源/说明 |
+|---|---|---|---|
+| `agent_runtime_workspaces` | gauge | `state`、`worker_id`（未分配为 `none`） | `workspaces`（不含已删除）按状态计数 |
+| `agent_runtime_worker_up` | gauge | `worker_id` | `status='ONLINE'` 为 1，否则 0 |
+| `agent_runtime_worker_status` | gauge | `worker_id`、`status` | 当前状态为 1（one-hot，供面板显示） |
+| `agent_runtime_worker_enabled` / `_schedulable` | gauge | `worker_id` | 0/1 |
+| `agent_runtime_worker_connected` | gauge | `worker_id` | 控制通道当前是否有连接（进程内） |
+| `agent_runtime_worker_last_heartbeat_timestamp_seconds` | gauge | `worker_id` | 从未心跳时不输出 |
+| `agent_runtime_worker_egress_enforced` / `_storage_enforced` / `_model_relay_listening` | gauge | `worker_id` | 0/1；中继只对启用中继的 Worker 输出 |
+| `agent_runtime_worker_workspaces_allocated` / `_max` | gauge | `worker_id` | sticky assignment 数与上限 |
+| `agent_runtime_worker_filesystem_bytes` | gauge | `worker_id`、`kind`=`total`/`free` | `WORKER_MANAGED_ROOT` 文件系统（Phase 15） |
+| `agent_runtime_worker_disk_limit_allocated_bytes` | gauge | `worker_id` | 该 Worker 上 `disk_limit_bytes` 之和（超分程度） |
+| `agent_runtime_workspace_disk_used_bytes` / `_disk_limit_bytes` | gauge | `workspace_id`、`worker_id`、`project`=`data`/`pi` | Phase 15 采样值；未采样不输出 |
+| `agent_runtime_workspace_disk_used_inodes` | gauge | `workspace_id`、`worker_id` | data project |
+| `agent_runtime_workspace_disk_sampled_timestamp_seconds` | gauge | `workspace_id`、`worker_id` | `disk_usage_at` |
+| `agent_runtime_workspace_info` | gauge（恒为 1） | `workspace_id`、`worker_id`、`user_id` | 供面板按用户聚合（17.13 Q3）；其余每 Workspace 指标不带 `user_id` |
+| `agent_runtime_sessions_active` | gauge | — | 未撤销且未过期的 Platform Session 数 |
+| `agent_runtime_auth_active_locks` | gauge | `scope` | `auth_throttle` 中 `locked_until > now()` |
+| `agent_runtime_model_keys` | gauge | `status` | `model_keys` 按状态计数（网关启用时） |
+| `agent_runtime_model_key_revocation_oldest_pending_seconds` | gauge | — | 最老 `revoking` 行的 `now() − revoke_requested_at`，无则 0 |
+| `agent_runtime_collector_up` | gauge | `collector`=`database` | 本次查询成功为 1；失败为 0 且**省略上面全部数据库指标**，进程内指标照常输出 |
+| `agent_runtime_collector_duration_seconds` | gauge | `collector` | 本次查询耗时 |
+
+**Workspace 与主机实际用量**（Worker 心跳上报，Control Plane 内存中只保留最新一份，17.5）：
+
+| 指标 | 类型 | 标签 | 说明 |
+|---|---|---|---|
+| `agent_runtime_workspace_cpu_seconds_total` | counter | `workspace_id`、`worker_id` | 容器累计 CPU 时间（`total_usage`/1e9） |
+| `agent_runtime_workspace_cpu_limit_cores` | gauge | 同上 | `NanoCpus`/1e9（2） |
+| `agent_runtime_workspace_memory_bytes` | gauge | 同上 | `usage − inactive_file`（与 `docker stats` 相同口径） |
+| `agent_runtime_workspace_memory_limit_bytes` | gauge | 同上 | `memory_stats.limit` |
+| `agent_runtime_workspace_pids` / `_pids_limit` | gauge | 同上 | `pids_stats` |
+| `agent_runtime_workspace_network_bytes_total` | counter | 同上 + `direction`=`rx`/`tx` | 容器 `eth0` 累计字节（容器重建时归零） |
+| `agent_runtime_workspace_oom_kills_total` | counter | 同上 | Worker 观察到的 OOM 事件数（17.5，17.13 Q6） |
+| `agent_runtime_workspace_usage_sampled_timestamp_seconds` | gauge | 同上 | 采样时间 |
+| `agent_runtime_worker_host_cpu_utilization_ratio` | gauge | `worker_id` | 两次心跳之间主机 CPU 忙碌比例（0～1，`os.cpus()` 时间差） |
+| `agent_runtime_worker_host_memory_bytes` | gauge | `worker_id`、`kind`=`total`/`available` | `/proc/meminfo` 的 `MemTotal`/`MemAvailable` |
+| `agent_runtime_worker_host_load1` | gauge | `worker_id` | 1 分钟 load average |
+
+只输出运行中、assignment 属于该 Worker、样本不早于 `WORKER_OFFLINE_AFTER_MS`（默认 35 s）的 Workspace；Worker 断开、
+Workspace 停止或删除后其 live 序列在下一次 scrape 中消失（不显示陈旧数值）。
+
+**进程内埋点**：
+
+| 指标 | 类型 | 标签 | 埋点位置 |
+|---|---|---|---|
+| `agent_runtime_http_requests_total` | counter | `route`（路由模板，未匹配为 `unmatched`）、`method`、`status_class` | Portal API `onResponse` |
+| `agent_runtime_http_request_duration_seconds` | histogram | `route`、`method` | 同上 |
+| `agent_runtime_gateway_http_requests_total` | counter | `source`=`platform`/`upstream`、`status_class` | Workspace Gateway；`platform` = Gateway 自己拒绝或失败（404/401/503 等），`upstream` = pi-web 的响应 |
+| `agent_runtime_gateway_http_response_header_seconds` | histogram | `source` | 从收到请求到**写出响应头**的时间；SSE/长下载的总时长不计入（否则直方图只反映流的寿命） |
+| `agent_runtime_gateway_websocket_connections` | gauge | — | 当前经 Gateway 建立的 WebSocket 数 |
+| `agent_runtime_gateway_websocket_upgrades_total` | counter | `result`=`connected`/`rejected`、`status_class` | 升级结果 |
+| `agent_runtime_gateway_session_exchanges_total` | counter | `result`=`ok`/`invalid`/`expired` | exchange code 消费 |
+| `agent_runtime_worker_commands_total` | counter | `command`（协议命令名）、`result`=`ok`/`error`/`timeout`/`not_connected`/`connection_closed`/`mismatch` | `WorkerChannel.dispatch` |
+| `agent_runtime_worker_command_errors_total` | counter | `command`、`code`（协议错误码，未知值归为 `other`） | `response.error` |
+| `agent_runtime_worker_command_duration_seconds` | histogram | `command` | 发出到响应（超时按超时时长计） |
+| `agent_runtime_worker_heartbeats_total` | counter | `worker_id`、`result`=`accepted`/`rejected` | 控制通道 |
+| `agent_runtime_auth_logins_total` | counter | `protocol`=`local`/`oidc`/`oauth2`、`result`=`success`/`failure`/`rate_limited` | 与 Audit 同一处 |
+| `agent_runtime_auth_login_failures_total` | counter | `protocol`、`category`（Phase 12 的稳定分类） | 同上 |
+| `agent_runtime_auth_lockouts_total` | counter | `scope` | `auth.login_locked` 写入处 |
+| `agent_runtime_auth_rate_limited_total` | counter | `endpoint`=`local_login`/`sso_start`/`sso_callback` | 15.9 中只写日志的拒绝，本 Phase 补计数 |
+| `agent_runtime_model_gateway_requests_total` | counter | `operation`（`generate_key`/`delete_key`/`ensure_user`/`list_models`/`user_info`）、`result`=`ok`/`error`/`unreachable` | `LiteLlmAdminClient` |
+| `agent_runtime_model_gateway_reachable` | gauge | — | 最近一次管理调用是否可达（网关启用时） |
+| `agent_runtime_background_task_failures_total` | counter | `task`=`worker_offline_sweep`/`auth_throttle_cleanup`/`model_key_loop` | 现有周期任务的 catch 分支 |
+| `agent_runtime_build_info` | gauge（恒为 1） | `version`、`protocol_version` | 启动时 |
+| `nodejs_*`、`process_*` | — | — | `prom-client` 默认指标（事件循环延迟、堆、GC、fd） |
+
+**Worker 中继计数**（心跳上报，Worker 级累计值）：
+
+| 指标 | 类型 | 标签 | 说明 |
+|---|---|---|---|
+| `agent_runtime_model_relay_requests_total` | counter | `worker_id`、`result`=`2xx`/`4xx`/`5xx`/`no_key`/`gateway_unavailable`/`rejected_path`/`body_too_large`/`concurrency_limited` | 不按 Workspace 拆分（用量按用户在 LiteLLM 指标中） |
+| `agent_runtime_model_relay_rejected_connections_total` | counter | `worker_id` | 来源识别失败被断开的连接数（安全信号） |
+| `agent_runtime_model_relay_active_requests` | gauge | `worker_id` | 当前进行中的请求数 |
+
+Histogram 桶：Portal API 与 Worker 命令 `0.005…15 s`（含 15 s 超时边界）；Gateway 首包 `0.01…30 s`。
+
+**LiteLLM 指标**（17.13 Q7）：抓取 LiteLLM 自身 `/metrics`，平台不转发、不改写；面板按 `user`（平台 User UUID）
+汇总 token 与 spend，按 `model` 看上游延迟与失败。
+
+### 17.5 Worker：采样与上报
+
+- **容器用量采样**：每次发送心跳前（默认 10 s），对每个本 Worker 受管且运行中的 Workspace 容器调用 Docker Engine
+  API `GET /containers/{id}/stats?stream=false&one-shot=true`（dockerode `stats({ stream: false, 'one-shot': true })`），
+  并发 ≤ 4，单次超时 2 s；只对带正确 managed label 的容器调用（与其他 Docker 操作同一校验）。失败的容器本轮不上报
+  （不报 0），记 `debug` 日志。
+- 上报**原始累计值**（`cpuUsageNanos`、`networkRxBytes`、`networkTxBytes`）与瞬时值（`memoryBytes = usage −
+  inactive_file`、`memoryLimitBytes`、`pids`、`pidsLimit`、`cpuLimitCores`），另附 Worker 用相邻两次样本算出的
+  `cpuCores`（Δ`total_usage` / Δ采样时间；首个样本或计数回退时为 null），供 Portal 直接显示，与 Prometheus 用
+  `rate()` 计算的口径一致。
+- **OOM**：Worker 订阅 Docker Engine API 事件流（`type=container`、`event=oom`，按 managed label 过滤），按 Workspace
+  在进程内累计 `oomKills`；事件流断开时指数退避重连（1 s 起，上限 30 s），重连期间的事件会丢失（计数为下限，runbook
+  说明）。替代方案见 17.13 Q6。
+- **主机用量**：`os.cpus()` 时间差得到忙碌比例；`/proc/meminfo` 的 `MemTotal`、`MemAvailable`；`os.loadavg()[0]`。不需要
+  特权。
+- **中继计数**：`RelayModelAccess` 在现有每请求日志的同一位置累加 17.4 的计数器。
+- 采样不影响生命周期：采样失败、Docker 慢或事件流断开都不改变 Workspace 状态，也不阻塞命令处理与心跳（心跳发送
+  不等待超过 2 s 的采样；未完成的本轮不上报）。
+- 不需要新的 Worker 配置项；不新增监听端口。
+
+### 17.6 Worker Protocol
+
+`WORKER_PROTOCOL_VERSION` 升到 `5`，与 v4 不兼容（Control Plane 与 Worker 同时升级，同 14.11 Q5、15.12 Q9、16.14）：
+
+- `worker.heartbeat` 增加：
+  - `host: { cpuUtilization: number | null（0～1）, memoryTotalBytes, memoryAvailableBytes, load1 }`；
+  - 可选 `workspaceUsage: [{ workspaceId, sampledAt, cpuUsageNanos, cpuCores: number | null, cpuLimitCores,
+    memoryBytes, memoryLimitBytes, pids, pidsLimit, networkRxBytes, networkTxBytes, oomKills }]`（≤ 10 000 项；全部为
+    有限、非负的数值，整数字段 ≤ 2^53−1，`cpuCores` ≤ 1024）；
+  - `modelRelay.stats: { requests: Record<结果枚举, number>, rejectedConnections, activeRequests }`（中继未启用时省略）。
+- Control Plane 只接受 assignment 属于该 Worker 且状态为 `RUNNING`/`STARTING` 的 Workspace 条目，其余丢弃并记 `warn`
+  （与 15.8 的 `workspaceDisk` 相同）。`sampledAt` 晚于接收时间 60 s 以上的条目丢弃。
+- `worker.hello` 不变（主机总量已有 `systemResources`）。无新命令、无新错误码。
+
+### 17.7 Control Plane：数据模型、配置、API、Portal
+
+**数据模型：无 migration**（17.13 Q4）。live usage（CPU/内存/PID/网络/OOM/主机）只保存在 Control Plane 内存中的
+`UsageRegistry`（按 Worker 存最近一次心跳的数据），Control Plane 重启后由下一次心跳恢复；磁盘用量继续使用 Phase 15
+的列。v1.0 的 Control Plane 是单实例（路线图第 5 节），不存在多实例不一致。
+
+配置（Control Plane）：
+
+- `METRICS_PORT`：未设置即不启动指标监听（整体关闭，不是安全开关）。
+- `METRICS_HOST`：默认 `127.0.0.1`；**拒绝 `0.0.0.0`、`::` 等通配地址**（必须明确指定一个地址），不得与
+  `HOST:PORT`、`GATEWAY_HOST:GATEWAY_PORT` 相同。
+- `METRICS_TOKEN_FILE`：`METRICS_PORT` 设置时必填；启动时读取，要求为普通文件、不跟随符号链接、权限不含 group/other
+  位（`0600`/`0400`）、内容去除末尾换行后为 32～512 个可打印 ASCII 字符；不满足则**拒绝启动**。token 只在内存中，
+  不进入日志（加入 redaction：`metricsToken`）。
+- `METRICS_HOST` 为非 loopback 地址时自动加入下发给 Worker 的 protected 集合（与 14.3 处理 `DATABASE_URL` 的方式相同）。
+
+**指标监听**：独立的 `node:http` server（不经 Fastify 路由表，不注册在 3000/3001 上）。只接受 `GET /metrics`（其余
+路径 404，其他方法 405）；`Authorization: Bearer <token>` 以定长 HMAC 比较（`timingSafeEqual`，长度不同也不提前返回）；
+失败返回 401，body 不说明原因，不写 Audit（防刷表），只记 `info` 日志（不含 header）。不支持 query 参数、不支持
+OpenMetrics 协商以外的格式。scrape 并发上限 2，超出返回 503。
+
+API（只读，增量字段）：
+
+- `GET /api/workspaces`、`GET /api/workspaces/:id`、`GET /api/admin/workspaces`：增加
+  `usage: { cpuCores, cpuLimitCores, memoryBytes, memoryLimitBytes, pids, pidsLimit, oomKills, sampledAt } | null`
+  （非运行或无新鲜样本时为 null）。仍只返回调用者有权看到的 Workspace；不返回网络字节（只给运维面板）。
+- `GET /api/admin/workers`：增加 `usage: { hostCpuUtilization, hostMemoryTotalBytes, hostMemoryAvailableBytes, load1,
+  workspaceCpuCores, workspaceMemoryBytes, runningWorkspaces, sampledAt } | null`（后三项为该 Worker 上新鲜样本之和）。
+
+Portal：
+
+- Workspace 卡片（运行中时）：“CPU 0.35 / 2 核 · 内存 1.2 / 4 GiB”两条进度条（≥ 90% 告警色），与现有磁盘进度条
+  并列；显示采样时间；OOM 次数 > 0 时提示“内存曾超限，进程被系统终止 N 次”。Admin Workspaces 表格增加同样两列。
+- Admin Workers“主机资源”列由静态总量改为“CPU 使用率 · 内存 可用/总量”，并在详情中显示 Workspace 实际 CPU/内存
+  合计；“Workspace 容量”列保持 assignment 数（调度语义不变）。
+- 页面轮询沿用现有节奏（Workers 5 s；Workspaces 页面对运行中的 Workspace 增加 15 s 轮询，仅在页面可见时）。
+
+Audit：不新增事件（指标与用量是观测数据，不是安全事件）。
+
+### 17.8 安全边界与 fail-closed
+
+- **指标端点不面向用户**：不在 Portal API、Workspace Gateway、Worker Gateway 上暴露；Portal 的反向代理（Phase 19）
+  不转发指标端口。测试断言 3000/3001 上的 `/metrics` 为 404。
+- **始终认证**：没有“无 token 的指标”模式；配置不完整即拒绝启动（17.7）。这是唯一与启动相关的 fail-closed；
+  指标子系统的其他故障（数据库查询失败、Worker 采样失败、LiteLLM 不可达）**只影响观测**，不改变任何 Workspace 状态、
+  调度、出口或配额决策——这些决策仍只依据原有的强校验路径，不读取指标。
+- **Workspace 不可达**：
+  - 指标监听、Prometheus、Grafana 部署在 Worker 宿主机上时，被 `fib daddr type local` 丢弃（Phase 14），`pnpm test:egress`
+    增加对指标端口的断言；
+  - 部署在其他主机时，RFC1918 地址默认拒绝；公网地址必须加入 `PLATFORM_EGRESS_PROTECTED`（runbook 写明，`METRICS_HOST`
+    自动加入）；
+  - 白名单不能放行 protected（14.3），因此管理员无法误把指标端口开放给 Workspace。
+- **数据最小化**：标签白名单见 17.4；指标中没有内容、路径、IP、凭据；`user_id` 只出现在 `agent_runtime_workspace_info`。
+  能访问 Prometheus/Grafana 的人可以看到每个 Workspace 的资源用量与每个用户的模型用量——这是运维数据，runbook 写明
+  Grafana 只发给运维人员。
+- **基数有界**：每 Workspace 约 15 条序列；Workspace 删除或停止后序列消失；路由、命令、错误码都是有限枚举（未知值
+  归为 `other`）。
+- **Worker 上报是不可信输入**：Zod 限制范围与条目数，只接受属于该 Worker 的 Workspace；被攻破的 Worker 只能伪造自己
+  Workspace 的观测数值（与 Phase 15 的磁盘用量同等信任），不能影响授权与生命周期。
+- **Prometheus / Grafana（开发 compose）**：只监听 `127.0.0.1`（Prometheus 9090、Grafana 3300）；Prometheus 不开启
+  admin API、lifecycle API、remote write；Grafana 关闭匿名访问、注册、遥测、更新检查与插件预装
+  （`GF_PLUGINS_PREINSTALL_DISABLED=true`），管理员密码来自负责人本机的 `0600` env 文件；token 文件以只读方式挂入
+  Prometheus。长期运行的这两个容器只从主 checkout 启动。
+- **日志**：不新增敏感字段；token 文件内容、`Authorization` 头不进入日志（扩展 Phase 13 脱敏测试）。
+
+### 17.9 告警规则与面板
+
+规则文件 `deploy/observability/rules/agent-runtime.rules.yml`（Prometheus 评估，默认间隔 30 s）。阈值为默认建议值
+（17.13 Q11），`severity` 为 `critical`/`warning`：
+
+| 告警 | 条件（概要） | for | 级别 |
+|---|---|---|---|
+| `AgentRuntimeControlPlaneDown` | `up{job="agent-runtime-control-plane"} == 0` | 2m | critical |
+| `AgentRuntimeMetricsCollectorFailing` | `agent_runtime_collector_up == 0` | 5m | warning |
+| `AgentRuntimeWorkerOffline` | `worker_up == 0` 且 `enabled == 1` 且曾经心跳 | 1m | critical |
+| `AgentRuntimeWorkerEgressUnenforced` | `worker_up == 1` 且 `egress_enforced == 0` | 2m | critical |
+| `AgentRuntimeWorkerStorageUnenforced` | `worker_up == 1` 且 `storage_enforced == 0` | 2m | critical |
+| `AgentRuntimeWorkerModelRelayDown` | 启用中继的 Worker `model_relay_listening == 0` | 5m | warning |
+| `AgentRuntimeWorkerFilesystemLow` | `free / total < 0.10`（`< 0.05` 另一条为 critical） | 10m / 5m | warning / critical |
+| `AgentRuntimeWorkspaceDiskNearLimit` | `disk_used_bytes{project="data"} / disk_limit_bytes > 0.90` | 5m | warning |
+| `AgentRuntimeWorkspacePiStateNearLimit` | 同上，`project="pi"` | 5m | warning |
+| `AgentRuntimeWorkspaceMemoryNearLimit` | `memory_bytes / memory_limit_bytes > 0.90` | 15m | warning |
+| `AgentRuntimeWorkspaceOOMKilled` | `increase(oom_kills_total[15m]) > 0` | 0m | warning |
+| `AgentRuntimeWorkspacesInError` | `sum(workspaces{state="ERROR"}) > 0` | 15m | warning |
+| `AgentRuntimeWorkspacesStuckTransitional` | `SCHEDULING/STARTING/STOPPING/DELETING` 数量 > 0 | 15m | warning |
+| `AgentRuntimeGatewayErrorRate` | `source="platform"` 的 5xx 占全部 Gateway 请求 > 5%（10 分钟内请求 ≥ 20） | 10m | warning |
+| `AgentRuntimeWorkerCommandTimeouts` | `increase(worker_commands_total{result="timeout"}[10m]) > 0` | 0m | warning |
+| `AgentRuntimeModelKeyRevocationStuck` | `model_key_revocation_oldest_pending_seconds > 900` | 5m | critical |
+| `AgentRuntimeModelGatewayUnreachable` | `model_gateway_reachable == 0`（或 LiteLLM 抓取 `up == 0`） | 10m | warning |
+| `AgentRuntimeLoginLockoutSurge` | `increase(auth_lockouts_total[15m]) > 10` | 0m | warning |
+
+- 每条规则有 `promtool test rules` 单元测试（`deploy/observability/rules/agent-runtime.rules.test.yml`），覆盖触发、
+  未达 `for` 不触发、恢复。
+- 每条告警的 `annotations` 含中文 `summary`、`description` 与 runbook 小节链接；`labels` 只含 `worker_id`/`workspace_id`。
+
+**Grafana 面板**（`deploy/observability/grafana/dashboards/`，provisioning 自动加载，数据源 UID 固定）：
+
+1. **平台总览**：Worker 在线/出口/配额/中继状态表、心跳延迟；Workspace 状态分布；Gateway 请求率、5xx 比例、首包
+   p50/p95、WebSocket 连接数；Worker 命令速率、错误与超时、p95 耗时；认证成功/失败/锁定；活跃告警列表。
+2. **Workspace 资源**：按 Worker 的主机 CPU/内存与文件系统；Workspace 维度 CPU（核）、内存、PID、磁盘（data/pi）、
+   网络速率 Top-N 与 OOM 次数；变量 `worker_id`、`workspace_id`。
+3. **模型网关**：按用户（`user` 标签）token 与 spend、按模型请求数/失败/延迟/首 token 时间；中继结果分布与被拒连接；
+   凭据状态与吊销积压（依赖 17.13 Q7）。
+
+面板 JSON 由 CI 校验：可解析、数据源 UID 正确、每个 PromQL 表达式引用的指标名都存在于本节清单或 LiteLLM 清单中。
+
+### 17.10 部署产物
+
+- `deploy/observability/compose.yml`（DEV ONLY，`name: agent-runtime-observability`）：pinned `prom/prometheus:v3.13.4@sha256:…`
+  与 `grafana/grafana:13.2.3@sha256:…`；两者 `network_mode: host` 并只监听 `127.0.0.1`（理由：Control Plane 指标监听
+  在 loopback，桥接网络中的容器无法访问宿主机 loopback；这是运维组件，`hostNetwork=false` 的不变量针对 Workspace）；
+  数据使用命名卷（TSDB 保留 30 天 / 10 GiB 取先到者）；配置文件以只读 bind mount 挂入（**只从主 checkout 启动**）。
+  Prometheus 读取 `0600` token 文件所需的容器 UID 与命名卷权限在实现时验证（17.11）。
+- `deploy/observability/prometheus.yml`：抓取 `agent-runtime-control-plane`（`127.0.0.1:9464`，`authorization.credentials_file`）、
+  `litellm`（`127.0.0.1:4400/metrics`，Q7）、Prometheus 自身；`scrape_interval` 15 s。
+- `deploy/observability/rules/`：规则与 `promtool` 测试；`deploy/observability/grafana/`：provisioning 与面板 JSON；
+  `grafana.env.example`（不含真实密码）。
+- `deploy/model-gateway/config.yaml`：`litellm_settings.callbacks: ["prometheus"]`（Q7），保持 `require_auth_for_metrics_endpoint`
+  默认值。
+- `tools/dev/init-metrics-token.sh`：生成 `~/.config/agent-runtime/metrics.token`（`0600`，已存在则不覆盖，不打印内容）。
+- `tools/dev/create-litellm-metrics-key.sh`：用 master key 创建只允许 `/metrics` 的 LiteLLM key，写入
+  `~/.config/agent-runtime/litellm-metrics.token`（`0600`，不打印 key）。
+- `deploy/observability/grafana/build-dashboards.py`：生成面板 JSON（修改面板时编辑脚本后重新生成）。
+- `.env.example`：`METRICS_HOST`、`METRICS_PORT`、`METRICS_TOKEN_FILE`。
+- `docs/observability-runbook.md`：部署与端口、token 轮换、告警含义与处置（每条告警一节）、跨主机部署时的 protected
+  要求、Prometheus 数据保留、开发设备上 worker-b 长期离线会持续触发 `WorkerOffline`（Phase 18 的 `worker:disable` 之前
+  可在 Prometheus 中按 `worker_id` 排除或接受）。
+
+### 17.11 测试计划
+
+单元 / 组件测试（CI 常规任务）：
+
+- 指标监听：无 token、错误 token、长度不同的 token、前缀匹配的 token 均 401；正确 token 200 且为 Prometheus 文本格式；
+  非 `GET /metrics` 返回 404/405；3000 与 3001 上的 `/metrics` 为 404；并发上限；日志中没有 token 与 `Authorization`。
+- 配置：`METRICS_PORT` 设置而 token 文件缺失、为符号链接、权限过宽、过短时拒绝启动；`METRICS_HOST` 为通配地址或与其他
+  监听冲突时拒绝启动；非 loopback 的 `METRICS_HOST` 进入 protected。
+- 数据库采集（`agent_runtime_test`）：各 gauge 与表内容一致；已删除 Workspace 不出现；数据库不可用时 `collector_up=0`、
+  省略数据库指标、HTTP 仍 200 且含进程内指标。
+- 埋点：Gateway 对 `platform`/`upstream` 来源与状态类计数正确，首包耗时在写头时记录（SSE 长连接不拉长直方图）；
+  WebSocket 连接 gauge 在关闭、revoke 断开后回落；Worker 命令的 ok/error/timeout/not_connected/connection_closed 各一例；
+  认证成功/失败/锁定/被限速计数（锁定时仍不执行 scrypt）；后台任务失败计数。
+- 用量：心跳中非本 Worker、非运行中、未来时间戳的条目被丢弃；样本超过 `WORKER_OFFLINE_AFTER_MS` 或 Worker 断开后序列
+  消失；Workspace 删除后序列消失；普通用户的 API 只看到自己 Workspace 的 `usage`。
+- Worker：`cpuCores` 的差分计算（首样本 null、计数回退 null、正常值）；内存口径 `usage − inactive_file`；只对带 managed
+  label 的容器采样；采样超时不阻塞心跳；OOM 事件按 label 过滤与按 Workspace 计数、重连退避（fake Docker）。
+- 标签卫生：在含 email、显示名、Workspace 名称、路径、IP 的测试数据下渲染完整 `/metrics`，断言输出中不出现这些值，
+  且每个序列的标签名都在白名单中。
+- 协议：v5 heartbeat 正反例（越界数值、超长数组、未知字段）；v4 hello 被拒绝。
+- 告警规则：`promtool check rules` + `promtool test rules`（CI 中以 pinned Prometheus 镜像运行，ARM64 runner 有 Docker）。
+- 面板：JSON 校验与指标名引用检查（17.9）。
+
+真实环境测试：
+
+- `pnpm test:e2e:runtime` 增加：在真实 Workspace 容器中运行两个忙循环，Worker 上报的 `cpuCores` 在 1.6～2.0 之间
+  （上限 2 核）；分配 1 GiB 内存后 `memoryBytes` 与同一时刻 `docker stats` 的内存相差 < 5%；超过内存上限触发 OOM 事件计数。
+- `pnpm test:egress` 增加：`arw-` 侧连接宿主机上的指标端口被丢弃。
+- 实现开工 spike（需负责人同意后对开发网关执行）：在开发 LiteLLM 上启用 `prometheus` callback，确认专用 key 能读取
+  `/metrics`、不能调用管理路由与推理（`models: []`、预算 0），确认指标标签中不含 email、prompt；确认 Prometheus 容器能
+  读取 `0600` token 文件与命名卷权限。
+
+**变异检查**（实现时执行并记录）：去掉 token 比较；改为前缀比较；把 `/metrics` 注册到 Fastify 主应用；允许
+`METRICS_HOST=0.0.0.0`；接受非本 Worker 的用量条目；不清理陈旧序列；CPU 用累计值代替差分；内存不减 `inactive_file`；
+给 Gateway 计数加上路径标签；`WorkspaceDiskNearLimit` 阈值改为 0.99；`WorkerOffline` 去掉 `enabled` 条件——对应测试
+（含 `promtool` 测试）均应失败。
+
+### 17.12 验收
+
+自动验收：上述测试全部通过，CI 绿（含 `promtool` 与面板校验）。
+
+人工验收（详细步骤随交付说明给出），要点与预期结果：
+
+0. **准备**（负责人，主 checkout 切到 `phase-17-observability`）：`tools/dev/init-metrics-token.sh`；`.env` 设置
+   `METRICS_PORT=9464`、`METRICS_TOKEN_FILE`；复制 `grafana.env.example` 到本机 `0600` 文件并设置密码；（Q7）按 runbook
+   创建 LiteLLM 指标专用 key 写入本机文件，`docker compose -f deploy/model-gateway/compose.yml up -d --force-recreate`；
+   `docker compose -f deploy/observability/compose.yml up -d`；重启 Control Plane 与全部 Worker（含 worker-c，协议 v5）。
+   预期：Prometheus `http://127.0.0.1:9090/targets` 中 control-plane（与 litellm）为 UP；Grafana `http://127.0.0.1:3300`
+   登录后三个面板有数据。
+1. 端点安全：`curl -i 127.0.0.1:9464/metrics` 为 401，带 token 为 200；`curl -i <LAN/Tailscale 地址>:3000/metrics` 与
+   `:3001/metrics` 为 404；在 Workspace Terminal 中 `curl -m 3 http://<bridge 网关>:9464/metrics`、`:9090`、`:3300` 均失败；
+   `/metrics` 输出中搜索测试用户的 email、Workspace 名称均无结果。
+2. 实际用量：在 Workspace Terminal 中运行 `yes > /dev/null & yes > /dev/null &`，30 秒内 Portal 卡片显示约 2 / 2 核，与宿主机
+   `docker stats --no-stream` 的 CPU%/100 相差 < 10%；`python3 -c "b=bytearray(1<<30); input()"` 后内存与 `docker stats` 相差
+   < 5%；停止进程后回落。Admin Workers 显示主机 CPU/内存与 Workspace 合计。
+3. OOM：在 Workspace 中分配超过 4 GiB 内存，进程被终止；Portal 显示 OOM 提示；`AgentRuntimeWorkspaceOOMKilled` 触发。
+4. **Worker 离线**：停止 worker-c（或本机 Worker）进程；约 1.5 分钟内 Prometheus Alerts 中 `AgentRuntimeWorkerOffline`
+   为 firing（35 s 离线判定 + 1m `for`），Grafana 总览显示该 Worker 离线；恢复后告警解除。
+5. **磁盘接近上限**：把某 Workspace 上限调到 2 GiB，`fallocate -l 1900M /workspace/fill`；约 6 分钟内（60 s 采样 + 5m `for`）
+   `AgentRuntimeWorkspaceDiskNearLimit` 为 firing；删除文件后解除。
+6. Gateway 指标：打开 pi-web 对话，请求率与 WebSocket 连接数上升；停止该 Workspace 所在 Worker 后访问，`platform` 5xx
+   计数上升。
+7. 命令超时：`kill -STOP <Worker pid>` 后在 Portal 启动/停止一个 Workspace，15 秒后得到超时错误，
+   `AgentRuntimeWorkerCommandTimeouts` 触发；`kill -CONT` 恢复。
+8. 认证：同一账户连续输错密码触发锁定，面板中锁定数与被限速次数增加；Audit 与 Phase 15 行为不变。
+9. 模型（Q7）：用平台模型对话后，“模型网关”面板按用户显示 token 与 spend，与 Portal 用量一致；禁用该用户后吊销积压
+   短暂出现并归零；`docker compose stop` 网关 10 分钟后 `AgentRuntimeModelGatewayUnreachable` 触发。
+10. 重启 Control Plane：10 秒内用量序列恢复，Prometheus 中计数器正常（无负速率）；停止 Prometheus/Grafana 不影响平台任何功能。
+
+失败时收集：Control Plane / Worker 日志（按 workerId、workspaceId）、`curl -s -H "Authorization: Bearer $(cat <token 文件>)"
+127.0.0.1:9464/metrics` 的相关行、Prometheus Targets / Alerts 页面截图、`docker stats --no-stream` 输出、`docker logs`
+Prometheus/Grafana 容器。
+
+### 17.13 待决问题
+
+2026-10-10：Q1–Q12 负责人确认全部按建议执行。负责人在 worker-c（另一台 Q8B）上确认 Docker API 1.56、cgroup v2 + systemd driver，one-shot stats 可用。
+
+- **Q1 抓取拓扑**（**已确认：按建议**）：Control Plane 作为唯一抓取目标，Worker 数据经心跳上报（17.3），Worker 不新增监听端口？建议采用。
+  备选是每个 Worker 自己暴露 `/metrics`（需要新端口、新 token、Prometheus 到每台 Worker 的网络路径与服务发现，
+  Portal 仍需经心跳拿用量，两份数据要对齐）。
+- **Q2 指标端点**（**已确认：按建议**）：独立端口（默认 `127.0.0.1:9464`）+ 文件中的 Bearer token、禁止通配地址、未配置即关闭？建议采用。
+  备选是挂在 Portal API 上以 admin session 认证（Prometheus 难以使用 Cookie session，且会经反向代理暴露给全部用户）。
+- **Q3 每 Workspace 指标与 `user_id`**（**已确认：按建议**）：每 Workspace 序列只带 `workspace_id`、`worker_id`，`user_id` 只在
+  `agent_runtime_workspace_info` 中、按需 join？建议采用。不放 email/用户名/Workspace 名称（个人信息、可任意修改、
+  基数不可控）；如运维需要在面板上看到人名，从 Portal 按 UUID 查找。
+- **Q4 live usage 不持久化**（**已确认：按建议**）：CPU/内存等实时用量只存 Control Plane 内存，本 Phase 无 migration？建议采用；Phase 18 空闲
+  回收需要的 CPU 窗口由 Phase 18 自行设计。
+- **Q5 采样频率**（**已确认：按建议**）：容器 stats 随每次心跳（10 s）采样一次？one-shot 单次约 5 ms，建议采用。
+- **Q6 OOM 计数**（**已确认：按建议**）：经 Docker 事件流（`event=oom`）计数（建议，Engine API、与 AGENTS 第 8 节一致；事件流断开期间可能漏计）；
+  备选读取 cgroup v2 `memory.events` 的 `oom_kill`（精确累计，但依赖宿主机 cgroup 路径与 driver 布局）；或本 Phase 不做 OOM。
+- **Q7 LiteLLM 指标**（**已确认：按建议**）：启用 LiteLLM 自带 Prometheus 指标并纳入抓取与“模型网关”面板，Prometheus 使用一把专用 key（无模型、
+  预算 0，由负责人按 runbook 用 master key 创建，存本机 `0600` 文件）？建议采用，以开工 spike（17.11）确认专用 key 的
+  权限为前提。备选：不抓 LiteLLM，模型用量只在 Portal（Phase 16 已有）。
+- **Q8 告警投递**（**已确认：按建议**）：本 Phase 不部署 Alertmanager，验收以 Prometheus Alerts 页面为准，runbook 给出 Alertmanager + webhook
+  的接入示例？建议采用（企业通知渠道各不相同，属于部署配置）。备选是在开发 compose 中加入 Alertmanager（`v0.34.1`）与
+  空 receiver。
+- **Q9 版本与端口**（**已确认：按建议**）：Prometheus `v3.13.4`、Grafana `13.2.3`（pin digest）；Prometheus `127.0.0.1:9090`、Grafana
+  `127.0.0.1:3300`、指标端口 9464；开发 compose 使用 `network_mode: host`？建议采用。
+- **Q10 出口拦截计数**（**已确认：按建议**）：不在本 Phase 给 Phase 14 规则加 `counter`（需要改动已验收的规则集与校验）？建议采用，留到 v1.x。
+- **Q11 告警阈值**（**已确认：按建议**）：17.9 表中的默认值（磁盘 90%/5m、Worker 离线 1m、文件系统 10%/5%、吊销积压 15 分钟、Gateway 平台
+  5xx 5%）？请确认或给出数值。
+- **Q12 协议 v5**（**已确认：按建议**）：与 v4 不兼容、同时升级？建议是。
+
+### 17.14 实现中的调整（2026-10-10）
+
+- **LiteLLM 指标 key（17.11 spike，`pnpm test:model-gateway` 中的一次性 LiteLLM + mock 上游，无真实 key）**：
+  `llm_api` / `read_only` / `default` key 访问 `/metrics` 均为 401（“Virtual key is not allowed to call this route”），
+  Workspace 的虚拟 key 因此读不到网关指标。Prometheus 使用 `allowed_routes: ["/metrics"]`、
+  `models: ["no-default-models"]` 的专用 key：`/metrics` 200，推理、`/key/*`、`/user/*`、`/spend/logs`、
+  `/global/spend`、`/model/info`、`/v1/models` 全部 403。该行为已写成 `litellm.docker.test.ts` 的断言。LiteLLM 指标
+  标签含 `client_ip`、`user_agent`、`user_email`、`hashed_api_key`，Prometheus 用 `labeldrop` 去掉（保留平台 User
+  UUID `user` 与 `api_key_alias`）。
+- **scrape 时序列每次在新的 Registry 中构建**再与进程内指标合并：prom-client 的无标签 gauge 在 reset 后仍输出 0，
+  数据库失败或网关关闭时会出现误导性的 0；新 Registry 让读不到的序列直接缺失，且并发 scrape 互不干扰。
+- **主机内存**用 `os.freemem()`（Linux 上即 `MemAvailable`）与 `os.totalmem()`，不自行解析 `/proc/meminfo`。
+- `GET /api/admin/workers` 的 `usage` 只在 Worker 为 `ONLINE` 时返回；`/api/workspaces*` 的 `usage` 只在 `RUNNING` 时返回，
+  并且只采信 assignment 属于上报 Worker、状态为 `RUNNING`/`STARTING` 的样本。
+- `agent_runtime_auth_logins_total` 的 `result` 增加 `rate_limited`（锁定期间被拒的本地登录与 SSO callback）；SSO 发起的
+  限速只计入 `agent_runtime_auth_rate_limited_total{endpoint="sso_start"}`。
+- `packages/gateway` 的代理增加两个回调（`onUpstreamResponse`、`onRejected`），用于区分 Gateway 自己的响应与 pi-web 的
+  响应、记录首包时间与 WebSocket 升级失败；代理行为不变。
+- 开发 compose：Prometheus 以 `OBSERVABILITY_UID:GID`（默认 1000）运行才能读 `0600` token 文件，一次性服务
+  `prometheus-volume-owner` 把命名卷交给该用户；token 文件路径经 `METRICS_TOKEN_FILE`、`LITELLM_METRICS_TOKEN_FILE`、
+  `GRAFANA_ENV_FILE` 显式传入（compose 不展开 `~`）。用一次性容器验证：`promtool check config` 通过；Grafana 13.2.3
+  加载 3 个面板与数据源。
+- 告警规则 19 条（17.9 表中的文件系统告警拆为 warning/critical 两条）。`promtool test rules` 覆盖每条告警的触发、未到
+  `for` 不触发与恢复，并核对 annotations 渲染；CI 质量门中运行。
+- **变异检查（已执行，23 项全部被测试发现）**：去掉 token 比较；前缀比较；`/metrics` 挂到 Portal API；允许通配
+  `METRICS_HOST`；不检查 token 文件权限；接受非本 Worker 的用量；不清理陈旧样本；保留断开 Worker 的用量；暴露已停止
+  Workspace 的用量；API 在非 RUNNING 时返回用量（首轮存活，补测试后被发现）；CPU 用累计值；内存不减 `inactive_file`；
+  采样非受管容器；统计其他 Worker 的 OOM；Gateway 指标带路径；Workspace 名称作标签；错误码标签无上限；不计命令超时；
+  不计锁定；`WorkspaceDiskNearLimit` 阈值改 0.99；`WorkerOffline` 去掉 `enabled` 条件；去掉“曾经心跳”条件；Gateway 告警
+  计入 upstream 5xx。
+- 真实环境验证：`pnpm test:e2e:runtime` 新用例（两个忙循环对 1 核上限测得 0.8～1.1 核；300 MiB 内存与同一时刻
+  `docker stats` 相差 < 5%；超过 1 GiB 上限触发 OOM 事件计数）；`pnpm test:egress` 新用例（Worker 宿主机上的 9464、
+  9090、3300 从 `arw-` 侧不可达，启用与不启用中继两种规则集）；指标快照在 `agent_runtime_test` 上的集成测试（含 2 秒
+  语句超时）。
 
 ## Phase 18：生命周期运维
 
