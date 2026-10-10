@@ -521,7 +521,8 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
       expect(busy?.pidsLimit).toBe(resources.pidsLimit);
 
       // 300 MiB held in memory: the same figure `docker stats` prints.
-      await detached('python3 -c "b = bytearray(300 * 1024 * 1024); import time; time.sleep(60)"');
+      // Filled, not zero pages: zero-filled allocations may stay unbacked on some kernels.
+      await detached(`python3 -c "import time; b = b'x' * (300 * 1024 * 1024); time.sleep(60)"`);
       await new Promise((resolve) => setTimeout(resolve, 4_000));
       const [sample] = (await sampler.sample()).filter((entry) => entry.workspaceId === usageWorkspaceId);
       const cli = JSON.parse(
@@ -535,8 +536,9 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
 
       // Beyond the 1 GiB limit: the kernel kills the process and Docker reports an OOM event.
       // The allocation above is released first so the new one is the only large process.
-      await execExitCode(container, ["sh", "-c", "pkill -f 'bytearray\\(300' || true"]);
-      expect(await execExitCode(container, ["python3", "-c", "b = bytearray(2 * 1024 ** 3)"])).not.toBe(0);
+      await execExitCode(container, ["sh", "-c", "pkill -f 'time.sleep\\(60\\)' || true"]);
+      // 3 GiB of written memory exceeds the 1 GiB limit plus its swap allowance.
+      expect(await execExitCode(container, ["python3", "-c", "b = b'x' * (3 * 1024 ** 3)"])).not.toBe(0);
       await expect.poll(() => oom.count(usageWorkspaceId), { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
       const [afterOom] = (await sampler.sample()).filter((entry) => entry.workspaceId === usageWorkspaceId);
       expect(afterOom?.oomKills).toBeGreaterThanOrEqual(1);
