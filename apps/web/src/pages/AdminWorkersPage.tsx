@@ -4,7 +4,7 @@ import { api } from "../api.js";
 import { ConfirmDialog } from "../components/Modal.js";
 import { ModelGatewayPanel } from "../components/ModelGatewayPanel.js";
 import { RelativeTime } from "../components/RelativeTime.js";
-import { formatBytes as formatSize, workerStatusLabel } from "../labels.js";
+import { formatBytes as formatSize, formatCores, workerStatusLabel } from "../labels.js";
 import type { SessionResponse, Worker } from "../types.js";
 
 const CAPABILITY_LABELS: Record<string, string> = {
@@ -19,6 +19,34 @@ const CAPABILITY_LABELS: Record<string, string> = {
 function formatBytes(value: number | null): string {
   if (value === null) return "—";
   return `${(value / 1024 ** 3).toFixed(value >= 10 * 1024 ** 3 ? 0 : 1)} GiB`;
+}
+
+/**
+ * Host capacity, plus observed usage while the Worker reports it (specs.md Phase 17.7):
+ * host CPU busy share, available memory and the Workspaces' combined CPU and memory.
+ */
+export function hostResourcesText(worker: Pick<Worker, "systemResources" | "usage">): {
+  summary: string;
+  detail: string | null;
+} {
+  const capacity = `${worker.systemResources.logicalCpuCount ?? "—"} vCPU · ${formatBytes(worker.systemResources.memoryBytes)}`;
+  const usage = worker.usage;
+  if (usage === undefined || usage === null) return { summary: capacity, detail: null };
+  const cpu = usage.hostCpuUtilization === null ? "—" : `${Math.round(usage.hostCpuUtilization * 100)}%`;
+  return {
+    summary: `CPU ${cpu} · 可用内存 ${formatSize(usage.hostMemoryAvailableBytes)} / ${formatSize(usage.hostMemoryTotalBytes)}`,
+    detail: `${capacity}；${usage.runningWorkspaces} 个运行中的 Workspace 合计 CPU ${formatCores(usage.workspaceCpuCores)} 核、内存 ${formatSize(usage.workspaceMemoryBytes)}；负载 ${usage.load1.toFixed(2)}`,
+  };
+}
+
+function HostResources({ worker }: { worker: Worker }) {
+  const text = hostResourcesText(worker);
+  return (
+    <span title={text.detail ?? "Worker 未上报实际用量"}>
+      {text.summary}
+      {text.detail === null ? null : <small>{text.detail}</small>}
+    </span>
+  );
 }
 
 /** The Worker's model relay state (Phase 16.4). */
@@ -142,7 +170,7 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
                         <strong>{worker.assignedWorkspaces}/{worker.maxWorkspaces ?? "—"}</strong>
                         <span className="capacity-track" aria-label="Workspace 容量使用情况"><i style={{ width: `${worker.maxWorkspaces === null || worker.maxWorkspaces === 0 ? 0 : Math.min(100, worker.assignedWorkspaces / worker.maxWorkspaces * 100)}%` }} /></span>
                       </td>
-                      <td>{worker.systemResources.logicalCpuCount ?? "—"} vCPU · {formatBytes(worker.systemResources.memoryBytes)}</td>
+                      <td><HostResources worker={worker} /></td>
                       <td><RelativeTime value={worker.lastHeartbeatAt} /></td>
                       <td>
                         <span className="row-actions">

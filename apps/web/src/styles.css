@@ -305,6 +305,9 @@ td small { display: block; margin-top: 4px; color: var(--text-muted); }
 .disk-full, .disk-full small { color: var(--danger); }
 .disk-usage small { font-size: .7rem; margin-top: 4px; }
 td .disk-usage { align-items: flex-start; }
+.resource-usage { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+td .resource-usage { align-items: flex-start; }
+.resource-usage > small { font-size: .7rem; color: var(--warning); }
 .notice.banner { border-color: #b9d6c4; background: #f2f8f4; color: var(--success); }
 
 /* Platform model access (Phase 16.8). */

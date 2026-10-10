@@ -2,6 +2,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from "react"
 
 import { api } from "../api.js";
 import { DiskUsage } from "../components/DiskUsage.js";
+import { ResourceUsage } from "../components/ResourceUsage.js";
 import { ConfirmDialog } from "../components/Modal.js";
 import { RelativeTime } from "../components/RelativeTime.js";
 import {
@@ -43,6 +44,8 @@ function ModelAccessBadge({ access }: { access: ModelAccess }) {
 }
 
 export const WORKSPACE_POLL_INTERVAL_MS = 3_000;
+/** Refresh of observed CPU/memory while a Workspace runs and the page is visible (Phase 17.7). */
+export const WORKSPACE_USAGE_POLL_INTERVAL_MS = 15_000;
 
 export function hasTransitionalWorkspace(workspaces: readonly Pick<Workspace, "state">[]): boolean {
   return workspaces.some((workspace) => TRANSITIONAL_WORKSPACE_STATES.includes(workspace.state));
@@ -101,6 +104,16 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
     }, WORKSPACE_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [polling, loadWorkspaces]);
+
+  const running = workspaces.some((workspace) => workspace.state === "RUNNING");
+  useEffect(() => {
+    if (!running || polling) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void loadWorkspaces().catch(() => undefined);
+    }, WORKSPACE_USAGE_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [running, polling, loadWorkspaces]);
 
   async function createWorkspace(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -274,6 +287,9 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
                 <div><dt>运行节点</dt><dd>{workspace.workerId ?? "等待分配"}</dd></div>
                 <div><dt>创建于</dt><dd><RelativeTime value={workspace.createdAt} /></dd></div>
                 <div><dt>磁盘</dt><dd><DiskUsage disk={workspace.disk} /></dd></div>
+                {workspace.usage === undefined || workspace.usage === null ? null : (
+                  <div><dt>实际用量</dt><dd><ResourceUsage usage={workspace.usage} /></dd></div>
+                )}
                 {workspace.modelAccess === undefined || workspace.modelAccess.status === "disabled" ? null : (
                   <div><dt>平台模型</dt><dd><ModelAccessBadge access={workspace.modelAccess} /></dd></div>
                 )}

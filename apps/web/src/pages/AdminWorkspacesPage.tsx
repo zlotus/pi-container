@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api } from "../api.js";
 import { DiskUsage } from "../components/DiskUsage.js";
+import { ResourceUsage } from "../components/ResourceUsage.js";
 import { useTextPrompt } from "../components/Modal.js";
 import { RelativeTime } from "../components/RelativeTime.js";
 import { formatBytes, parseGibInput, workspaceStateLabel } from "../labels.js";
@@ -160,7 +161,7 @@ export function AdminWorkspacesPage({ session }: { session: SessionResponse }) {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>Workspace</th><th>所有者</th><th>状态</th><th>Worker</th><th>磁盘</th><th>创建于</th><th>最近活动</th><th>操作</th></tr>
+                <tr><th>Workspace</th><th>所有者</th><th>状态</th><th>Worker</th><th>磁盘</th><th>CPU / 内存</th><th>创建于</th><th>最近活动</th><th>操作</th></tr>
               </thead>
               <tbody>
                 {visible.map((workspace) => (
@@ -170,6 +171,7 @@ export function AdminWorkspacesPage({ session }: { session: SessionResponse }) {
                     <td><span className={`state state-${workspace.state.toLowerCase()}`}>{workspaceStateLabel(workspace.state)}</span></td>
                     <td>{workspace.workerId ?? "未分配"}</td>
                     <td><DiskUsage disk={workspace.disk} /></td>
+                    <td>{workspace.usage === undefined || workspace.usage === null ? "—" : <ResourceUsage usage={workspace.usage} />}</td>
                     <td><RelativeTime value={workspace.createdAt} /></td>
                     <td><RelativeTime value={workspace.lastActivityAt} /></td>
                     <td>

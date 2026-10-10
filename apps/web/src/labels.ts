@@ -97,6 +97,18 @@ export function formatBytes(value: number | null | undefined): string {
 
 export type DiskUsageLevel = "unknown" | "ok" | "warning" | "full";
 
+/** CPU cores with two decimals at most (`0.35`, `2`). */
+export function formatCores(value: number | null): string {
+  if (value === null || !Number.isFinite(value) || value < 0) return "—";
+  return String(Math.round(value * 100) / 100);
+}
+
+/** CPU or memory against its limit; warning from 90 % (Phase 17.7). */
+export function resourceUsageLevel(used: number | null, limit: number): "unknown" | "ok" | "warning" {
+  if (used === null || limit <= 0) return "unknown";
+  return used / limit >= 0.9 ? "warning" : "ok";
+}
+
 /** Portal thresholds (specs.md Phase 15.7): warn from 90 %, full at the limit. */
 export function diskUsageLevel(usedBytes: number | null, limitBytes: number): DiskUsageLevel {
   if (usedBytes === null || limitBytes <= 0) return "unknown";
