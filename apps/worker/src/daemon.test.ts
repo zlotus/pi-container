@@ -40,6 +40,7 @@ function fakeRuntime(): WorkspaceRuntime {
 }
 
 const STORAGE_STATUS = { enforced: true, fsType: "xfs", totalBytes: 1_000, freeBytes: 500 };
+const HOST_USAGE = { cpuUtilization: null, memoryTotalBytes: 8, memoryAvailableBytes: 4, load1: 0 };
 
 function fakeStorage(enforced = true): WorkerStorage {
   const status = { ...STORAGE_STATUS, enforced };
@@ -132,7 +133,7 @@ describe("worker daemon messages", () => {
     }, capabilities, { enforced: true, revision: 4 }, STORAGE_STATUS);
 
     expect(message).toMatchObject({
-      version: 4,
+      version: 5,
       type: "worker.hello",
       payload: {
         workerId: "worker-01",
@@ -158,12 +159,14 @@ describe("worker daemon messages", () => {
       new Date("2026-09-10T08:00:00.000Z"),
       { enforced: false, revision: null },
       STORAGE_STATUS,
+      HOST_USAGE,
     );
     const second = buildWorkerHeartbeat(
       "worker-01",
       new Date("2026-09-10T08:00:10.000Z"),
       { enforced: true, revision: 1 },
       STORAGE_STATUS,
+      HOST_USAGE,
     );
 
     expect(first.requestId).not.toBe(second.requestId);
@@ -269,7 +272,7 @@ describe("worker daemon egress", () => {
       ]) {
         workerSocket?.send(
           JSON.stringify({
-            version: 4,
+            version: 5,
             type: "worker.egress.apply",
             requestId,
             payload: policy,
@@ -279,7 +282,7 @@ describe("worker daemon egress", () => {
       await vi.waitFor(() => expect(received).toHaveLength(3));
       expect(egress.apply).toHaveBeenCalledWith(policy);
       expect(received[1]).toEqual({
-        version: 4,
+        version: 5,
         type: "response.ok",
         requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d01",
         payload: {
@@ -288,7 +291,7 @@ describe("worker daemon egress", () => {
         },
       });
       expect(received[2]).toEqual({
-        version: 4,
+        version: 5,
         type: "response.error",
         requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d02",
         payload: {
@@ -364,7 +367,7 @@ describe("worker daemon disk quotas", () => {
 
       workerSocket?.send(
         JSON.stringify({
-          version: 4,
+          version: 5,
           type: "workspace.storage.set",
           requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d03",
           payload: { workspaceId: sample.workspaceId, diskLimitBytes: 5 * 1024 ** 3 },
@@ -449,7 +452,7 @@ describe("worker daemon model access (Phase 16.9)", () => {
       modelAccess,
     );
     const command = (type: string, requestId: string, payload: Record<string, unknown>) =>
-      workerSocket?.send(JSON.stringify({ version: 4, type, requestId, payload }));
+      workerSocket?.send(JSON.stringify({ version: 5, type, requestId, payload }));
     const response = (requestId: string) => received.find((entry) => entry.requestId === requestId);
     try {
       daemon.start();
@@ -551,7 +554,7 @@ describe("worker daemon model access (Phase 16.9)", () => {
       expect(received[0]?.payload.modelRelay).toEqual({ enabled: false, port: null, listening: false });
       workerSocket?.send(
         JSON.stringify({
-          version: 4,
+          version: 5,
           type: "workspace.model_key.set",
           requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d21",
           payload: { workspaceId, keyAlias, secret: SECRET },

@@ -11,7 +11,12 @@ import type { AddressInfo, Socket } from "node:net";
 import { performance } from "node:perf_hooks";
 
 import type { Logger } from "@agent-runtime/logging";
-import { MODEL_RELAY_ROUTES, type ModelRelayStatus } from "@agent-runtime/protocol";
+import {
+  MODEL_RELAY_ROUTES,
+  ModelRelayResultSchema,
+  type ModelRelayResult,
+  type ModelRelayStatus,
+} from "@agent-runtime/protocol";
 
 /**
  * Worker model relay (specs.md Phase 16.4). Workspaces never reach the model gateway: Pi
@@ -114,6 +119,11 @@ function sendError(response: ServerResponse, status: number, code: string, messa
   response.end(body);
 }
 
+function statusResult(status: number): ModelRelayResult {
+  if (status >= 500) return "5xx";
+  return status >= 400 ? "4xx" : "2xx";
+}
+
 export class ModelRelay {
   readonly #options: Required<Omit<ModelRelayOptions, "host">> & { host: string };
   #server: Server | null = null;
@@ -123,6 +133,11 @@ export class ModelRelay {
   #refreshing: Promise<void> | null = null;
   readonly #active = new Map<string, number>();
   readonly #identities = new WeakMap<Socket, string>();
+  /** Cumulative counters for the heartbeat (specs.md Phase 17.4). */
+  readonly #results: Record<ModelRelayResult, number> = Object.fromEntries(
+    ModelRelayResultSchema.options.map((result) => [result, 0]),
+  ) as Record<ModelRelayResult, number>;
+  #rejectedConnections = 0;
 
   constructor(options: ModelRelayOptions) {
     this.#options = {
@@ -136,7 +151,18 @@ export class ModelRelay {
   }
 
   status(): ModelRelayStatus {
-    return { enabled: true, port: this.#options.port, listening: this.#listening };
+    let activeRequests = 0;
+    for (const count of this.#active.values()) activeRequests += count;
+    return {
+      enabled: true,
+      port: this.#options.port,
+      listening: this.#listening,
+      stats: {
+        requests: { ...this.#results },
+        rejectedConnections: this.#rejectedConnections,
+        activeRequests,
+      },
+    };
   }
 
   /** The bound port (differs from the configured one only when it was 0, in tests). */
@@ -215,11 +241,13 @@ export class ModelRelay {
     const workspaceId = await this.#identify(request.socket);
     if (workspaceId === null) {
       // Not a running managed Workspace on this host: no response at all.
+      this.#rejectedConnections += 1;
       request.socket.destroy();
       return;
     }
     const path = request.url ?? "";
-    const log = (status: number, bytesIn: number, bytesOut: number) =>
+    const log = (status: number, bytesIn: number, bytesOut: number, result: ModelRelayResult) => {
+      this.#results[result] += 1;
       this.#options.log.info(
         {
           workspaceId,
@@ -232,10 +260,11 @@ export class ModelRelay {
         },
         "model relay request",
       );
+    };
 
     if (request.method !== "POST" || !ALLOWED_RELAY_PATHS.has(path)) {
       sendError(response, 404, "MODEL_RELAY_ROUTE_NOT_FOUND", "Only model inference routes are available");
-      log(404, 0, 0);
+      log(404, 0, 0, "rejected_path");
       return;
     }
     const virtualKey = this.#options.keys.get(workspaceId);
@@ -246,19 +275,19 @@ export class ModelRelay {
         "MODEL_KEY_UNAVAILABLE",
         "Platform model access is not available for this Workspace right now",
       );
-      log(403, 0, 0);
+      log(403, 0, 0, "no_key");
       return;
     }
     const declaredLength = Number(request.headers["content-length"] ?? "0");
     if (!Number.isFinite(declaredLength) || declaredLength > this.#options.maxBodyBytes) {
       sendError(response, 413, "MODEL_RELAY_BODY_TOO_LARGE", "Request body is too large");
-      log(413, 0, 0);
+      log(413, 0, 0, "body_too_large");
       return;
     }
     const active = this.#active.get(workspaceId) ?? 0;
     if (active >= this.#options.maxConcurrentPerWorkspace) {
       sendError(response, 429, "MODEL_RELAY_BUSY", "Too many concurrent model requests");
-      log(429, 0, 0);
+      log(429, 0, 0, "concurrency_limited");
       return;
     }
     this.#active.set(workspaceId, active + 1);
@@ -276,7 +305,7 @@ export class ModelRelay {
     response: ServerResponse,
     path: string,
     virtualKey: string,
-    log: (status: number, bytesIn: number, bytesOut: number) => void,
+    log: (status: number, bytesIn: number, bytesOut: number, result: ModelRelayResult) => void,
   ): Promise<void> {
     return new Promise<void>((resolve) => {
       const upstream = this.#options.upstream;
@@ -285,11 +314,12 @@ export class ModelRelay {
       let bytesIn = 0;
       let bytesOut = 0;
       let status = 502;
+      let result: ModelRelayResult | null = null;
       let settled = false;
       const finish = () => {
         if (settled) return;
         settled = true;
-        log(status, bytesIn, bytesOut);
+        log(status, bytesIn, bytesOut, result ?? statusResult(status));
         resolve();
       };
 
@@ -341,6 +371,7 @@ export class ModelRelay {
         if (settled) return;
         if (!response.headersSent) {
           status = 502;
+          result = "gateway_unavailable";
           sendError(response, 502, "MODEL_GATEWAY_UNAVAILABLE", "The model gateway is not reachable");
         } else {
           response.destroy();
@@ -359,6 +390,7 @@ export class ModelRelay {
           outgoing.destroy();
           request.unpipe(outgoing);
           status = 413;
+          result = "body_too_large";
           sendError(response, 413, "MODEL_RELAY_BODY_TOO_LARGE", "Request body is too large");
           finish();
         }

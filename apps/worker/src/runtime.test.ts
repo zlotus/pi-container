@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 
 import type Docker from "dockerode";
 import { afterEach, describe, expect, it } from "vitest";
@@ -138,6 +139,12 @@ class FakeDocker {
       }));
   }
 
+  eventFilters: unknown = null;
+  async getEvents(options: { filters?: unknown }) {
+    this.eventFilters = options.filters;
+    return new PassThrough();
+  }
+
   getContainer(id: string) {
     const container = [...this.containers.values()].find(
       (candidate) => candidate.id === id,
@@ -196,6 +203,17 @@ class FakeContainer {
 
   async stop() {
     this.inspection.State.Running = false;
+  }
+
+  readonly statsCalls: unknown[] = [];
+  async stats(options: unknown) {
+    this.statsCalls.push(options);
+    return {
+      cpu_stats: { cpu_usage: { total_usage: 3_000_000_000 } },
+      memory_stats: { usage: 3_000, limit: 4_000, stats: { inactive_file: 1_000 } },
+      pids_stats: { current: 7, limit: 512 },
+      networks: { eth0: { rx_bytes: 5, tx_bytes: 6 } },
+    };
   }
 
   async wait() {
@@ -1284,6 +1302,53 @@ describe("Docker Workspace Runtime model access (Phase 16.4, 16.5)", () => {
     // Labels from another Worker are not endpoints either.
     container.inspection.Config.Labels = { ...container.inspection.Config.Labels, worker_id: "worker-02" };
     await expect(runtime.relayEndpoints()).resolves.toEqual([]);
+  });
+
+  it("samples usage only of running managed Workspaces, one-shot (Phase 17.5)", async () => {
+    const { config, docker, runtime } = await fixture();
+    await runtime.ensure(WORKSPACE_ID, config.RUNTIME_IMAGE, RESOURCES, STORAGE);
+    await expect(runtime.runningWorkspaceContainers()).resolves.toEqual([]);
+    await runtime.start(WORKSPACE_ID);
+    const [running] = await runtime.runningWorkspaceContainers();
+    expect(running?.workspaceId).toBe(WORKSPACE_ID);
+    await expect(runtime.containerStats(running?.containerId ?? "")).resolves.toMatchObject({
+      cpuUsageNanos: 3_000_000_000,
+      memoryUsageBytes: 3_000,
+      memoryInactiveFileBytes: 1_000,
+      pids: 7,
+    });
+    const container = docker.containers.get(`agent-runtime-${WORKSPACE_ID}`);
+    if (container === undefined) throw new Error("container fixture missing");
+    expect(container.statsCalls).toEqual([{ stream: false, "one-shot": true }]);
+
+    // Another name or another Worker's labels are never sampled.
+    docker.containers.delete(`agent-runtime-${WORKSPACE_ID}`);
+    docker.containers.set("impostor", container);
+    await expect(runtime.runningWorkspaceContainers()).resolves.toEqual([]);
+    docker.containers.delete("impostor");
+    docker.containers.set(`agent-runtime-${WORKSPACE_ID}`, container);
+    container.inspection.Config.Labels = { ...container.inspection.Config.Labels, worker_id: "worker-02" };
+    await expect(runtime.runningWorkspaceContainers()).resolves.toEqual([]);
+    expect(runtime.managedWorkspaceId(container.inspection.Config.Labels)).toBeNull();
+  });
+
+  it("subscribes to OOM events of its own managed containers only", async () => {
+    const { config, docker, runtime } = await fixture();
+    await runtime.oomEvents();
+    expect(docker.eventFilters).toEqual({
+      type: ["container"],
+      event: ["oom"],
+      label: ["app=agent-runtime-platform", "managed_by=worker", `worker_id=${config.WORKER_ID}`],
+    });
+    expect(
+      runtime.managedWorkspaceId({
+        app: "agent-runtime-platform",
+        managed_by: "worker",
+        worker_id: config.WORKER_ID,
+        workspace_id: WORKSPACE_ID,
+      }),
+    ).toBe(WORKSPACE_ID);
+    expect(runtime.managedWorkspaceId({ workspace_id: WORKSPACE_ID })).toBeNull();
   });
 
   it("returns the private metadata directory only for managed Workspaces", async () => {

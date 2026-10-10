@@ -215,6 +215,43 @@ describe("Worker model relay (Phase 16.4)", () => {
     expect((await send(port, { body: "{}" })).status).toBe(429);
   });
 
+  it("counts every outcome and rejected connection for the heartbeat (Phase 17.4)", async () => {
+    const gateway = await fakeGateway({ holdOpen: true });
+    const { relay, port } = await startRelay(gateway.url, [ENDPOINT], undefined, {
+      maxBodyBytes: 64,
+      maxConcurrentPerWorkspace: 1,
+    });
+    expect(relay.status().stats?.requests["2xx"]).toBe(0);
+    await send(port, { path: "/v1/models" });
+    await send(port, { body: "x".repeat(65) });
+    await send(port, { from: "127.0.0.4" });
+    const held = new Promise<void>((resolve) => {
+      const req = request(
+        { host: "127.0.0.1", port, localAddress: "127.0.0.2", method: "POST", path: "/v1/chat/completions" },
+        () => resolve(),
+      );
+      req.end("{}");
+    });
+    await held;
+    expect(relay.status().stats?.activeRequests).toBe(1);
+    await send(port, { body: "{}" });
+    expect(relay.status().stats).toMatchObject({
+      requests: { rejected_path: 1, body_too_large: 1, concurrency_limited: 1, "2xx": 0 },
+      rejectedConnections: 1,
+      activeRequests: 1,
+    });
+
+    const noKey = await startRelay(gateway.url, [ENDPOINT], {});
+    await send(noKey.port);
+    expect(noKey.relay.status().stats?.requests.no_key).toBe(1);
+    const down = await startRelay(new URL("http://127.0.0.1:1"), [ENDPOINT]);
+    await send(down.port);
+    expect(down.relay.status().stats?.requests).toMatchObject({ gateway_unavailable: 1, "5xx": 0 });
+    const ok = await startRelay((await fakeGateway()).url, [ENDPOINT]);
+    await send(ok.port);
+    await expect.poll(() => ok.relay.status().stats?.requests["2xx"]).toBe(1);
+  });
+
   it("aborts the upstream request when the Agent stops", async () => {
     const gateway = await fakeGateway({ holdOpen: true });
     const { port } = await startRelay(gateway.url, [ENDPOINT]);

@@ -14,6 +14,9 @@ import { DISABLED_MODEL_ACCESS, RelayModelAccess } from "./model-relay/access.js
 import { DockerWorkspaceRuntime } from "./runtime.js";
 import { StorageController } from "./storage/controller.js";
 import { ExecXfsQuotaTool } from "./storage/quota.js";
+import { OomEventCounter } from "./usage/oom.js";
+import { UsageReporter } from "./usage/reporter.js";
+import { WorkspaceUsageSampler } from "./usage/sampler.js";
 
 const config = loadWorkerConfig(process.env);
 const log = await createLogger("worker", LoggingConfigSchema.parse(process.env));
@@ -54,6 +57,16 @@ const modelAccess = modelGatewayUrl !== undefined
       log,
     })
   : null;
+const oomEvents = new OomEventCounter({ source: runtime, log });
+const usage = new UsageReporter(
+  new WorkspaceUsageSampler({
+    source: runtime,
+    oom: oomEvents,
+    cpuLimitCores: config.WORKSPACE_CPU_COUNT,
+  }),
+  undefined,
+  log,
+);
 const daemon = new WorkerDaemon(
   config,
   runtime,
@@ -62,6 +75,7 @@ const daemon = new WorkerDaemon(
   storage,
   log,
   modelAccess ?? DISABLED_MODEL_ACCESS,
+  usage,
 );
 const tls =
   config.WORKER_GATEWAY_TLS_CERT_PATH === undefined ||
@@ -81,6 +95,7 @@ const gateway = buildWorkerGateway({
 
 const shutdown = (): void => {
   daemon.stop();
+  oomEvents.stop();
   gateway.close();
   void modelAccess?.stop();
 };
@@ -112,4 +127,6 @@ await daemon.checkEgress();
 await daemon.checkStorage();
 await daemon.sampleDiskUsage();
 await modelAccess?.start();
+oomEvents.start();
+await usage.refresh();
 daemon.start();

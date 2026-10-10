@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { ModelRelayStatsSchema } from "./usage.js";
+
 /**
  * Platform model catalog and model relay types (specs.md Phase 16.5, 16.9). A catalog model is
  * the subset of a Pi 0.85.1 `models.json` model definition the platform writes for its own
@@ -125,6 +127,8 @@ export const ModelRelayStatusSchema = z
     enabled: z.boolean(),
     port: z.number().int().min(1).max(65_535).nullable(),
     listening: z.boolean(),
+    /** Cumulative relay counters (Phase 17.6); omitted while the relay is disabled. */
+    stats: ModelRelayStatsSchema.optional(),
   })
   .strict();
 
