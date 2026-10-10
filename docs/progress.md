@@ -1,6 +1,6 @@
 # Project Progress
 
-Last reviewed: 2026-10-08
+Last reviewed: 2026-10-10
 
 ## Current Milestone
 
@@ -16,6 +16,17 @@ API error code 中文化。
 Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立可用。
 
 ## Current Baseline
+
+- Phase 17（实现完成，待人工验收；分支 `phase-17-observability`）：可观测性。Control Plane 在独立端口以 Bearer token
+  暴露 Prometheus 指标（不在 Portal API 与 Workspace Gateway 上，配置不完整即拒绝启动，禁止通配地址）：scrape 时一次
+  只读数据库快照得到 Worker/Workspace/凭据/锁定状态，进程内埋点覆盖 Portal API、Workspace Gateway（来源、状态类、首包
+  时间、WebSocket）、Worker 命令（结果、超时、耗时）、认证与限速、模型网关管理调用与后台任务。Worker 不开放端口，每次
+  心跳经 Docker Engine API one-shot stats 采样运行中 Workspace 的 CPU/内存/PID/网络、经事件流统计 OOM，并上报主机
+  CPU/内存与中继计数（协议 v5）；Control Plane 只在内存中保存最新样本，Portal 显示 Workspace 与 Worker 的实际用量。
+  标签只有 UUID、Worker ID 与枚举值。`deploy/observability/` 提供 pinned Prometheus 3.13.4 + Grafana 13.2.3 开发
+  compose、19 条告警规则（`promtool test rules`）与 3 个面板；LiteLLM 指标由只允许 `/metrics` 的专用 key 抓取。验证：
+  单元/路由/PostgreSQL 集成测试、真实 Docker 用量与 OOM 测试、真实内核出口测试、真实 LiteLLM 指标权限测试、23 项变异
+  检查。运维见 `docs/observability-runbook.md`。
 
 - Phase 16（已验收，`v1.0.0-alpha.4`，2026-10-09 负责人人工验收通过）：模型网关与凭据托管。LiteLLM Proxy 1.104.1
   （pin digest，独立 `litellm` 库）持有 DeepSeek 上游 key；Control Plane 以 master key 为每个 Workspace 签发

@@ -32,6 +32,10 @@ model_list:
 litellm_settings:
   # Never rewrite or drop request parameters silently.
   drop_params: false
+  # Prometheus metrics on /metrics (specs.md Phase 17). The endpoint keeps LiteLLM's default
+  # authentication; Prometheus reads it with a key limited to that route
+  # (tools/dev/create-litellm-metrics-key.sh). Workspace keys cannot read it.
+  callbacks: ["prometheus"]
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

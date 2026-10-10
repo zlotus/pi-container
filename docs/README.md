@@ -7,6 +7,7 @@
 - [runtime-capability-matrix.md](runtime-capability-matrix.md)：Phase 7 的 AMD64 / ARM64 原生验证证据与边界。
 - [demo-runbook.md](demo-runbook.md)：Phase 8 自动 E2E、主链演示路径与人工验收清单。
 - [authentication-runbook.md](authentication-runbook.md)：Phase 12 认证审计、脱敏检查和 Local Admin break-glass/IdP 故障流程。
+- [egress-runbook.md](egress-runbook.md)、[storage-runbook.md](storage-runbook.md)、[model-gateway-runbook.md](model-gateway-runbook.md)、[observability-runbook.md](observability-runbook.md)：Phase 14～17 的运维说明。
 - [v1-roadmap.md](v1-roadmap.md)：v0.13 之后到 v1.0 的差距、Phase 13～19 顺序、开发节奏与已确认决策。
 
 `AGENTS.md` 是长期工程与安全规则，`specs.md` 是产品和分阶段验收规范；代码、

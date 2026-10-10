@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: agent-runtime
+    folder: Agent Runtime
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards/agent-runtime

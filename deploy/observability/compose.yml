@@ -1,0 +1,77 @@
+# DEV ONLY observability stack for specs.md Phase 17 (production templates belong to Phase 19).
+# Start it from the main checkout only: the configuration is bind-mounted by absolute path.
+#
+# Prerequisites (docs/observability-runbook.md):
+#   tools/dev/init-metrics-token.sh            -> ~/.config/agent-runtime/metrics.token (0600)
+#   tools/dev/create-litellm-metrics-key.sh    -> ~/.config/agent-runtime/litellm-metrics.token (0600)
+#   cp deploy/observability/grafana.env.example ~/.config/agent-runtime/grafana.env (0600, set a password)
+#
+#   METRICS_TOKEN_FILE=$HOME/.config/agent-runtime/metrics.token \
+#   LITELLM_METRICS_TOKEN_FILE=$HOME/.config/agent-runtime/litellm-metrics.token \
+#   GRAFANA_ENV_FILE=$HOME/.config/agent-runtime/grafana.env \
+#     docker compose -f deploy/observability/compose.yml up -d
+#
+# Both services use the host network and listen on 127.0.0.1 only: the Control Plane metrics
+# listener is on loopback, which a bridged container cannot reach. They are operator tools, not
+# Workspaces; the hostNetwork=false invariant applies to Workspace containers. Workspaces cannot
+# reach any of these ports (Phase 14 drops every Worker host address).
+name: agent-runtime-observability
+
+services:
+  # The data volume is created owned by the image's `nobody`; Prometheus runs as the operator's
+  # UID so it can read the 0600 token files, so the volume is handed over once.
+  prometheus-volume-owner:
+    image: prom/prometheus:v3.13.4@sha256:87861b8cf91579109319ebc300f3f1060e6da9c05d6ae8ad15a20c879e84e32e
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c", "chown -R ${OBSERVABILITY_UID:-1000}:${OBSERVABILITY_GID:-1000} /prometheus"]
+    network_mode: none
+    volumes:
+      - prometheus-data:/prometheus
+
+  prometheus:
+    # Pinned and verified in specs.md Phase 17.1; update only together with the spec.
+    image: prom/prometheus:v3.13.4@sha256:87861b8cf91579109319ebc300f3f1060e6da9c05d6ae8ad15a20c879e84e32e
+    restart: unless-stopped
+    user: "${OBSERVABILITY_UID:-1000}:${OBSERVABILITY_GID:-1000}"
+    network_mode: host
+    depends_on:
+      prometheus-volume-owner:
+        condition: service_completed_successfully
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=10GB
+      - --web.listen-address=127.0.0.1:9090
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./rules:/etc/prometheus/rules:ro
+      - ${METRICS_TOKEN_FILE:?set METRICS_TOKEN_FILE to the 0600 Control Plane scrape token}:/run/secrets/metrics.token:ro
+      - ${LITELLM_METRICS_TOKEN_FILE:?set LITELLM_METRICS_TOKEN_FILE to the 0600 LiteLLM metrics key}:/run/secrets/litellm-metrics.token:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    # Pinned and verified in specs.md Phase 17.1; update only together with the spec.
+    image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - ${GRAFANA_ENV_FILE:?set GRAFANA_ENV_FILE to the 0600 Grafana env file}
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "3300"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards/agent-runtime:ro
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  prometheus-data:
+  grafana-data:

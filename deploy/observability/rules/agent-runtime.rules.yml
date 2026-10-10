@@ -1,0 +1,214 @@
+# Example alert rules for the platform (specs.md Phase 17.9). Thresholds are the confirmed
+# defaults (17.13 Q11); tune them per deployment. Each alert has a section in
+# docs/observability-runbook.md. Tests: agent-runtime.rules.test.yml (`promtool test rules`).
+groups:
+  - name: agent-runtime-platform
+    rules:
+      - alert: AgentRuntimeControlPlaneDown
+        expr: up{job="agent-runtime-control-plane"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Control Plane 指标无法抓取"
+          description: "Prometheus 连续 2 分钟无法抓取 Control Plane 指标：进程停止、指标端口未监听或 token 不一致。"
+          runbook: "docs/observability-runbook.md#agentruntimecontrolplanedown"
+
+      - alert: AgentRuntimeMetricsCollectorFailing
+        expr: agent_runtime_collector_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "指标采集无法读取数据库"
+          description: "Control Plane 的 scrape 时数据库快照连续 5 分钟失败，平台状态类指标缺失。"
+          runbook: "docs/observability-runbook.md#agentruntimemetricscollectorfailing"
+
+      - alert: AgentRuntimeWorkerOffline
+        expr: |
+          agent_runtime_worker_up == 0
+            and on (worker_id) agent_runtime_worker_enabled == 1
+            and on (worker_id) agent_runtime_worker_last_heartbeat_timestamp_seconds > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker {{ $labels.worker_id }} 离线"
+          description: "已启用的 Worker {{ $labels.worker_id }} 超过离线判定时间没有心跳；其 Workspace 处于 WORKER_OFFLINE。"
+          runbook: "docs/observability-runbook.md#agentruntimeworkeroffline"
+
+      - alert: AgentRuntimeWorkerEgressUnenforced
+        expr: agent_runtime_worker_egress_enforced == 0 and on (worker_id) agent_runtime_worker_up == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker {{ $labels.worker_id }} 出口规则未生效"
+          description: "在线 Worker 无法确认出口规则；它不会启动 Workspace，并已停止运行中的 Workspace（fail-closed）。"
+          runbook: "docs/observability-runbook.md#agentruntimeworkeregressunenforced"
+
+      - alert: AgentRuntimeWorkerStorageUnenforced
+        expr: agent_runtime_worker_storage_enforced == 0 and on (worker_id) agent_runtime_worker_up == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker {{ $labels.worker_id }} 磁盘配额未生效"
+          description: "在线 Worker 无法确认 XFS project quota；它不会启动 Workspace（fail-closed）。"
+          runbook: "docs/observability-runbook.md#agentruntimeworkerstorageunenforced"
+
+      - alert: AgentRuntimeWorkerModelRelayDown
+        expr: agent_runtime_worker_model_relay_listening == 0 and on (worker_id) agent_runtime_worker_up == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker {{ $labels.worker_id }} 模型中继未监听"
+          description: "配置了模型网关的 Worker 中继没有监听，该 Worker 上的 Workspace 无法使用平台模型。"
+          runbook: "docs/observability-runbook.md#agentruntimeworkermodelrelaydown"
+
+      - alert: AgentRuntimeWorkerFilesystemLow
+        expr: |
+          agent_runtime_worker_filesystem_bytes{kind="free"}
+            / ignoring (kind) agent_runtime_worker_filesystem_bytes{kind="total"} < 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker {{ $labels.worker_id }} 数据盘剩余不足 10%"
+          description: "WORKER_MANAGED_ROOT 文件系统剩余 {{ $value | humanizePercentage }}；Workspace 上限之和可以超过容量。"
+          runbook: "docs/observability-runbook.md#agentruntimeworkerfilesystemlow"
+
+      - alert: AgentRuntimeWorkerFilesystemCritical
+        expr: |
+          agent_runtime_worker_filesystem_bytes{kind="free"}
+            / ignoring (kind) agent_runtime_worker_filesystem_bytes{kind="total"} < 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker {{ $labels.worker_id }} 数据盘剩余不足 5%"
+          description: "WORKER_MANAGED_ROOT 文件系统剩余 {{ $value | humanizePercentage }}，即将写满。"
+          runbook: "docs/observability-runbook.md#agentruntimeworkerfilesystemlow"
+
+  - name: agent-runtime-workspaces
+    rules:
+      - alert: AgentRuntimeWorkspaceDiskNearLimit
+        expr: |
+          agent_runtime_workspace_disk_used_bytes{project="data"}
+            / agent_runtime_workspace_disk_limit_bytes{project="data"} > 0.90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workspace {{ $labels.workspace_id }} 磁盘超过上限的 90%"
+          description: "数据（/workspace、/home/agent、/tmp）已用 {{ $value | humanizePercentage }}；写满后写入会失败。"
+          runbook: "docs/observability-runbook.md#agentruntimeworkspacedisknearlimit"
+
+      - alert: AgentRuntimeWorkspacePiStateNearLimit
+        expr: |
+          agent_runtime_workspace_disk_used_bytes{project="pi"}
+            / agent_runtime_workspace_disk_limit_bytes{project="pi"} > 0.90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workspace {{ $labels.workspace_id }} 的 Pi 状态超过上限的 90%"
+          description: "/agent/pi 已用 {{ $value | humanizePercentage }}；写满后 Pi Session 无法继续保存。"
+          runbook: "docs/observability-runbook.md#agentruntimeworkspacedisknearlimit"
+
+      - alert: AgentRuntimeWorkspaceMemoryNearLimit
+        expr: agent_runtime_workspace_memory_bytes / agent_runtime_workspace_memory_limit_bytes > 0.90
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workspace {{ $labels.workspace_id }} 内存超过上限的 90%"
+          description: "持续 15 分钟使用 {{ $value | humanizePercentage }} 的内存上限，进程可能被 OOM 终止。"
+          runbook: "docs/observability-runbook.md#agentruntimeworkspacememorynearlimit"
+
+      - alert: AgentRuntimeWorkspaceOOMKilled
+        expr: increase(agent_runtime_workspace_oom_kills_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workspace {{ $labels.workspace_id }} 发生 OOM"
+          description: "最近 15 分钟容器内有进程因内存超限被终止。"
+          runbook: "docs/observability-runbook.md#agentruntimeworkspaceoomkilled"
+
+      - alert: AgentRuntimeWorkspacesInError
+        expr: sum(agent_runtime_workspaces{state="ERROR"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} 个 Workspace 处于 ERROR"
+          description: "有 Workspace 持续 15 分钟处于 ERROR，需要用户重新启动或管理员排查。"
+          runbook: "docs/observability-runbook.md#agentruntimeworkspacesinerror"
+
+      - alert: AgentRuntimeWorkspacesStuckTransitional
+        expr: sum(agent_runtime_workspaces{state=~"SCHEDULING|STARTING|STOPPING|DELETING"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workspace 长时间处于过渡状态"
+          description: "持续 15 分钟有 Workspace 处于 SCHEDULING/STARTING/STOPPING/DELETING。"
+          runbook: "docs/observability-runbook.md#agentruntimeworkspacesstucktransitional"
+
+  - name: agent-runtime-traffic
+    rules:
+      - alert: AgentRuntimeGatewayErrorRate
+        expr: |
+          (
+            sum(increase(agent_runtime_gateway_http_requests_total{source="platform",status_class="5xx"}[10m]))
+              / sum(increase(agent_runtime_gateway_http_requests_total[10m]))
+          ) > 0.05
+            and sum(increase(agent_runtime_gateway_http_requests_total[10m])) >= 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workspace Gateway 平台侧 5xx 超过 5%"
+          description: "Gateway 自身返回的 5xx（Worker 不可达等）占比 {{ $value | humanizePercentage }}。"
+          runbook: "docs/observability-runbook.md#agentruntimegatewayerrorrate"
+
+      - alert: AgentRuntimeWorkerCommandTimeouts
+        expr: increase(agent_runtime_worker_commands_total{result="timeout"}[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker 命令超时（{{ $labels.command }}）"
+          description: "最近 10 分钟有 Worker 命令超时未响应。"
+          runbook: "docs/observability-runbook.md#agentruntimeworkercommandtimeouts"
+
+      - alert: AgentRuntimeLoginLockoutSurge
+        expr: sum(increase(agent_runtime_auth_lockouts_total[15m])) > 10
+        labels:
+          severity: warning
+        annotations:
+          summary: "登录锁定次数异常"
+          description: "最近 15 分钟出现 {{ $value }} 次登录锁定，可能存在暴力破解。"
+          runbook: "docs/observability-runbook.md#agentruntimeloginlockoutsurge"
+
+  - name: agent-runtime-model-gateway
+    rules:
+      - alert: AgentRuntimeModelKeyRevocationStuck
+        expr: agent_runtime_model_key_revocation_oldest_pending_seconds > 900
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "模型凭据吊销积压超过 15 分钟"
+          description: "有虚拟 key 等待网关删除超过 15 分钟；在网关确认前该 key 仍可能在网关侧有效。"
+          runbook: "docs/observability-runbook.md#agentruntimemodelkeyrevocationstuck"
+
+      - alert: AgentRuntimeModelGatewayUnreachable
+        expr: agent_runtime_model_gateway_reachable == 0 or up{job="litellm"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "模型网关不可达"
+          description: "Control Plane 或 Prometheus 连续 10 分钟无法访问 LiteLLM；新的模型凭据无法签发，吊销会积压。"
+          runbook: "docs/observability-runbook.md#agentruntimemodelgatewayunreachable"

@@ -1,0 +1,252 @@
+{
+  "uid": "agent-runtime-model-gateway",
+  "title": "Agent Runtime · 模型网关",
+  "tags": [
+    "agent-runtime"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "按用户的 token（输入 + 输出）",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "sum by (user) (rate(litellm_input_tokens_metric_total[5m]) + rate(litellm_output_tokens_metric_total[5m]))",
+          "legendFormat": "{{user}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "user 为平台 User UUID；在 Portal 用户页按 UUID 查找。",
+      "id": 1
+    },
+    {
+      "type": "timeseries",
+      "title": "按用户的花费（USD）",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "sum by (user) (increase(litellm_spend_metric_total[1h]))",
+          "legendFormat": "{{user}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 2
+    },
+    {
+      "type": "timeseries",
+      "title": "按模型请求与失败",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "sum by (requested_model) (rate(litellm_requests_metric_total[5m]))",
+          "legendFormat": "{{requested_model}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "sum by (requested_model) (rate(litellm_proxy_failed_requests_metric_total[5m]))",
+          "legendFormat": "失败 {{requested_model}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 3
+    },
+    {
+      "type": "timeseries",
+      "title": "上游延迟与首 token 时间（p95）",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(litellm_llm_api_latency_metric_bucket[5m])))",
+          "legendFormat": "延迟 {{model}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(litellm_llm_api_time_to_first_token_metric_bucket[5m])))",
+          "legendFormat": "首 token {{model}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 4
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker 中继结果",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "sum by (result) (rate(agent_runtime_model_relay_requests_total[5m]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "sum(rate(agent_runtime_model_relay_rejected_connections_total[5m]))",
+          "legendFormat": "被拒连接",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 5
+    },
+    {
+      "type": "timeseries",
+      "title": "凭据状态与吊销积压",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "agent_runtime_model_keys",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "agent_runtime_model_key_revocation_oldest_pending_seconds",
+          "legendFormat": "最老待吊销（秒）",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "id": 6
+    }
+  ]
+}

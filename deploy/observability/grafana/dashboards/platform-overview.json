@@ -1,0 +1,448 @@
+{
+  "uid": "agent-runtime-platform",
+  "title": "Agent Runtime · 平台总览",
+  "tags": [
+    "agent-runtime"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "table",
+      "title": "Worker 状态",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "agent_runtime_worker_up",
+          "legendFormat": "",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "agent_runtime_worker_egress_enforced",
+          "legendFormat": "",
+          "refId": "B",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "agent_runtime_worker_storage_enforced",
+          "legendFormat": "",
+          "refId": "C",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "agent_runtime_worker_schedulable",
+          "legendFormat": "",
+          "refId": "D",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "time() - agent_runtime_worker_last_heartbeat_timestamp_seconds",
+          "legendFormat": "",
+          "refId": "E",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "1 = 是。E 列为距上次心跳的秒数。",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        }
+      ],
+      "id": 1
+    },
+    {
+      "type": "timeseries",
+      "title": "Workspace 状态分布",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "sum by (state) (agent_runtime_workspaces)",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "id": 2
+    },
+    {
+      "type": "timeseries",
+      "title": "Gateway 请求率",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "sum by (source, status_class) (rate(agent_runtime_gateway_http_requests_total[5m]))",
+          "legendFormat": "{{source}} {{status_class}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 3
+    },
+    {
+      "type": "timeseries",
+      "title": "Gateway 平台侧 5xx 比例",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "sum(rate(agent_runtime_gateway_http_requests_total{source=\"platform\",status_class=\"5xx\"}[5m])) / sum(rate(agent_runtime_gateway_http_requests_total[5m]))",
+          "legendFormat": "5xx",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 4
+    },
+    {
+      "type": "timeseries",
+      "title": "Gateway 首包耗时",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, source) (rate(agent_runtime_gateway_http_response_header_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{source}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, source) (rate(agent_runtime_gateway_http_response_header_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{source}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 5
+    },
+    {
+      "type": "timeseries",
+      "title": "WebSocket 连接数",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "agent_runtime_gateway_websocket_connections",
+          "legendFormat": "连接",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "id": 6
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker 命令",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 16,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "sum by (command, result) (rate(agent_runtime_worker_commands_total[5m]))",
+          "legendFormat": "{{command}} {{result}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 7
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker 命令 p95 耗时",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 16,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, command) (rate(agent_runtime_worker_command_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{command}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 8
+    },
+    {
+      "type": "timeseries",
+      "title": "登录",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "sum by (protocol, result) (rate(agent_runtime_auth_logins_total[5m]))",
+          "legendFormat": "{{protocol}} {{result}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "sum by (scope) (increase(agent_runtime_auth_lockouts_total[5m]))",
+          "legendFormat": "锁定 {{scope}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "id": 9
+    },
+    {
+      "type": "timeseries",
+      "title": "Portal API 请求",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "sum by (status_class) (rate(agent_runtime_http_requests_total[5m]))",
+          "legendFormat": "{{status_class}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 10
+    },
+    {
+      "type": "alertlist",
+      "title": "活跃告警",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showOptions": "current",
+        "maxItems": 20,
+        "sortOrder": 1,
+        "stateFilter": {
+          "firing": true,
+          "pending": true
+        }
+      },
+      "id": 11
+    }
+  ]
+}

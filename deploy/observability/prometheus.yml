@@ -1,0 +1,37 @@
+# Prometheus configuration for the platform (specs.md Phase 17.10). DEV ONLY addresses: every
+# target is on the loopback of the host that runs deploy/observability/compose.yml.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/rules/agent-runtime.rules.yml
+
+scrape_configs:
+  # The Control Plane is the only platform target: Worker and Workspace usage arrives through
+  # the Worker heartbeat (Phase 17.3), so Workers expose no metrics port.
+  - job_name: agent-runtime-control-plane
+    static_configs:
+      - targets: ["127.0.0.1:9464"]
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics.token
+
+  # LiteLLM's own metrics, read with a key that may call /metrics and nothing else.
+  - job_name: litellm
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:4400"]
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/litellm-metrics.token
+    metric_relabel_configs:
+      # Keep the platform user UUID and key alias; drop addresses, client software, e-mail
+      # (unset by the platform) and key hashes (Phase 17.8 data minimisation).
+      - action: labeldrop
+        regex: client_ip|user_agent|user_email|hashed_api_key
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
