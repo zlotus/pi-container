@@ -122,6 +122,22 @@ function mapWorker(row: WorkerRow): WorkerRecord {
   };
 }
 
+export type WorkerDisableResult =
+  | { outcome: "DISABLED"; workspaces: number; modelKeys: number }
+  | { outcome: "NOT_FOUND" }
+  | { outcome: "ALREADY_DISABLED" };
+
+export type WorkerDeleteResult =
+  | { outcome: "DELETED" }
+  | { outcome: "NOT_FOUND" }
+  | { outcome: "ENABLED" }
+  | { outcome: "HAS_WORKSPACES"; workspaces: number };
+
+export interface RevokedWorkerAssignment {
+  workerId: string;
+  workspaceIds: string[];
+}
+
 export interface WorkerGatewayRoute {
   workerId: string;
   gatewayBaseUrl: string;
@@ -135,17 +151,118 @@ export function createWorkerRepository(database: DatabaseClient) {
       workerId: string;
       credentialHash: string;
     }): Promise<boolean> {
-      const rows = await database<{ id: string }[]>`
-        update workers
-        set
-          credential_hash = ${input.credentialHash},
-          status = case when enabled then 'OFFLINE' else 'DISABLED' end,
-          last_heartbeat_at = null,
-          updated_at = now()
-        where id = ${input.workerId}
-        returning id
+      return database.begin(async (transaction) => {
+        const rows = await transaction<{ id: string }[]>`
+          update workers
+          set
+            credential_hash = ${input.credentialHash},
+            status = case when enabled then 'OFFLINE' else 'DISABLED' end,
+            last_heartbeat_at = null,
+            updated_at = now()
+          where id = ${input.workerId}
+          returning id
+        `;
+        if (rows.length !== 1) return false;
+        // The old credential no longer reaches this Worker; nothing it reported holds.
+        await transaction`
+          update workspaces
+          set state = 'WORKER_OFFLINE', updated_at = now()
+          where worker_id = ${input.workerId}
+            and state in ('STARTING', 'RUNNING', 'STOPPING', 'STOPPED', 'ERROR')
+        `;
+        return true;
+      });
+    },
+
+    /**
+     * Revokes a Worker (specs.md Phase 18.6). Migration 0013's triggers do the rest in the
+     * same transaction: DISABLED, Workspaces WORKER_OFFLINE, model keys revoking, Audit.
+     */
+    async disableWorker(workerId: string): Promise<WorkerDisableResult> {
+      return database.begin(async (transaction) => {
+        await transaction`select set_config('agent_runtime.audit_source', 'cli', true)`;
+        const current = await transaction<Array<{ enabled: boolean }>>`
+          select enabled from workers where id = ${workerId} for update
+        `;
+        if (current[0] === undefined) return { outcome: "NOT_FOUND" };
+        if (!current[0].enabled) return { outcome: "ALREADY_DISABLED" };
+        await transaction`
+          update workers set enabled = false, updated_at = now() where id = ${workerId}
+        `;
+        const audit = await transaction<Array<{ details: { workspaces: number; modelKeys: number } }>>`
+          select details from platform_audit_events
+          where worker_id = ${workerId} and event_type = 'worker.disabled'
+          order by id desc
+          limit 1
+        `;
+        return {
+          outcome: "DISABLED",
+          workspaces: audit[0]?.details.workspaces ?? 0,
+          modelKeys: audit[0]?.details.modelKeys ?? 0,
+        };
+      });
+    },
+
+    /** Re-enables a revoked Worker under a new credential only (Phase 18.6, Q7). */
+    async enableWorker(input: {
+      workerId: string;
+      credentialHash: string;
+    }): Promise<"ENABLED" | "NOT_FOUND" | "ALREADY_ENABLED"> {
+      return database.begin(async (transaction) => {
+        await transaction`select set_config('agent_runtime.audit_source', 'cli', true)`;
+        const current = await transaction<Array<{ enabled: boolean }>>`
+          select enabled from workers where id = ${input.workerId} for update
+        `;
+        if (current[0] === undefined) return "NOT_FOUND";
+        if (current[0].enabled) return "ALREADY_ENABLED";
+        await transaction`
+          update workers
+          set
+            enabled = true,
+            credential_hash = ${input.credentialHash},
+            last_heartbeat_at = null,
+            updated_at = now()
+          where id = ${input.workerId}
+        `;
+        return "ENABLED";
+      });
+    },
+
+    /** Deletes a revoked Worker that no Workspace is assigned to (Phase 18.6, Q8). */
+    async deleteWorker(workerId: string): Promise<WorkerDeleteResult> {
+      return database.begin(async (transaction) => {
+        await transaction`select set_config('agent_runtime.audit_source', 'cli', true)`;
+        const current = await transaction<Array<{ enabled: boolean }>>`
+          select enabled from workers where id = ${workerId} for update
+        `;
+        if (current[0] === undefined) return { outcome: "NOT_FOUND" };
+        if (current[0].enabled) return { outcome: "ENABLED" };
+        const assigned = await transaction<Array<{ count: string }>>`
+          select count(*)::text as count from workspaces where worker_id = ${workerId}
+        `;
+        const workspaces = Number(assigned[0]?.count ?? 0);
+        if (workspaces > 0) return { outcome: "HAS_WORKSPACES", workspaces };
+        await transaction`delete from workers where id = ${workerId}`;
+        return { outcome: "DELETED" };
+      });
+    },
+
+    /** Revoked Workers and their Workspaces, for closing what is still connected. */
+    async listRevokedWorkerAssignments(): Promise<RevokedWorkerAssignment[]> {
+      const rows = await database<Array<{ id: string; workspace_ids: string[] }>>`
+        select
+          workers.id,
+          coalesce(
+            array_agg(workspaces.id) filter (where workspaces.id is not null),
+            '{}'
+          ) as workspace_ids
+        from workers
+        left join workspaces on workspaces.worker_id = workers.id
+        where not workers.enabled
+        group by workers.id
+        order by workers.id
       `;
-      return rows.length === 1;
+      return rows.map((row) => ({ workerId: row.id, workspaceIds: row.workspace_ids }));
     },
 
     async findWorkerByCredentialHash(

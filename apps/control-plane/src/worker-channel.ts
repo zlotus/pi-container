@@ -64,6 +64,14 @@ export class WorkerChannel {
       .sort();
   }
 
+  /** Closes the Worker's control connection; its pending commands fail on close. */
+  disconnect(workerId: string, code: number, reason: string): boolean {
+    const socket = this.#connections.get(workerId);
+    if (socket === undefined) return false;
+    socket.close(code, reason);
+    return true;
+  }
+
   register(workerId: string, socket: ChannelSocket): void {
     const existing = this.#connections.get(workerId);
     if (existing !== undefined && existing !== socket) {

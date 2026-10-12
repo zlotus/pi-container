@@ -1,6 +1,7 @@
 export interface SessionConnectionIdentity {
   userId: string;
   sessionId: string;
+  workspaceId: string;
 }
 
 interface TrackedConnection extends SessionConnectionIdentity {
@@ -25,6 +26,13 @@ export class SessionConnectionRegistry {
 
   closeUser(userId: string): void {
     this.#closeMatching((connection) => connection.userId === userId);
+  }
+
+  /** Closes every connection to these Workspaces, e.g. when their Worker is revoked. */
+  closeWorkspaces(workspaceIds: Iterable<string>): void {
+    const targets = new Set(workspaceIds);
+    if (targets.size === 0) return;
+    this.#closeMatching((connection) => targets.has(connection.workspaceId));
   }
 
   #closeMatching(predicate: (connection: TrackedConnection) => boolean): void {

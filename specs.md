@@ -6025,6 +6025,27 @@ Admin 页面截图、`workspaces` 与 `model_keys` 相关行、Prometheus Alerts
 改为由 CI 构建一次、推送到企业内部镜像仓库，各 Worker 按**同一个仓库 digest** 拉取，保证所有 Worker 运行完全相同的内容；
 平台本身不负责镜像分发。
 
+### 18.16 实现中的调整
+
+**第一步：Worker 吊销（2026-10-12）**
+
+- **改用数据库触发器与约束，而不是在周期任务中补救**：migration `0013_lifecycle` 增加约束
+  `workers_enabled_status CHECK (enabled = (status <> 'DISABLED'))`，以及 `enabled` 变化的 BEFORE/AFTER 触发器——
+  `true → false` 时同一事务内置 `DISABLED`、其 Workspace 置 `WORKER_OFFLINE`、经 Phase 16 的 `model_keys_request_revoke`
+  吊销其模型 key（`worker_disabled`），并写 `worker.disabled`（details：`source`、`fromStatus`、`workspaces`、`modelKeys`）；
+  `false → true` 时置 `OFFLINE` 并写 `worker.enabled`。因此直接改库、命令行或将来的任何入口行为一致，18.6 中“周期任务补处理
+  `enabled=false and status <> 'DISABLED'`”的情形已不可能出现，不再实现。migration 先把已有的不一致行（如有）修正后再加约束。
+- `source` 来自事务内的 `set_config('agent_runtime.audit_source', 'cli', true)`，未设置时为 `database`（直接改库）。
+  `enabled` 变化附带的状态变化不再由原状态触发器重复记 `worker.offline` / `worker.disabled`。
+- `worker.deleted` 由 `workers` 的 AFTER DELETE 触发器记录（任何删除路径都有审计）。
+- 周期任务（`WORKER_STATUS_SWEEP_MS`，默认 5 s）在 offline 处理后执行 `enforceWorkerRevocations`：对每个已吊销的 Worker
+  关闭仍在连接的控制通道（1008），并关闭指向其 Workspace 的 Gateway 连接；不依赖控制通道是否已因心跳被拒而先行关闭。
+  `SessionConnectionRegistry` 为此（以及 18.5 的空闲判定）增加 `workspaceId`。
+- `worker:enable` 对已启用的 Worker 报错并提示使用 `worker:rotate`；`worker:disable` 对已禁用的 Worker 幂等返回。
+- 变异检查（已执行，10 项全部被测试发现）：触发器不置 `WORKER_OFFLINE`；不吊销模型 key；去掉 `enabled`/`status` 约束；
+  BEFORE 触发器不置 `DISABLED`；周期任务不关闭 Gateway 连接；不关闭控制通道；`worker:enable` 不轮换凭据；`worker:delete`
+  不检查已禁用；`worker:rotate` 不置 `WORKER_OFFLINE`；按 Workspace 关闭时误关全部连接。
+
 ## Phase 19：生产部署与 v1.0 发布
 
 状态：待开工设计。

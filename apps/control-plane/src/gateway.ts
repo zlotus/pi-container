@@ -244,6 +244,7 @@ function trackSessionConnection(
     {
       userId: authorized.userId,
       sessionId: authorized.sessionId,
+      workspaceId: authorized.workspace.id,
     },
     disconnect,
   );

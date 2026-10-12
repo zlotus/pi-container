@@ -146,6 +146,24 @@ describe("worker command correlation", () => {
   });
 });
 
+describe("worker channel disconnect (Phase 18.6)", () => {
+  it("closes only the named Worker's connection", () => {
+    const channel = new WorkerChannel(1_000);
+    const revoked = new FakeSocket();
+    const other = new FakeSocket();
+    channel.register("worker-a", revoked);
+    channel.register("worker-b", other);
+
+    expect(channel.disconnect("worker-a", 1008, "Worker revoked")).toBe(true);
+    expect(channel.disconnect("worker-missing", 1008, "Worker revoked")).toBe(false);
+
+    expect(revoked.closes).toEqual([{ code: 1008, reason: "Worker revoked" }]);
+    expect(other.closes).toEqual([]);
+    expect(channel.isConnected("worker-a")).toBe(false);
+    expect(channel.isConnected("worker-b")).toBe(true);
+  });
+});
+
 describe("worker command metrics (Phase 17.4)", () => {
   function command(requestId: string): ControlToWorkerMessage {
     return { ...inspectCommand(), requestId };

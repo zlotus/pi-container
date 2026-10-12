@@ -86,6 +86,9 @@ export {
   type UpdateManagedUserResult,
 } from "./users.js";
 export {
+  type RevokedWorkerAssignment,
+  type WorkerDeleteResult,
+  type WorkerDisableResult,
   type WorkerGatewayRoute,
   type WorkerIdentity,
   type WorkerRecord,

@@ -17,6 +17,7 @@ import { buildWorkspaceGateway } from "./gateway.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
 import { SessionConnectionRegistry } from "./session-connections.js";
 import { selectWorker } from "./scheduler.js";
+import { enforceWorkerRevocations } from "./worker-revocation.js";
 import { GenericOidcClient, OidcTransactionStore } from "./oidc.js";
 import { LiteLlmAdminClient, meteredModelGatewayAdmin } from "./model-gateway/admin-client.js";
 import { loadModelCatalog, ModelKeyManager } from "./model-gateway/key-manager.js";
@@ -236,12 +237,22 @@ const metricsServer =
 
 const workerStatusTimer = setInterval(() => {
   const cutoff = new Date(Date.now() - config.WORKER_OFFLINE_AFTER_MS);
-  void repository.markWorkersOffline(cutoff).catch((error: unknown) => {
-    // Readiness and the Admin API expose database failure without terminating
-    // healthy Worker sockets because of a transient sweep failure.
-    metrics.recordBackgroundFailure("worker_offline_sweep");
-    log.error({ err: error }, "worker offline sweep failed");
-  });
+  void repository
+    .markWorkersOffline(cutoff)
+    .then(() =>
+      enforceWorkerRevocations({
+        store: repository,
+        channel: workerChannel,
+        sessionConnections,
+        log,
+      }),
+    )
+    .catch((error: unknown) => {
+      // Readiness and the Admin API expose database failure without terminating
+      // healthy Worker sockets because of a transient sweep failure.
+      metrics.recordBackgroundFailure("worker_offline_sweep");
+      log.error({ err: error }, "worker offline sweep failed");
+    });
 }, config.WORKER_STATUS_SWEEP_MS);
 workerStatusTimer.unref();
 
