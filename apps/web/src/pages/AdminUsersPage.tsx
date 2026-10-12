@@ -415,7 +415,7 @@ export function AdminUsersPage({
         <div className="filter-bar">
           <input
             type="search"
-            placeholder="搜索用户名、邮箱或 ID"
+            placeholder="搜索用户名、邮箱或 UUID"
             aria-label="搜索用户"
             value={filter.query}
             onChange={(event) => setFilter({ ...filter, query: event.target.value })}

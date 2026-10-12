@@ -129,7 +129,7 @@ export function AdminWorkspacesPage({ session }: { session: SessionResponse }) {
         <div className="filter-bar">
           <input
             type="search"
-            placeholder="搜索名称、所有者或 ID"
+            placeholder="搜索名称、所有者或 UUID"
             aria-label="搜索 Workspace"
             value={filter.query}
             onChange={(event) => setFilter({ ...filter, query: event.target.value })}
