@@ -5434,7 +5434,7 @@ Prometheus/Grafana 容器。
 
 ## Phase 18：生命周期运维
 
-状态：**设计已确认（2026-10-12，18.14），实现中**，分支 `phase-18-lifecycle`。方向见 `docs/v1-roadmap.md` Phase 18（G7、G8、G11）、
+状态：**已实现，待人工验收（2026-10-12）**；设计已确认（18.14），实现中的调整见 18.16，分支 `phase-18-lifecycle`。方向见 `docs/v1-roadmap.md` Phase 18（G7、G8、G11）、
 决策 D6、D7，第 41 节与 16.17。
 
 目标：管理员能把 Runtime 镜像升级到新版本并在出问题时回滚，升级不丢失 Workspace 文件、Pi Session 与配置；以
