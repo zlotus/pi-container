@@ -14,7 +14,7 @@ export * from "./egress.js";
 export * from "./model-gateway.js";
 export * from "./usage.js";
 
-export const WORKER_PROTOCOL_VERSION = 5 as const;
+export const WORKER_PROTOCOL_VERSION = 6 as const;
 
 export const WorkspaceIdSchema = z.string().uuid();
 
@@ -42,7 +42,12 @@ export const WorkspaceStateSchema = z.enum([
   "DELETING",
   "ERROR",
   "WORKER_OFFLINE",
+  /** Control Plane only: the Runtime image is being changed (specs.md Phase 18.4). */
+  "UPGRADING",
 ]);
+
+/** What a Worker can observe; UPGRADING exists only in the Control Plane. */
+export const ObservedWorkspaceStateSchema = WorkspaceStateSchema.exclude(["UPGRADING"]);
 
 export const WorkspaceDesiredStateSchema = z.enum([
   "RUNNING",
@@ -74,6 +79,29 @@ export const WorkspaceResourcesSchema = z
     cpuCount: z.number().positive().max(256),
     memoryBytes: z.number().int().positive(),
     pidsLimit: z.number().int().positive(),
+  })
+  .strict();
+
+/** A Runtime image reference as configured on the Worker, e.g. `agent-runtime:phase7-toolchain`. */
+export const RuntimeImageRefSchema = z
+  .string()
+  .min(1)
+  .max(255)
+  .regex(/^[a-z0-9][A-Za-z0-9._/:-]*$/);
+
+export const ImageDigestSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/);
+
+const VersionLabelSchema = z.string().min(1).max(64).regex(/^[A-Za-z0-9][A-Za-z0-9._+-]*$/);
+
+/** One Runtime image a Worker offers, with what its probe found (Phase 18.4, 18.9). */
+export const RuntimeImageReportSchema = z
+  .object({
+    image: RuntimeImageRefSchema,
+    imageId: ImageDigestSchema,
+    runtimeVersion: z.string().min(1).max(128),
+    piWebVersion: VersionLabelSchema.nullable(),
+    piVersion: VersionLabelSchema.nullable(),
+    capabilities: WorkerCapabilitiesSchema,
   })
   .strict();
 
@@ -124,9 +152,16 @@ export const WorkerHelloMessageSchema = RequestEnvelopeSchema.extend({
       workerId: WorkerIdSchema,
       hostname: z.string().min(1).max(255),
       architecture: ArchitectureSchema,
-      runtimeImage: z.string().min(1).max(255),
-      runtimeVersion: z.string().min(1).max(128),
-      capabilities: WorkerCapabilitiesSchema,
+      runtimeImages: z
+        .array(RuntimeImageReportSchema)
+        .min(1)
+        .max(4)
+        .refine(
+          (images) =>
+            new Set(images.map((entry) => entry.image)).size === images.length &&
+            new Set(images.map((entry) => entry.runtimeVersion)).size === images.length,
+          "Runtime images and versions must be unique",
+        ),
       maxWorkspaces: z.number().int().positive().max(10_000),
       allocatedWorkspaces: z.number().int().nonnegative().max(10_000),
       systemResources: WorkerSystemResourcesSchema,
@@ -170,12 +205,13 @@ export const WorkspaceCommandTypeSchema = z.enum([
   "workspace.stop",
   "workspace.delete",
   "workspace.inspect",
+  "workspace.runtime.set",
 ]);
 
 export const WorkspaceObservationSchema = z
   .object({
     workspaceId: WorkspaceIdSchema,
-    state: WorkspaceStateSchema,
+    state: ObservedWorkspaceStateSchema,
     runtimeImage: z.string().min(1).max(255),
     observedAt: z.string().datetime({ offset: true }),
   })
@@ -345,6 +381,22 @@ export const WorkspaceStorageSetMessageSchema = RequestEnvelopeSchema.extend({
     .strict(),
 }).strict();
 
+/**
+ * Recreates a stopped Workspace's container from another offered Runtime image; the
+ * persistent directories are untouched (specs.md Phase 18.4). Idempotent.
+ */
+export const WorkspaceRuntimeSetMessageSchema = RequestEnvelopeSchema.extend({
+  type: z.literal("workspace.runtime.set"),
+  payload: z
+    .object({
+      workspaceId: WorkspaceIdSchema,
+      fromImage: RuntimeImageRefSchema,
+      toImage: RuntimeImageRefSchema,
+    })
+    .strict()
+    .refine((value) => value.fromImage !== value.toImage, "fromImage and toImage must differ"),
+}).strict();
+
 export const WorkspaceStartMessageSchema = RequestEnvelopeSchema.extend({
   type: z.literal("workspace.start"),
   payload: WorkspaceCommandPayloadSchema,
@@ -483,6 +535,7 @@ export const ControlToWorkerMessageSchema = z.discriminatedUnion("type", [
   WorkspaceStorageSetMessageSchema,
   WorkspaceModelKeySetMessageSchema,
   WorkspaceModelKeyClearMessageSchema,
+  WorkspaceRuntimeSetMessageSchema,
 ]);
 
 export type Architecture = z.infer<typeof ArchitectureSchema>;
@@ -500,6 +553,8 @@ export type WorkspaceResources = z.infer<typeof WorkspaceResourcesSchema>;
 export type WorkerStorageStatus = z.infer<typeof WorkerStorageStatusSchema>;
 export type WorkspaceDiskUsage = z.infer<typeof WorkspaceDiskUsageSchema>;
 export type WorkspaceState = z.infer<typeof WorkspaceStateSchema>;
+export type ObservedWorkspaceState = z.infer<typeof ObservedWorkspaceStateSchema>;
+export type RuntimeImageReport = z.infer<typeof RuntimeImageReportSchema>;
 export type WorkspaceObservation = z.infer<typeof WorkspaceObservationSchema>;
 export type WorkspaceDesiredState = z.infer<typeof WorkspaceDesiredStateSchema>;
 export type WorkerReconcileAssignment = z.infer<

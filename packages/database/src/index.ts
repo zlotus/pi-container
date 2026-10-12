@@ -67,6 +67,7 @@ export {
   type WorkspaceRecord,
 } from "./records.js";
 export { type WorkspaceRecoveryRecord } from "./recovery.js";
+export { type RuntimeChangeDirection, type RuntimeChangeRestore } from "./runtime-changes.js";
 export {
   type ScheduleWorkspaceStartResult,
   type SetWorkerSchedulableResult,
@@ -92,6 +93,7 @@ export {
   type WorkerGatewayRoute,
   type WorkerIdentity,
   type WorkerRecord,
+  type WorkerRuntimeImage,
   type WorkerStatus,
 } from "./workers.js";
 export { type MetricsSnapshot } from "./metrics.js";

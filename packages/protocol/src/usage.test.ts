@@ -29,7 +29,7 @@ const relayStats = {
   activeRequests: 0,
 };
 
-function heartbeat(payload: Record<string, unknown>, version = 5): boolean {
+function heartbeat(payload: Record<string, unknown>, version = 6): boolean {
   return WorkerToControlMessageSchema.safeParse({
     version,
     type: "worker.heartbeat",

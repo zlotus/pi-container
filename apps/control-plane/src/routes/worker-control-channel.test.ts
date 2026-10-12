@@ -99,7 +99,7 @@ describe("Phase 2 worker control channel", () => {
     const closed = once(worker, "close");
     worker.send(
       JSON.stringify({
-        version: 5,
+        version: 6,
         type: "worker.heartbeat",
         requestId: randomUUID(),
         payload: {
@@ -234,6 +234,10 @@ describe("Phase 2 worker control channel", () => {
         createdAt: NOW,
         updatedAt: NOW,
         lastActivityAt: NOW,
+        previousRuntimeImage: null,
+        runtimeChangedAt: null,
+        lastAccessAt: null,
+        lastStopReason: null,
         disk: TEST_WORKSPACE_DISK,
       },
     
@@ -248,6 +252,10 @@ describe("Phase 2 worker control channel", () => {
         createdAt: NOW,
         updatedAt: NOW,
         lastActivityAt: NOW,
+        previousRuntimeImage: null,
+        runtimeChangedAt: null,
+        lastAccessAt: null,
+        lastStopReason: null,
         disk: TEST_WORKSPACE_DISK,
       },
     ]);
@@ -271,7 +279,7 @@ describe("Phase 2 worker control channel", () => {
         }
         commands[workerId]?.push(`${command.type}:${command.payload.workspaceId}`);
         socket.send(JSON.stringify({
-          version: 5,
+          version: 6,
           type: "response.ok",
           requestId: command.requestId,
           payload: {

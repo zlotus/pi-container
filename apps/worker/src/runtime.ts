@@ -9,6 +9,7 @@ import {
   readdir,
   readFile,
   realpath,
+  open,
   rename,
   rm,
   writeFile,
@@ -16,9 +17,11 @@ import {
 import { dirname, join, resolve } from "node:path";
 
 import {
+  ImageDigestSchema,
   type ModelConfigResult,
   type ModelGatewayConfig,
   ModelProviderIdSchema,
+  type ObservedWorkspaceState,
   WorkspaceIdSchema,
   type WorkerReconcileAssignment,
   type WorkerReconciliationReport,
@@ -26,7 +29,6 @@ import {
   type WorkerStorageStatus,
   type WorkspaceDiskUsage,
   type WorkspaceResources,
-  type WorkspaceState,
 } from "@agent-runtime/protocol";
 import { parseWorkspaceBaseUrl } from "@agent-runtime/gateway";
 import Docker from "dockerode";
@@ -35,6 +37,11 @@ import { z } from "zod";
 import type { WorkerConfig } from "./config.js";
 import { workspaceBridgeName } from "./egress/ruleset.js";
 import { writePlatformProvider } from "./model-relay/pi-config.js";
+import {
+  staticRuntimeImages,
+  type OfferedRuntimeImage,
+  type RuntimeImageSet,
+} from "./runtime-images.js";
 import type { RelayEndpoint } from "./model-relay/relay.js";
 import {
   parseDockerStats,
@@ -145,6 +152,10 @@ const MetadataSchema = z
     homeInitialized: z.boolean().optional(),
     /** The Pi provider ID last written into models.json (Phase 16.5). */
     modelProviderId: ModelProviderIdSchema.optional(),
+    /** The image ID the container was created from; pinned (specs.md Phase 18.4). */
+    runtimeImageId: ImageDigestSchema.optional(),
+    /** The image before the last Runtime change, the rollback target. */
+    previousRuntimeImage: z.string().min(1).max(255).optional(),
   })
   .strict();
 
@@ -167,7 +178,7 @@ interface ManagedWorkspacePaths extends WorkspacePaths {
 
 export interface WorkspaceRuntimeObservation {
   workspaceId: string;
-  state: WorkspaceState;
+  state: ObservedWorkspaceState;
   runtimeImage: string;
   observedAt: string;
 }
@@ -187,7 +198,9 @@ export class WorkspaceRuntimeError extends Error {
       | "EGRESS_NETWORK_LEGACY"
       | "STORAGE_QUOTA_UNENFORCED"
       | "STORAGE_QUOTA_APPLY_FAILED"
-      | "STORAGE_MIGRATION_REQUIRED",
+      | "STORAGE_MIGRATION_REQUIRED"
+      | "RUNTIME_IMAGE_UNAVAILABLE"
+      | "WORKSPACE_RUNNING",
     message: string,
     readonly retryable = false,
   ) {
@@ -236,7 +249,7 @@ export class DockerWorkspaceRuntime {
   readonly #runtimeGid: number;
   readonly #startTimeoutMs: number;
   readonly #workerId: string;
-  readonly #runtimeImage: string;
+  readonly #images: RuntimeImageSet;
   readonly #workspaceResources: WorkspaceResources;
   readonly #workspaceBaseUrl: ReturnType<typeof parseWorkspaceBaseUrl>;
   readonly #readinessProbe: (port: string) => Promise<boolean>;
@@ -262,8 +275,10 @@ export class DockerWorkspaceRuntime {
     },
     egress: EgressGate = UNENFORCED_EGRESS,
     storage: StorageGate = UNENFORCED_STORAGE,
+    images: RuntimeImageSet = staticRuntimeImages(config),
   ) {
     this.#docker = docker;
+    this.#images = images;
     this.#egress = egress;
     this.#storage = storage;
     this.#nofileLimit = config.WORKSPACE_NOFILE_LIMIT;
@@ -274,7 +289,6 @@ export class DockerWorkspaceRuntime {
     this.#runtimeGid = config.WORKSPACE_GID;
     this.#startTimeoutMs = config.WORKSPACE_START_TIMEOUT_MS;
     this.#workerId = config.WORKER_ID;
-    this.#runtimeImage = config.RUNTIME_IMAGE;
     this.#workspaceResources = {
       cpuCount: config.WORKSPACE_CPU_COUNT,
       memoryBytes: config.WORKSPACE_MEMORY_BYTES,
@@ -290,9 +304,9 @@ export class DockerWorkspaceRuntime {
     resources: WorkspaceResources,
     storage: { diskLimitBytes: number },
   ): Promise<WorkspaceRuntimeObservation> {
-    this.#assertRuntimeImage(runtimeImage);
+    const offered = this.#requireOffered(runtimeImage);
     this.#assertResources(resources);
-    let paths = await this.#ensureWorkspacePaths(workspaceId);
+    let paths = await this.#ensureWorkspacePaths(workspaceId, runtimeImage);
     const networkName = this.#networkName(workspaceId);
     const existing = await this.#findNamedContainer(workspaceId);
     if (existing !== null) {
@@ -306,59 +320,7 @@ export class DockerWorkspaceRuntime {
     const created = existing === null;
     if (existing === null) {
       paths = await this.#initializeHome(paths);
-      try {
-        await this.#docker.createContainer({
-          name: this.#containerName(workspaceId),
-          Image: runtimeImage,
-          User: this.#runtimeUser,
-          WorkingDir: "/workspace",
-          Env: [
-            "HOME=/home/agent",
-            "PI_CODING_AGENT_DIR=/agent/pi",
-            PI_WEB_DEFAULT_CWD_ENV,
-            "PI_WEB_HOSTNAME=0.0.0.0",
-            "PI_WEB_NO_OPEN=1",
-            "PI_WEB_SKIP_VERSION_CHECK=1",
-            "PI_WEB_IDLE_TIMEOUT_MS=0",
-            `PI_WEB_ALLOWED_HOSTS=${workspaceId}.${this.#workspaceBaseUrl.hostname}`,
-            "PORT=30141",
-            CARGO_HOME_ENV,
-          ],
-          ExposedPorts: { [PI_WEB_PORT]: {} },
-          Labels: managedLabels(this.#workerId, workspaceId),
-          HostConfig: {
-            AutoRemove: false,
-            // `Mounts`, unlike `Binds`, fails instead of creating a missing source as
-            // root: no container starts on bare disk when the quota filesystem is absent.
-            Mounts: this.#workspaceMounts(paths).map((mount) => ({
-              Type: "bind" as const,
-              Source: mount.source,
-              Target: mount.target,
-              ReadOnly: false,
-            })),
-            ReadonlyRootfs: true,
-            Tmpfs: { ...WORKSPACE_TMPFS },
-            Ulimits: [
-              { Name: "nofile", Soft: this.#nofileLimit, Hard: this.#nofileLimit },
-              { Name: "core", Soft: 0, Hard: 0 },
-            ],
-            LogConfig: WORKSPACE_LOG_CONFIG,
-            CapDrop: ["ALL"],
-            Memory: resources.memoryBytes,
-            NanoCpus: Math.round(resources.cpuCount * 1_000_000_000),
-            NetworkMode: networkName,
-            PidsLimit: resources.pidsLimit,
-            PortBindings: {
-              [PI_WEB_PORT]: [{ HostIp: "127.0.0.1", HostPort: "" }],
-            },
-            Privileged: false,
-            RestartPolicy: { Name: "unless-stopped", MaximumRetryCount: 0 },
-            SecurityOpt: ["no-new-privileges:true"],
-          },
-        });
-      } catch (error) {
-        throw this.#engineError(error, "create the managed Workspace container");
-      }
+      paths = await this.#createContainer(workspaceId, paths, offered, resources);
     }
 
     const container = await this.#requireManagedContainer(workspaceId);
@@ -370,16 +332,100 @@ export class DockerWorkspaceRuntime {
       this.#verifyCurrentRuntimeConfiguration(inspection, resources);
     } else {
       this.#verifyLegacyRuntimeConfiguration(inspection, resources);
+      paths = await this.#pinImageId(paths, inspection);
     }
     return this.#observation(
       workspaceId,
       inspection.State.Running ? "RUNNING" : "STOPPED",
+      paths.runtimeImage,
     );
+  }
+
+  /**
+   * Creates the Workspace container from an offered image with the current configuration
+   * and pins the image ID it got. One function for ensure and Runtime changes, so both
+   * produce exactly the same container (specs.md Phase 18.4).
+   */
+  async #createContainer(
+    workspaceId: string,
+    paths: ManagedWorkspacePaths,
+    offered: OfferedRuntimeImage,
+    resources: WorkspaceResources,
+  ): Promise<ManagedWorkspacePaths> {
+    try {
+      await this.#docker.createContainer({
+        name: this.#containerName(workspaceId),
+        Image: offered.image,
+        User: this.#runtimeUser,
+        WorkingDir: "/workspace",
+        Env: [
+          "HOME=/home/agent",
+          "PI_CODING_AGENT_DIR=/agent/pi",
+          PI_WEB_DEFAULT_CWD_ENV,
+          "PI_WEB_HOSTNAME=0.0.0.0",
+          "PI_WEB_NO_OPEN=1",
+          "PI_WEB_SKIP_VERSION_CHECK=1",
+          "PI_WEB_IDLE_TIMEOUT_MS=0",
+          `PI_WEB_ALLOWED_HOSTS=${workspaceId}.${this.#workspaceBaseUrl.hostname}`,
+          "PORT=30141",
+          CARGO_HOME_ENV,
+        ],
+        ExposedPorts: { [PI_WEB_PORT]: {} },
+        Labels: managedLabels(this.#workerId, workspaceId),
+        HostConfig: {
+          AutoRemove: false,
+          // `Mounts`, unlike `Binds`, fails instead of creating a missing source as
+          // root: no container starts on bare disk when the quota filesystem is absent.
+          Mounts: this.#workspaceMounts(paths).map((mount) => ({
+            Type: "bind" as const,
+            Source: mount.source,
+            Target: mount.target,
+            ReadOnly: false,
+          })),
+          ReadonlyRootfs: true,
+          Tmpfs: { ...WORKSPACE_TMPFS },
+          Ulimits: [
+            { Name: "nofile", Soft: this.#nofileLimit, Hard: this.#nofileLimit },
+            { Name: "core", Soft: 0, Hard: 0 },
+          ],
+          LogConfig: WORKSPACE_LOG_CONFIG,
+          CapDrop: ["ALL"],
+          Memory: resources.memoryBytes,
+          NanoCpus: Math.round(resources.cpuCount * 1_000_000_000),
+          NetworkMode: this.#networkName(workspaceId),
+          PidsLimit: resources.pidsLimit,
+          PortBindings: {
+            [PI_WEB_PORT]: [{ HostIp: "127.0.0.1", HostPort: "" }],
+          },
+          Privileged: false,
+          RestartPolicy: { Name: "unless-stopped", MaximumRetryCount: 0 },
+          SecurityOpt: ["no-new-privileges:true"],
+        },
+      });
+    } catch (error) {
+      throw this.#engineError(error, "create the managed Workspace container");
+    }
+    const created = await this.#requireManagedContainer(workspaceId);
+    const imageId = (await created.inspect()).Image;
+    if (offered.imageId !== null && imageId !== offered.imageId) {
+      // The reference moved between verification and creation: never run other content.
+      await created.remove({ force: true, v: false }).catch(() => undefined);
+      throw new WorkspaceRuntimeError(
+        "RUNTIME_IMAGE_UNAVAILABLE",
+        "Runtime image changed while the container was created",
+      );
+    }
+    const pinned = ImageDigestSchema.safeParse(imageId);
+    // Only the static image set of tests offers images without an ID to pin.
+    if (!pinned.success) return paths;
+    const managed = { ...paths.managed, runtimeImageId: pinned.data };
+    await this.#writeMetadata(paths, managed);
+    return { ...paths, managed };
   }
 
   async start(workspaceId: string): Promise<WorkspaceRuntimeObservation> {
     const paths = await this.#requireWorkspacePaths(workspaceId);
-    this.#assertRuntimeImage(paths.runtimeImage);
+    this.#requireOffered(paths.runtimeImage);
     const container = await this.#requireManagedContainer(workspaceId);
     let inspection = await container.inspect();
     this.#assertCurrentGeneration(
@@ -428,7 +474,7 @@ export class DockerWorkspaceRuntime {
         binding.HostPort !== undefined &&
         (await this.#readinessProbe(binding.HostPort))
       ) {
-        return this.#observation(workspaceId, "RUNNING");
+        return this.#observation(workspaceId, "RUNNING", paths.runtimeImage);
       }
       await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 250));
     }
@@ -459,6 +505,91 @@ export class DockerWorkspaceRuntime {
       }
     }
     return this.#observation(workspaceId, "STOPPED", paths.runtimeImage);
+  }
+
+  /**
+   * Switches a stopped Workspace to another offered Runtime image: the metadata is
+   * switched durably first, then the container is removed and created again from the new
+   * image by the same function `ensure` uses. Persistent directories, network and quotas
+   * are untouched. Idempotent, so an interrupted change is completed by a retry; every
+   * refusal before the metadata switch leaves the Workspace unchanged (specs.md 18.4).
+   */
+  async setRuntime(
+    workspaceId: string,
+    fromImage: string,
+    toImage: string,
+  ): Promise<WorkspaceRuntimeObservation> {
+    const target = this.#requireOffered(toImage);
+    let paths = await this.#requireWorkspacePaths(workspaceId);
+    if (paths.runtimeImage !== fromImage && paths.runtimeImage !== toImage) {
+      throw new WorkspaceRuntimeError(
+        "WORKSPACE_METADATA_MISMATCH",
+        "Workspace does not use the Runtime image the change starts from",
+      );
+    }
+    const networkName = this.#networkName(workspaceId);
+    const container = await this.#findNamedContainer(workspaceId);
+    if (container !== null) {
+      const inspection = await container.inspect();
+      // After an interrupted change the metadata may already name the new image while the
+      // container is still from the previous one; it is verified against what created it.
+      const created =
+        inspection.Config.Image === paths.runtimeImage
+          ? paths
+          : inspection.Config.Image === paths.managed.previousRuntimeImage
+            ? {
+                ...paths,
+                runtimeImage: inspection.Config.Image,
+                managed: { ...paths.managed, runtimeImageId: undefined },
+              }
+            : null;
+      if (created === null) {
+        throw new WorkspaceRuntimeError(
+          "RUNTIME_CONFIGURATION_MISMATCH",
+          "Managed Workspace container does not match the security baseline",
+        );
+      }
+      this.#assertCurrentGeneration(
+        this.#verifyManagedContainerIdentity(inspection, workspaceId, created, networkName),
+      );
+      if (inspection.State.Running || inspection.State.Restarting || inspection.State.Paused) {
+        throw new WorkspaceRuntimeError("WORKSPACE_RUNNING", "Stop the Workspace before changing its Runtime");
+      }
+      if (
+        paths.runtimeImage === toImage &&
+        inspection.Config.Image === toImage &&
+        (target.imageId === null || inspection.Image === target.imageId)
+      ) {
+        return this.#observation(workspaceId, "STOPPED", toImage);
+      }
+    }
+    if (paths.runtimeImage !== toImage) {
+      const managed: WorkspaceMetadata = {
+        ...paths.managed,
+        runtimeImage: toImage,
+        previousRuntimeImage: fromImage,
+      };
+      delete managed.runtimeImageId;
+      await this.#writeMetadata(paths, managed);
+      paths = { ...paths, runtimeImage: toImage, managed };
+    }
+    if (container !== null) {
+      try {
+        // The root filesystem is read-only: the container holds no Workspace data.
+        await container.remove({ force: false, v: false });
+      } catch (error) {
+        if (dockerStatus(error) !== 404) {
+          throw this.#engineError(error, "remove the previous Workspace container");
+        }
+      }
+    }
+    paths = await this.#createContainer(workspaceId, paths, target, this.#workspaceResources);
+    const inspection = await (await this.#requireManagedContainer(workspaceId)).inspect();
+    this.#assertCurrentGeneration(
+      this.#verifyManagedContainerIdentity(inspection, workspaceId, paths, networkName),
+    );
+    this.#verifyCurrentRuntimeConfiguration(inspection, this.#workspaceResources);
+    return this.#observation(workspaceId, "STOPPED", toImage);
   }
 
   async inspect(workspaceId: string): Promise<WorkspaceRuntimeObservation> {
@@ -946,7 +1077,6 @@ export class DockerWorkspaceRuntime {
 
   async gatewayTarget(workspaceId: string): Promise<URL> {
     const paths = await this.#requireWorkspacePaths(workspaceId);
-    this.#assertRuntimeImage(paths.runtimeImage);
     const container = await this.#requireManagedContainer(workspaceId);
     const inspection = await container.inspect();
     this.#assertCurrentGeneration(
@@ -1037,7 +1167,10 @@ export class DockerWorkspaceRuntime {
     };
   }
 
-  async #ensureWorkspacePaths(workspaceId: string): Promise<ManagedWorkspacePaths> {
+  async #ensureWorkspacePaths(
+    workspaceId: string,
+    runtimeImage: string,
+  ): Promise<ManagedWorkspacePaths> {
     const paths = await this.#paths(workspaceId);
     let created = false;
     try {
@@ -1048,7 +1181,7 @@ export class DockerWorkspaceRuntime {
     }
 
     if (!created) {
-      this.#assertRuntimeImage((await this.#verifyMetadata(paths, workspaceId)).runtimeImage);
+      this.#assertWorkspaceImage((await this.#verifyMetadata(paths, workspaceId)).runtimeImage, runtimeImage);
     }
     for (const directory of [paths.workspace, paths.home, paths.tmp, paths.pi, paths.metadata]) {
       await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -1069,7 +1202,7 @@ export class DockerWorkspaceRuntime {
           version: 1,
           workspaceId,
           workerId: this.#workerId,
-          runtimeImage: this.#runtimeImage,
+          runtimeImage,
         })}\n`,
         { encoding: "utf8", flag: "wx", mode: 0o600 },
       );
@@ -1125,11 +1258,15 @@ export class DockerWorkspaceRuntime {
   /** Replaces the metadata file atomically (write, then rename over it). */
   async #writeMetadata(paths: WorkspacePaths, metadata: WorkspaceMetadata): Promise<void> {
     const temporary = `${paths.metadataFile}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(MetadataSchema.parse(metadata))}\n`, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
+    // O_EXCL never follows or reuses an existing path; fsync before the rename makes the
+    // switch durable, which a Runtime change relies on (specs.md Phase 18.4).
+    const handle = await open(temporary, "wx", 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(MetadataSchema.parse(metadata))}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await rename(temporary, paths.metadataFile);
   }
 
@@ -1539,9 +1676,10 @@ export class DockerWorkspaceRuntime {
   async #inspectForRecovery(
     assignment: WorkerReconcileAssignment,
   ): Promise<WorkspaceRuntimeObservation> {
-    this.#assertRuntimeImage(assignment.runtimeImage);
     const paths = await this.#requireWorkspacePaths(assignment.workspaceId);
-    this.#assertRuntimeImage(paths.runtimeImage);
+    // A stopped Workspace whose image is no longer offered is still observed truthfully;
+    // only starting it is refused.
+    this.#assertWorkspaceImage(paths.runtimeImage, assignment.runtimeImage);
     const container = await this.#requireManagedContainer(assignment.workspaceId);
     const networkName = this.#networkName(assignment.workspaceId);
     const network = await this.#findNamedNetwork(assignment.workspaceId);
@@ -1614,7 +1752,7 @@ export class DockerWorkspaceRuntime {
       );
     }
     if (!inspection.State.Running) {
-      return this.#observation(assignment.workspaceId, "STOPPED");
+      return this.#observation(assignment.workspaceId, "STOPPED", paths.runtimeImage);
     }
 
     const deadline = Date.now() + this.#startTimeoutMs;
@@ -1632,7 +1770,7 @@ export class DockerWorkspaceRuntime {
         binding.HostPort !== undefined &&
         (await this.#readinessProbe(binding.HostPort))
       ) {
-        return this.#observation(assignment.workspaceId, "RUNNING");
+        return this.#observation(assignment.workspaceId, "RUNNING", paths.runtimeImage);
       }
       await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 250));
     }
@@ -1797,6 +1935,9 @@ export class DockerWorkspaceRuntime {
     if (
       inspection.Name !== `/${this.#containerName(workspaceId)}` ||
       inspection.Config.Image !== (paths as Partial<ManagedWorkspacePaths>).runtimeImage ||
+      // The container must still run the exact image it was created from (Phase 18.4).
+      ((paths as Partial<ManagedWorkspacePaths>).managed?.runtimeImageId !== undefined &&
+        inspection.Image !== (paths as Partial<ManagedWorkspacePaths>).managed?.runtimeImageId) ||
       inspection.Config.User !== this.#runtimeUser ||
       inspection.Config.WorkingDir !== "/workspace" ||
       !inspection.Config.Env.includes("PI_CODING_AGENT_DIR=/agent/pi") ||
@@ -1902,13 +2043,38 @@ export class DockerWorkspaceRuntime {
     );
   }
 
-  #assertRuntimeImage(runtimeImage: string): void {
-    if (runtimeImage !== this.#runtimeImage) {
+  /** The offered image, or RUNTIME_IMAGE_UNAVAILABLE (specs.md Phase 18.4). */
+  #requireOffered(runtimeImage: string): OfferedRuntimeImage {
+    const offered = this.#images.find(runtimeImage);
+    if (offered === null) {
       throw new WorkspaceRuntimeError(
-        "RUNTIME_CONFIGURATION_MISMATCH",
-        "Requested Runtime image does not match the Worker pin",
+        "RUNTIME_IMAGE_UNAVAILABLE",
+        "Requested Runtime image is not offered by this Worker",
       );
     }
+    return offered;
+  }
+
+  #assertWorkspaceImage(recorded: string, requested: string): void {
+    if (recorded !== requested) {
+      throw new WorkspaceRuntimeError(
+        "RUNTIME_CONFIGURATION_MISMATCH",
+        "Requested Runtime image does not match the Workspace",
+      );
+    }
+  }
+
+  /** Records the image ID of a container created before Phase 18 (trust on first use). */
+  async #pinImageId(
+    paths: ManagedWorkspacePaths,
+    inspection: Docker.ContainerInspectInfo,
+  ): Promise<ManagedWorkspacePaths> {
+    if (paths.managed.runtimeImageId !== undefined) return paths;
+    const imageId = ImageDigestSchema.safeParse(inspection.Image);
+    if (!imageId.success) return paths;
+    const managed = { ...paths.managed, runtimeImageId: imageId.data };
+    await this.#writeMetadata(paths, managed);
+    return { ...paths, managed };
   }
 
   #assertResources(resources: WorkspaceResources): void {
@@ -1934,8 +2100,8 @@ export class DockerWorkspaceRuntime {
 
   #observation(
     workspaceId: string,
-    state: WorkspaceState,
-    runtimeImage = this.#runtimeImage,
+    state: ObservedWorkspaceState,
+    runtimeImage: string,
   ): WorkspaceRuntimeObservation {
     return {
       workspaceId,

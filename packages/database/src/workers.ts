@@ -1,6 +1,7 @@
 import type {
   Architecture,
   ModelRelayStatus,
+  RuntimeImageReport,
   WorkerCapabilities,
   WorkerEgressStatus,
   WorkerStorageStatus,
@@ -14,6 +15,17 @@ import { createStorageRepository } from "./storage.js";
 
 export type WorkerStatus = "REGISTERED" | "ONLINE" | "OFFLINE" | "DISABLED";
 
+/** One Runtime image a Worker offers, as its last hello reported it (Phase 18.4). */
+export interface WorkerRuntimeImage {
+  image: string;
+  /** Null only for rows migrated from before Phase 18. */
+  imageId: string | null;
+  runtimeVersion: string;
+  piWebVersion: string | null;
+  piVersion: string | null;
+  capabilities: WorkerCapabilities;
+}
+
 export interface WorkerRecord {
   id: string;
   hostname: string | null;
@@ -25,6 +37,8 @@ export interface WorkerRecord {
   runtimeImage: string | null;
   runtimeVersion: string | null;
   capabilities: Partial<WorkerCapabilities>;
+  /** Every image the Worker offers; the three fields above repeat the first one. */
+  runtimeImages: WorkerRuntimeImage[];
   maxWorkspaces: number | null;
   allocatedWorkspaces: number;
   systemResources: {
@@ -61,6 +75,7 @@ interface WorkerRow {
   runtime_image: string | null;
   runtime_version: string | null;
   capabilities: Partial<WorkerCapabilities>;
+  runtime_images: WorkerRuntimeImage[];
   max_workspaces: number | null;
   allocated_workspaces: number;
   cpu_capacity: { logicalCpuCount?: number };
@@ -92,6 +107,7 @@ function mapWorker(row: WorkerRow): WorkerRecord {
     runtimeImage: row.runtime_image,
     runtimeVersion: row.runtime_version,
     capabilities: row.capabilities,
+    runtimeImages: row.runtime_images,
     maxWorkspaces: row.max_workspaces,
     allocatedWorkspaces: row.allocated_workspaces,
     systemResources: {
@@ -168,7 +184,7 @@ export function createWorkerRepository(database: DatabaseClient) {
           update workspaces
           set state = 'WORKER_OFFLINE', updated_at = now()
           where worker_id = ${input.workerId}
-            and state in ('STARTING', 'RUNNING', 'STOPPING', 'STOPPED', 'ERROR')
+            and state in ('STARTING', 'RUNNING', 'STOPPING', 'STOPPED', 'ERROR', 'UPGRADING')
         `;
         return true;
       });
@@ -247,6 +263,14 @@ export function createWorkerRepository(database: DatabaseClient) {
       });
     },
 
+    /** The Runtime images each Worker last reported, for Workspace Runtime info (18.4). */
+    async listWorkerRuntimeImages(): Promise<Map<string, WorkerRuntimeImage[]>> {
+      const rows = await database<Array<{ id: string; runtime_images: WorkerRuntimeImage[] }>>`
+        select id, runtime_images from workers
+      `;
+      return new Map(rows.map((row) => [row.id, row.runtime_images]));
+    },
+
     /** Revoked Workers and their Workspaces, for closing what is still connected. */
     async listRevokedWorkerAssignments(): Promise<RevokedWorkerAssignment[]> {
       const rows = await database<Array<{ id: string; workspace_ids: string[] }>>`
@@ -285,9 +309,7 @@ export function createWorkerRepository(database: DatabaseClient) {
       workerId: string;
       hostname: string;
       architecture: Architecture;
-      runtimeImage: string;
-      runtimeVersion: string;
-      capabilities: WorkerCapabilities;
+      runtimeImages: RuntimeImageReport[];
       maxWorkspaces: number;
       allocatedWorkspaces: number;
       systemResources: WorkerSystemResources;
@@ -296,7 +318,10 @@ export function createWorkerRepository(database: DatabaseClient) {
       modelRelay: ModelRelayStatus;
       receivedAt: Date;
     }): Promise<boolean> {
-      const capabilities = database.json(input.capabilities);
+      const [first] = input.runtimeImages;
+      if (first === undefined) throw new Error("A Worker hello reports at least one Runtime image");
+      const capabilities = database.json(first.capabilities);
+      const runtimeImages = database.json(input.runtimeImages);
       const cpuCapacity = database.json({
         logicalCpuCount: input.systemResources.logicalCpuCount,
       });
@@ -307,9 +332,10 @@ export function createWorkerRepository(database: DatabaseClient) {
             hostname = ${input.hostname},
             architecture = ${input.architecture},
             status = 'ONLINE',
-            runtime_image = ${input.runtimeImage},
-            runtime_version = ${input.runtimeVersion},
+            runtime_image = ${first.image},
+            runtime_version = ${first.runtimeVersion},
             capabilities = ${capabilities},
+            runtime_images = ${runtimeImages},
             max_workspaces = ${input.maxWorkspaces},
             allocated_workspaces = ${input.allocatedWorkspaces},
             cpu_capacity = ${cpuCapacity},
@@ -376,7 +402,7 @@ export function createWorkerRepository(database: DatabaseClient) {
       const rows = await database<WorkerRow[]>`
         select
           id, hostname, architecture, status, enabled, schedulable, runtime_image,
-          runtime_version, capabilities, max_workspaces,
+          runtime_version, capabilities, runtime_images, max_workspaces,
           allocated_workspaces, cpu_capacity, memory_bytes,
           last_heartbeat_at, egress_enforced, egress_revision::text,
           egress_checked_at, storage_enforced, storage_fs_type,
@@ -405,7 +431,7 @@ export function createWorkerRepository(database: DatabaseClient) {
               update workspaces
               set state = 'WORKER_OFFLINE', updated_at = now()
               where worker_id = ${worker.id}
-                and state in ('STARTING', 'RUNNING', 'STOPPING', 'STOPPED', 'ERROR')
+                and state in ('STARTING', 'RUNNING', 'STOPPING', 'STOPPED', 'ERROR', 'UPGRADING')
             `;
           }
           return offlineWorkers.length;

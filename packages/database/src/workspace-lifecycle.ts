@@ -69,7 +69,7 @@ export function createWorkspaceLifecycleRepository(database: DatabaseClient) {
           where id = ${input.workspaceId}
             and user_id = ${input.userId}
             and worker_id = ${input.workerId}
-            and state not in ('STARTING', 'STOPPING', 'DELETING')
+            and state not in ('STARTING', 'STOPPING', 'DELETING', 'UPGRADING')
           returning id
         `;
         if (rows.length !== 1) return false;
@@ -109,7 +109,7 @@ export function createWorkspaceLifecycleRepository(database: DatabaseClient) {
           updated_at = now()
         where id = ${input.workspaceId}
           and worker_id = ${input.workerId}
-          and state in ('STARTING', 'STOPPING', 'DELETING')
+          and state in ('STARTING', 'STOPPING', 'DELETING', 'UPGRADING')
       `;
     },
   };

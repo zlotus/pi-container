@@ -7,7 +7,14 @@ import type { FastifyInstance } from "fastify";
 import type { RouteContext } from "../context.js";
 import type { DispatchResult, RuntimeCommands } from "../runtime-commands.js";
 import { errorBody, isUniqueViolation } from "../http.js";
-import { type PublicModelAccess, publicWorkspace } from "../presenters.js";
+import type { WorkspaceRecord } from "@agent-runtime/database";
+
+import {
+  type PublicModelAccess,
+  publicWorkspace,
+  runtimeChangeIncomplete,
+  workspaceRuntime,
+} from "../presenters.js";
 
 const CreateWorkspaceBodySchema = z
   .object({
@@ -51,11 +58,27 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
     }
   }
 
+  /** Each Workspace's Runtime version and allowed changes (specs.md Phase 18.8). */
+  async function runtimeOf(workspaces: readonly WorkspaceRecord[]) {
+    const images = await dependencies.workerStore.listWorkerRuntimeImages();
+    return new Map(
+      workspaces.map((workspace) => [
+        workspace.id,
+        workspaceRuntime(
+          workspace,
+          workspace.workerId === null ? [] : (images.get(workspace.workerId) ?? []),
+          dependencies.defaultRuntimeImage,
+        ),
+      ]),
+    );
+  }
+
   async function present<T extends Parameters<typeof publicWorkspace>[0]>(workspace: T) {
     return publicWorkspace(
       workspace,
       (await modelAccessOf([workspace])).get(workspace.id),
       context.usage.workspace(workspace.id, workspace.workerId),
+      (await runtimeOf([workspace])).get(workspace.id) ?? null,
     );
   }
 
@@ -67,13 +90,14 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
     const workspaces = await dependencies.store.listWorkspaces(
       auth.session.user.id,
     );
-    const access = await modelAccessOf(workspaces);
+    const [access, runtimes] = await Promise.all([modelAccessOf(workspaces), runtimeOf(workspaces)]);
     return {
       workspaces: workspaces.map((workspace) =>
         publicWorkspace(
           workspace,
           access.get(workspace.id),
           context.usage.workspace(workspace.id, workspace.workerId),
+          runtimes.get(workspace.id) ?? null,
         ),
       ),
     };
@@ -162,6 +186,12 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
       return reply
         .code(404)
         .send(errorBody("WORKSPACE_NOT_FOUND", "Workspace was not found"));
+    }
+    if (runtimeChangeIncomplete(workspace)) {
+      // An interrupted Runtime change is retried or rolled back first (Phase 18.4).
+      return reply
+        .code(409)
+        .send(errorBody("RUNTIME_CHANGE_INCOMPLETE", "Retry or roll back the Runtime change first"));
     }
     if (workspace.state === "RUNNING") {
       return { workspace: await present(workspace) };

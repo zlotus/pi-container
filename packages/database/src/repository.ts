@@ -6,6 +6,7 @@ import { createMetricsRepository } from "./metrics.js";
 import type { DatabaseClient } from "./index.js";
 import { createModelKeyRepository } from "./model-keys.js";
 import { createRecoveryRepository } from "./recovery.js";
+import { createRuntimeChangeRepository } from "./runtime-changes.js";
 import { createSchedulingRepository, type WorkerSelector } from "./scheduling.js";
 import { createStorageRepository } from "./storage.js";
 import { createUserRepository } from "./users.js";
@@ -22,6 +23,7 @@ export function createRepository(database: DatabaseClient, selectWorker: WorkerS
     ...createUserRepository(database),
     ...createWorkspaceRepository(database),
     ...createWorkspaceLifecycleRepository(database),
+    ...createRuntimeChangeRepository(database),
     ...createWorkerRepository(database),
     ...createSchedulingRepository(database, selectWorker),
     ...createRecoveryRepository(database),

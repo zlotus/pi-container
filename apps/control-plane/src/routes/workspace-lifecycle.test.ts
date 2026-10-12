@@ -50,7 +50,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
             : "CREATED";
       worker.send(
         JSON.stringify({
-          version: 5,
+          version: 6,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -259,7 +259,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       worker1Commands.push(command.type);
       worker1.send(
         JSON.stringify({
-          version: 5,
+          version: 6,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -288,7 +288,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       worker2Commands.push(command.type);
       worker2.send(
         JSON.stringify({
-          version: 5,
+          version: 6,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -460,12 +460,16 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       createdAt: NOW,
       updatedAt: NOW,
       lastActivityAt: NOW,
+      previousRuntimeImage: null,
+      runtimeChangedAt: null,
+      lastAccessAt: null,
+      lastStopReason: null,
       disk: TEST_WORKSPACE_DISK,
     });
 
     worker.send(
       JSON.stringify({
-        version: 5,
+        version: 6,
         type: "worker.heartbeat",
         requestId: crypto.randomUUID(),
         payload: {
@@ -520,6 +524,10 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
         createdAt: NOW,
         updatedAt: NOW,
         lastActivityAt: NOW,
+        previousRuntimeImage: null,
+        runtimeChangedAt: null,
+        lastAccessAt: null,
+        lastStopReason: null,
         disk: TEST_WORKSPACE_DISK,
       });
     }
@@ -534,7 +542,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
 
     worker.send(
       JSON.stringify({
-        version: 5,
+        version: 6,
         type: "worker.heartbeat",
         requestId: crypto.randomUUID(),
         payload: {

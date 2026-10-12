@@ -14,6 +14,7 @@ import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { loadWorkerConfig } from "./config.js";
+import { configuredRuntimeImages, DockerRuntimeImageCatalog } from "./runtime-images.js";
 import type { WorkerConfig } from "./config.js";
 import { DockerRuntimeCapabilityProbe } from "./capabilities.js";
 import { currentArchitecture } from "./daemon.js";
@@ -147,15 +148,21 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
       await smoke.remove({ force: true });
     }
 
-    await expect(
-      new DockerRuntimeCapabilityProbe(config, docker).probe(architecture),
-    ).resolves.toEqual({
-      browser: true,
-      office: true,
-      ffmpeg: true,
-      python: true,
-      node: true,
-      rust: true,
+    const log = { error: () => undefined, warn: () => undefined };
+    const catalog = new DockerRuntimeImageCatalog(configuredRuntimeImages(config), docker, log);
+    const reports = await new DockerRuntimeCapabilityProbe(config, catalog, log, docker).probe(architecture);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      image: runtimeImage,
+      imageId: (await docker.getImage(runtimeImage).inspect()).Id,
+      capabilities: {
+        browser: true,
+        office: true,
+        ffmpeg: true,
+        python: true,
+        node: true,
+        rust: true,
+      },
     });
   }, 180_000);
 
@@ -718,8 +725,9 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
       state: "STOPPED",
       runtimeImage,
     });
+    // The image is no longer offered: it can be inspected and deleted, not started (18.4).
     await expect(upgradedRuntime.start(upgradedWorkspaceId)).rejects.toMatchObject({
-      code: "RUNTIME_CONFIGURATION_MISMATCH",
+      code: "RUNTIME_IMAGE_UNAVAILABLE",
     });
     expect(await readFile(metadataPath, "utf8")).toBe(originalMetadata);
 
@@ -735,6 +743,80 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
     ).toHaveLength(0);
     expect(existsSync(workspaceRoot)).toBe(false);
   }, 120_000);
+
+  it("switches a stopped Workspace to another image and back, keeping its data (Phase 18.4)", async () => {
+    const changedWorkspaceId = randomUUID();
+    const repository = runtimeImage.split(":")[0] ?? "agent-runtime";
+    const tag = `phase18-integration-${changedWorkspaceId.slice(0, 8)}`;
+    const secondImage = `${repository}:${tag}`;
+    const imageId = (await docker.getImage(runtimeImage).inspect()).Id;
+    await docker.getImage(runtimeImage).tag({ repo: repository, tag });
+    const offered = new Map(
+      [runtimeImage, secondImage].map((image, index) => [
+        image,
+        { image, imageId, runtimeVersion: `v${index}`, piWebVersion: null, piVersion: null },
+      ]),
+    );
+    const multiRuntime = new DockerWorkspaceRuntime(
+      config,
+      docker,
+      undefined,
+      ASSUMED_ENFORCED,
+      ASSUMED_STORAGE,
+      { find: (image) => offered.get(image) ?? null },
+    );
+    const name = `agent-runtime-${changedWorkspaceId}`;
+    const workspaceRoot = join(managedRoot, "workspaces", changedWorkspaceId);
+    try {
+      await multiRuntime.ensure(changedWorkspaceId, runtimeImage, resources, STORAGE);
+      await multiRuntime.start(changedWorkspaceId);
+      const before = await docker.getContainer(name).inspect();
+      await writeFile(join(workspaceRoot, "workspace", "kept.txt"), "kept across images", "utf8");
+      await writeFile(join(workspaceRoot, "pi", "kept.json"), "{}", "utf8");
+      await multiRuntime.stop(changedWorkspaceId);
+
+      await expect(
+        multiRuntime.setRuntime(changedWorkspaceId, runtimeImage, secondImage),
+      ).resolves.toMatchObject({ state: "STOPPED", runtimeImage: secondImage });
+      const after = await docker.getContainer(name).inspect();
+      expect(after.Id).not.toBe(before.Id);
+      expect(after.Config.Image).toBe(secondImage);
+      expect(after.Image).toBe(imageId);
+      expect(after.State.Running).toBe(false);
+      // Same container configuration apart from the image reference.
+      expect(after.HostConfig).toMatchObject({
+        ReadonlyRootfs: true,
+        CapDrop: ["ALL"],
+        Privileged: false,
+        NetworkMode: before.HostConfig.NetworkMode,
+        Memory: before.HostConfig.Memory,
+        NanoCpus: before.HostConfig.NanoCpus,
+        PidsLimit: before.HostConfig.PidsLimit,
+      });
+      expect(after.Mounts.map((mount) => [mount.Source, mount.Destination]).sort()).toEqual(
+        before.Mounts.map((mount) => [mount.Source, mount.Destination]).sort(),
+      );
+      expect(after.Config.Env.sort()).toEqual(before.Config.Env.sort());
+
+      await expect(multiRuntime.start(changedWorkspaceId)).resolves.toMatchObject({
+        state: "RUNNING",
+        runtimeImage: secondImage,
+      });
+      expect(await readFile(join(workspaceRoot, "workspace", "kept.txt"), "utf8")).toBe("kept across images");
+      expect(await readFile(join(workspaceRoot, "pi", "kept.json"), "utf8")).toBe("{}");
+      await multiRuntime.stop(changedWorkspaceId);
+
+      await expect(
+        multiRuntime.setRuntime(changedWorkspaceId, secondImage, runtimeImage),
+      ).resolves.toMatchObject({ runtimeImage });
+      await expect(multiRuntime.start(changedWorkspaceId)).resolves.toMatchObject({ state: "RUNNING" });
+      expect(await readFile(join(workspaceRoot, "workspace", "kept.txt"), "utf8")).toBe("kept across images");
+    } finally {
+      await multiRuntime.delete(changedWorkspaceId).catch(() => undefined);
+      await docker.getImage(secondImage).remove({ noprune: true }).catch(() => undefined);
+    }
+    expect(existsSync(workspaceRoot)).toBe(false);
+  }, 240_000);
 
   it("keeps Workspace bridges isolated from each other and host loopback", async () => {
     const [workspaceA, workspaceB] = isolationWorkspaceIds;

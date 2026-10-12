@@ -164,6 +164,7 @@ export async function createTestDependencies(
       runtimeImage: null,
       runtimeVersion: null,
       capabilities: {},
+      runtimeImages: [],
       maxWorkspaces: null,
       allocatedWorkspaces: 0,
       systemResources: { logicalCpuCount: null, memoryBytes: null },
@@ -212,6 +213,10 @@ export async function createTestDependencies(
     return {
       ...worker,
       assignedWorkspaces: assigned.length,
+      workspacesByImage: assigned.reduce<Record<string, number>>((counts, workspace) => {
+        counts[workspace.runtimeImage] = (counts[workspace.runtimeImage] ?? 0) + 1;
+        return counts;
+      }, {}),
       allocatedDiskLimitBytes: assigned.reduce(
         (total, workspace) => total + workspace.disk.limitBytes,
         0,
@@ -335,9 +340,10 @@ export async function createTestDependencies(
           hostname: input.hostname,
           architecture: input.architecture,
           status: "ONLINE",
-          runtimeImage: input.runtimeImage,
-          runtimeVersion: input.runtimeVersion,
-          capabilities: input.capabilities,
+          runtimeImage: input.runtimeImages[0]?.image ?? null,
+          runtimeVersion: input.runtimeImages[0]?.runtimeVersion ?? null,
+          capabilities: input.runtimeImages[0]?.capabilities ?? {},
+          runtimeImages: input.runtimeImages,
           maxWorkspaces: input.maxWorkspaces,
           allocatedWorkspaces: input.allocatedWorkspaces,
           systemResources: input.systemResources,
@@ -436,6 +442,9 @@ export async function createTestDependencies(
       },
       async listWorkersWithAssignments() {
         return workers.map(placement);
+      },
+      async listWorkerRuntimeImages() {
+        return new Map(workers.map((worker) => [worker.id, worker.runtimeImages]));
       },
       async setWorkerSchedulable(input) {
         const worker = workers.find((candidate) => candidate.id === input.workerId);
@@ -1099,6 +1108,10 @@ export async function createTestDependencies(
           createdAt: NOW,
           updatedAt: NOW,
           lastActivityAt: NOW,
+          previousRuntimeImage: null,
+          runtimeChangedAt: null,
+          lastAccessAt: null,
+          lastStopReason: null,
           disk: { ...TEST_WORKSPACE_DISK, limitBytes: input.diskLimitBytes },
         };
         workspaces.push(workspace);
@@ -1149,9 +1162,7 @@ export async function createTestDependencies(
               status: worker.status,
               enabled: worker.enabled,
               schedulable: worker.schedulable,
-              runtimeImage: worker.runtimeImage,
-              runtimeVersion: worker.runtimeVersion,
-              capabilities: worker.capabilities,
+              runtimeImages: worker.runtimeImages,
               maxWorkspaces: worker.maxWorkspaces,
               assignedWorkspaces: workspaces.filter(
                 (candidate) => candidate.workerId === worker.id,
@@ -1213,7 +1224,7 @@ export async function createTestDependencies(
             candidate.id === input.workspaceId &&
             candidate.userId === input.userId &&
             candidate.workerId === input.workerId &&
-            !["STARTING", "STOPPING", "DELETING"].includes(candidate.state),
+            !["STARTING", "STOPPING", "DELETING", "UPGRADING"].includes(candidate.state),
         );
         if (workspace === undefined) return false;
         workspace.state = "DELETING";
@@ -1231,6 +1242,74 @@ export async function createTestDependencies(
         if (index < 0) return false;
         desiredStates.delete(input.workspaceId);
         workspaces.splice(index, 1);
+        return true;
+      },
+      async findWorkspaceById(id) {
+        return workspaces.find((workspace) => workspace.id === id) ?? null;
+      },
+      async beginWorkspaceRuntimeChange(input) {
+        const workspace = workspaces.find(
+          (candidate) =>
+            candidate.id === input.workspaceId &&
+            candidate.workerId === input.workerId &&
+            desiredStates.get(candidate.id) === "STOPPED" &&
+            ((candidate.state === "STOPPED" && candidate.runtimeImage === input.fromImage) ||
+              (candidate.state === "ERROR" &&
+                candidate.previousRuntimeImage !== null &&
+                candidate.runtimeChangedAt === null &&
+                [input.fromImage, input.toImage].includes(candidate.runtimeImage) &&
+                [input.fromImage, input.toImage].includes(candidate.previousRuntimeImage))),
+        );
+        if (workspace === undefined) return false;
+        Object.assign(workspace, {
+          state: "UPGRADING",
+          runtimeImage: input.toImage,
+          previousRuntimeImage: input.fromImage,
+          runtimeChangedAt: null,
+        });
+        addAuditEvent("workspace.runtime_change_requested", {
+          actorUserId: input.actorUserId,
+          ownerUserId: workspace.userId,
+          details: { fromImage: input.fromImage, toImage: input.toImage, direction: input.direction },
+        });
+        return true;
+      },
+      async finishWorkspaceRuntimeChange(input) {
+        const workspace = workspaces.find(
+          (candidate) =>
+            candidate.id === input.workspaceId &&
+            candidate.workerId === input.workerId &&
+            candidate.state === "UPGRADING" &&
+            candidate.runtimeImage === input.toImage,
+        );
+        if (workspace === undefined) return false;
+        Object.assign(workspace, { state: "STOPPED", runtimeChangedAt: NOW });
+        addAuditEvent("workspace.runtime_changed", {
+          actorUserId: input.actorUserId,
+          ownerUserId: workspace.userId,
+          details: { toImage: input.toImage },
+        });
+        return true;
+      },
+      async revertWorkspaceRuntimeChange(input) {
+        const workspace = workspaces.find(
+          (candidate) =>
+            candidate.id === input.workspaceId &&
+            candidate.workerId === input.workerId &&
+            candidate.state === "UPGRADING",
+        );
+        if (workspace === undefined) return false;
+        Object.assign(workspace, {
+          state: input.restore.state,
+          runtimeImage: input.restore.runtimeImage,
+          previousRuntimeImage: input.restore.previousRuntimeImage,
+          runtimeChangedAt: input.restore.runtimeChangedAt,
+        });
+        addAuditEvent("workspace.runtime_change_reverted", {
+          actorUserId: input.actorUserId,
+          ownerUserId: workspace.userId,
+          details: { code: input.code },
+        });
         return true;
       },
       async markWorkspaceRuntimeFailure(input) {
@@ -1391,23 +1470,30 @@ export async function beginOAuth2Login(app: ReturnType<typeof buildControlPlane>
 
 export function workerHello(workerId: string) {
   return {
-    version: 5,
+    version: 6,
     type: "worker.hello",
     requestId: randomUUID(),
     payload: {
       workerId,
       hostname: `${workerId}.internal`,
       architecture: "arm64",
-      runtimeImage: "agent-runtime:test-unassigned",
-      runtimeVersion: "phase-3",
-      capabilities: {
-        browser: false,
-        office: false,
-        ffmpeg: false,
-        python: true,
-        node: true,
-        rust: false,
-      },
+      runtimeImages: [
+        {
+          image: "agent-runtime:test-unassigned",
+          imageId: `sha256:${"f".repeat(64)}`,
+          runtimeVersion: "phase-3",
+          piWebVersion: null,
+          piVersion: null,
+          capabilities: {
+            browser: false,
+            office: false,
+            ffmpeg: false,
+            python: true,
+            node: true,
+            rust: false,
+          },
+        },
+      ],
       maxWorkspaces: 4,
       allocatedWorkspaces: 0,
       systemResources: {
@@ -1438,7 +1524,7 @@ export function answerEgressApply(
   if (command.type !== "worker.egress.apply") return false;
   socket.send(
     JSON.stringify({
-      version: 5,
+      version: 6,
       type: "response.ok",
       requestId: command.requestId,
       payload: {
@@ -1464,7 +1550,7 @@ export type ReconcileOkResponse = Omit<WorkerOkResponse, "payload"> & {
 
 export function emptyReconciliation(requestId: string): ReconcileOkResponse {
   return {
-    version: 5,
+    version: 6,
     type: "response.ok",
     requestId,
     payload: {

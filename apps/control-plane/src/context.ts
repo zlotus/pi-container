@@ -47,6 +47,10 @@ type Phase1Store = Pick<
   | "listWorkspaces"
   | "createWorkspace"
   | "findOwnedWorkspace"
+  | "findWorkspaceById"
+  | "beginWorkspaceRuntimeChange"
+  | "finishWorkspaceRuntimeChange"
+  | "revertWorkspaceRuntimeChange"
   | "deleteOwnedWorkspace"
   | "scheduleWorkspaceStart"
   | "finishWorkspaceStart"
@@ -85,6 +89,7 @@ type Phase1Store = Pick<
 type WorkerAdminStore = Pick<
   Repository,
   | "listWorkersWithAssignments"
+  | "listWorkerRuntimeImages"
   | "setWorkerSchedulable"
   | "getEgressPolicy"
   | "recordWorkerEgress"

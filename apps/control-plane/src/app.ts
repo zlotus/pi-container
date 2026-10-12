@@ -15,6 +15,7 @@ import { registerExternalAuthRoutes } from "./routes/auth-external.js";
 import { registerLocalAuthRoutes } from "./routes/auth-local.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerModelGatewayRoutes } from "./routes/model-gateway.js";
+import { registerWorkspaceRuntimeRoutes } from "./routes/workspace-runtime.js";
 import { registerWorkspaceRoutes } from "./routes/workspaces.js";
 import { createRuntimeCommands } from "./runtime-commands.js";
 import { PlatformMetrics } from "./metrics/platform-metrics.js";
@@ -89,6 +90,7 @@ export function buildControlPlane(
   registerExternalAuthRoutes(app, context);
   registerLocalAuthRoutes(app, context);
   registerWorkspaceRoutes(app, context, runtime);
+  registerWorkspaceRuntimeRoutes(app, context, runtime);
   registerAuditRoutes(app, context);
   registerAdminWorkerRoutes(app, context, runtime);
   registerAdminEgressRoutes(app, context, runtime);

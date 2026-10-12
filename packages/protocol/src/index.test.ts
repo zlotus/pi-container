@@ -7,27 +7,35 @@ import {
 
 const requestId = "0d17d4a0-c25a-43fd-a2eb-3d9ca7c5976c";
 const workspaceId = "90b38efc-aa9a-4bc6-8eee-528b4e0c7c60";
+const IMAGE_ID = `sha256:${"e".repeat(64)}`;
 
 describe("worker protocol", () => {
   it("accepts a versioned worker hello", () => {
     const parsed = WorkerToControlMessageSchema.parse({
-      version: 5,
+      version: 6,
       type: "worker.hello",
       requestId,
       payload: {
         workerId: "worker-arm64-01",
         hostname: "worker-arm64-01.internal",
         architecture: "arm64",
-        runtimeImage: "registry.internal/agent-runtime",
-        runtimeVersion: "phase-3.1",
-        capabilities: {
-          browser: false,
-          office: false,
-          ffmpeg: false,
-          python: true,
-          node: true,
-          rust: false,
-        },
+        runtimeImages: [
+          {
+            image: "registry.internal/agent-runtime:phase-3.1",
+            imageId: IMAGE_ID,
+            runtimeVersion: "phase-3.1",
+            piWebVersion: "0.12.0",
+            piVersion: "1.1.0",
+            capabilities: {
+              browser: false,
+              office: false,
+              ffmpeg: false,
+              python: true,
+              node: true,
+              rust: false,
+            },
+          },
+        ],
         maxWorkspaces: 4,
         allocatedWorkspaces: 0,
         systemResources: {
@@ -61,7 +69,7 @@ describe("worker protocol", () => {
   it("validates storage status, disk usage samples and disk limits", () => {
     const heartbeat = (payload: Record<string, unknown>) =>
       WorkerToControlMessageSchema.safeParse({
-        version: 5,
+        version: 6,
         type: "worker.heartbeat",
         requestId,
         payload: {
@@ -91,7 +99,7 @@ describe("worker protocol", () => {
 
     const storageSet = (diskLimitBytes: unknown) =>
       ControlToWorkerMessageSchema.safeParse({
-        version: 5,
+        version: 6,
         type: "workspace.storage.set",
         requestId,
         payload: { workspaceId, diskLimitBytes },
@@ -102,7 +110,7 @@ describe("worker protocol", () => {
     }
     const ensure = (storage: unknown) =>
       ControlToWorkerMessageSchema.safeParse({
-        version: 5,
+        version: 6,
         type: "workspace.ensure",
         requestId,
         payload: {
@@ -131,23 +139,30 @@ describe("worker protocol", () => {
 
   it("rejects a Worker claiming more allocations than its capacity", () => {
     const result = WorkerToControlMessageSchema.safeParse({
-      version: 5,
+      version: 6,
       type: "worker.hello",
       requestId,
       payload: {
         workerId: "worker-01",
         hostname: "worker-01.internal",
         architecture: "arm64",
-        runtimeImage: "unavailable",
-        runtimeVersion: "phase-2",
-        capabilities: {
-          browser: false,
-          office: false,
-          ffmpeg: false,
-          python: false,
-          node: false,
-          rust: false,
-        },
+        runtimeImages: [
+          {
+            image: "agent-runtime:unavailable",
+            imageId: IMAGE_ID,
+            runtimeVersion: "phase-2",
+            piWebVersion: "0.12.0",
+            piVersion: "1.1.0",
+            capabilities: {
+              browser: false,
+              office: false,
+              ffmpeg: false,
+              python: false,
+              node: false,
+              rust: false,
+            },
+          },
+        ],
         maxWorkspaces: 1,
         allocatedWorkspaces: 2,
         systemResources: { logicalCpuCount: 8, memoryBytes: 16_000_000_000 },
@@ -160,7 +175,7 @@ describe("worker protocol", () => {
 
   it("does not accept host paths or container ids in infrastructure commands", () => {
     const result = ControlToWorkerMessageSchema.safeParse({
-      version: 5,
+      version: 6,
       type: "workspace.delete",
       requestId,
       payload: {
@@ -175,7 +190,7 @@ describe("worker protocol", () => {
 
   it("accepts a correlated response without exposing infrastructure details", () => {
     const parsed = WorkerToControlMessageSchema.parse({
-      version: 5,
+      version: 6,
       type: "response.ok",
       requestId,
       payload: {
@@ -195,7 +210,7 @@ describe("worker protocol", () => {
   it("accepts a bounded authoritative recovery command and typed inventory", () => {
     expect(
       ControlToWorkerMessageSchema.parse({
-        version: 5,
+        version: 6,
         type: "worker.reconcile",
         requestId,
         payload: {
@@ -213,7 +228,7 @@ describe("worker protocol", () => {
 
     expect(
       WorkerToControlMessageSchema.parse({
-        version: 5,
+        version: 6,
         type: "response.ok",
         requestId,
         payload: {
@@ -247,7 +262,7 @@ describe("worker protocol", () => {
     };
     expect(
       ControlToWorkerMessageSchema.safeParse({
-        version: 5,
+        version: 6,
         type: "worker.reconcile",
         requestId,
         payload: { assignments: [assignment, assignment] },
@@ -257,7 +272,7 @@ describe("worker protocol", () => {
 
   it("rejects stack traces and arbitrary fields in protocol errors", () => {
     const result = WorkerToControlMessageSchema.safeParse({
-      version: 5,
+      version: 6,
       type: "response.error",
       requestId,
       payload: {
@@ -270,5 +285,77 @@ describe("worker protocol", () => {
     });
 
     expect(result.success).toBe(false);
+  });
+
+  describe("Runtime images (Phase 18.9)", () => {
+    const capabilities = { browser: true, office: true, ffmpeg: true, python: true, node: true, rust: true };
+    const report = (image: string, runtimeVersion: string) => ({
+      image,
+      imageId: IMAGE_ID,
+      runtimeVersion,
+      piWebVersion: null,
+      piVersion: null,
+      capabilities,
+    });
+    const hello = (runtimeImages: unknown) => ({
+      version: 6,
+      type: "worker.hello",
+      requestId,
+      payload: {
+        workerId: "worker-01",
+        hostname: "worker-01.internal",
+        architecture: "arm64",
+        runtimeImages,
+        maxWorkspaces: 4,
+        allocatedWorkspaces: 0,
+        systemResources: { logicalCpuCount: 8, memoryBytes: 16_000_000_000 },
+        egress: { enforced: true, revision: 1 },
+        storage: { enforced: true, fsType: "xfs", totalBytes: 1_000, freeBytes: 500 },
+        modelRelay: { enabled: false, port: null, listening: false },
+      },
+    });
+
+    it("accepts 1 to 4 unique images and rejects duplicates or bad IDs", () => {
+      expect(WorkerToControlMessageSchema.safeParse(hello([report("a:1", "v1"), report("a:2", "v2")])).success).toBe(true);
+      for (const invalid of [
+        [],
+        [1, 2, 3, 4, 5].map((n) => report(`a:${n}`, `v${n}`)),
+        [report("a:1", "v1"), report("a:1", "v2")],
+        [report("a:1", "v1"), report("a:2", "v1")],
+        [{ ...report("a:1", "v1"), imageId: "sha256:abc" }],
+        [{ ...report("a:1", "v1"), extra: true }],
+      ]) {
+        expect(WorkerToControlMessageSchema.safeParse(hello(invalid)).success).toBe(false);
+      }
+    });
+
+    it("rejects a v5 hello", () => {
+      const v5 = hello([report("a:1", "v1")]);
+      expect(WorkerToControlMessageSchema.safeParse({ ...v5, version: 5 }).success).toBe(false);
+    });
+
+    it("carries workspace.runtime.set between two different image references only", () => {
+      const command = (payload: Record<string, unknown>) =>
+        ControlToWorkerMessageSchema.safeParse({ version: 6, type: "workspace.runtime.set", requestId, payload });
+      expect(command({ workspaceId, fromImage: "a:1", toImage: "a:2" }).success).toBe(true);
+      expect(command({ workspaceId, fromImage: "a:1", toImage: "a:1" }).success).toBe(false);
+      expect(command({ workspaceId, fromImage: "a:1", toImage: "../../etc" }).success).toBe(false);
+      expect(command({ workspaceId, fromImage: "a:1", toImage: "a:2", containerId: "abc" }).success).toBe(false);
+    });
+
+    it("never lets a Worker report the Control Plane's UPGRADING state", () => {
+      const observed = (state: string) =>
+        WorkerToControlMessageSchema.safeParse({
+          version: 6,
+          type: "response.ok",
+          requestId,
+          payload: {
+            requestType: "workspace.runtime.set",
+            workspace: { workspaceId, state, runtimeImage: "a:2", observedAt: "2026-10-12T08:00:00.000Z" },
+          },
+        }).success;
+      expect(observed("STOPPED")).toBe(true);
+      expect(observed("UPGRADING")).toBe(false);
+    });
   });
 });

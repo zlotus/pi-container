@@ -44,11 +44,18 @@ export interface WorkspaceRecord {
     | "STOPPED"
     | "DELETING"
     | "ERROR"
-    | "WORKER_OFFLINE";
+    | "WORKER_OFFLINE"
+    | "UPGRADING";
   runtimeImage: string;
+  /** The image before the last Runtime change: the rollback target (Phase 18.4). */
+  previousRuntimeImage: string | null;
+  runtimeChangedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
   lastActivityAt: Date;
+  /** The last Gateway access, written at most once a minute (Phase 18.5). */
+  lastAccessAt: Date | null;
+  lastStopReason: "idle" | null;
   disk: WorkspaceDiskRecord;
 }
 
@@ -90,6 +97,10 @@ export interface WorkspaceRow {
   pi_used_bytes: string | null;
   pi_limit_bytes: string | null;
   disk_usage_at: Date | null;
+  previous_runtime_image: string | null;
+  runtime_changed_at: Date | null;
+  last_access_at: Date | null;
+  last_stop_reason: "idle" | null;
 }
 
 function optionalNumber(value: string | null): number | null {
@@ -118,9 +129,13 @@ export function mapWorkspace(row: WorkspaceRow): WorkspaceRecord {
     workerId: row.worker_id,
     state: row.state,
     runtimeImage: row.runtime_image,
+    previousRuntimeImage: row.previous_runtime_image,
+    runtimeChangedAt: row.runtime_changed_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastActivityAt: row.last_activity_at,
+    lastAccessAt: row.last_access_at,
+    lastStopReason: row.last_stop_reason,
     disk: {
       limitBytes: Number(row.disk_limit_bytes),
       usedBytes: optionalNumber(row.disk_used_bytes),

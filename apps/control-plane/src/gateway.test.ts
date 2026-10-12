@@ -80,6 +80,10 @@ function workspace(state: WorkspaceRecord["state"] = "RUNNING"): WorkspaceRecord
     createdAt: NOW,
     updatedAt: NOW,
     lastActivityAt: NOW,
+    previousRuntimeImage: null,
+    runtimeChangedAt: null,
+    lastAccessAt: null,
+    lastStopReason: null,
     disk: TEST_WORKSPACE_DISK,
   };
 }

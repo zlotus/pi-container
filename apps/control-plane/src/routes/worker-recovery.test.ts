@@ -39,7 +39,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
       }
       firstWorker.send(
         JSON.stringify({
-          version: 5,
+          version: 6,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -165,7 +165,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
     }
     reconnectedWorker.send(
       JSON.stringify({
-        version: 5,
+        version: 6,
         type: "response.ok",
         requestId: reconcileCommand.requestId,
         payload: {
@@ -230,6 +230,10 @@ describe("Phase 6 Worker recovery reconciliation", () => {
           createdAt: NOW,
           updatedAt: NOW,
           lastActivityAt: NOW,
+          previousRuntimeImage: null,
+          runtimeChangedAt: null,
+          lastAccessAt: null,
+          lastStopReason: null,
           disk: TEST_WORKSPACE_DISK,
         },
       ]);
@@ -247,7 +251,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
         };
         worker.send(
           JSON.stringify({
-            version: 5,
+            version: 6,
             type: "response.ok",
             requestId: command.requestId,
             payload: {
@@ -309,6 +313,10 @@ describe("Phase 6 Worker recovery reconciliation", () => {
           createdAt: NOW,
           updatedAt: NOW,
           lastActivityAt: NOW,
+          previousRuntimeImage: null,
+          runtimeChangedAt: null,
+          lastAccessAt: null,
+          lastStopReason: null,
           disk: TEST_WORKSPACE_DISK,
         },
       ]);
@@ -325,7 +333,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
         };
         worker.send(
           JSON.stringify({
-            version: 5,
+            version: 6,
             type: "response.ok",
             requestId: command.requestId,
             payload: {
@@ -412,6 +420,10 @@ describe("Phase 6 Worker recovery reconciliation", () => {
         createdAt: NOW,
         updatedAt: NOW,
         lastActivityAt: NOW,
+        previousRuntimeImage: null,
+        runtimeChangedAt: null,
+        lastAccessAt: null,
+        lastStopReason: null,
         disk: TEST_WORKSPACE_DISK,
       },
     ]);
@@ -425,7 +437,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
       const command = JSON.parse(data.toString()) as { requestId: string };
       worker.send(
         JSON.stringify({
-          version: 5,
+          version: 6,
           type: "response.ok",
           requestId: command.requestId,
           payload: {

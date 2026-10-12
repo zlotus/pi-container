@@ -36,6 +36,7 @@ function fakeRuntime(): WorkspaceRuntime {
     setDiskLimit: vi.fn<WorkspaceRuntime["setDiskLimit"]>(),
     diskUsage: vi.fn<WorkspaceRuntime["diskUsage"]>().mockResolvedValue([]),
     configureModelProvider: vi.fn<WorkspaceRuntime["configureModelProvider"]>().mockResolvedValue("removed"),
+    setRuntime: vi.fn<WorkspaceRuntime["setRuntime"]>(),
   };
 }
 
@@ -66,6 +67,17 @@ const capabilities = {
   node: true,
   rust: true,
 };
+
+const runtimeImages = [
+  {
+    image: "agent-runtime:phase7-toolchain",
+    imageId: `sha256:${"a".repeat(64)}`,
+    runtimeVersion: "phase-7",
+    piWebVersion: null,
+    piVersion: null,
+    capabilities,
+  },
+];
 
 async function listen(): Promise<{ server: WebSocketServer; url: string }> {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -130,21 +142,14 @@ describe("worker daemon messages", () => {
       architecture: "arm64",
       logicalCpuCount: 8,
       memoryBytes: 16 * 1024 ** 3,
-    }, capabilities, { enforced: true, revision: 4 }, STORAGE_STATUS);
+    }, runtimeImages, { enforced: true, revision: 4 }, STORAGE_STATUS);
 
     expect(message).toMatchObject({
-      version: 5,
+      version: 6,
       type: "worker.hello",
       payload: {
         workerId: "worker-01",
-        capabilities: {
-          browser: true,
-          office: true,
-          ffmpeg: true,
-          python: true,
-          node: true,
-          rust: true,
-        },
+        runtimeImages,
         maxWorkspaces: 8,
         allocatedWorkspaces: 0,
         egress: { enforced: true, revision: 4 },
@@ -248,7 +253,7 @@ describe("worker daemon egress", () => {
     const daemon = new WorkerDaemon(
       { ...config, CONTROL_PLANE_URL: url },
       fakeRuntime(),
-      { probe: vi.fn().mockResolvedValue(capabilities) },
+      { probe: vi.fn().mockResolvedValue(runtimeImages) },
       egress,
       fakeStorage(),
       { info: vi.fn(), warn: vi.fn() },
@@ -272,7 +277,7 @@ describe("worker daemon egress", () => {
       ]) {
         workerSocket?.send(
           JSON.stringify({
-            version: 5,
+            version: 6,
             type: "worker.egress.apply",
             requestId,
             payload: policy,
@@ -282,7 +287,7 @@ describe("worker daemon egress", () => {
       await vi.waitFor(() => expect(received).toHaveLength(3));
       expect(egress.apply).toHaveBeenCalledWith(policy);
       expect(received[1]).toEqual({
-        version: 5,
+        version: 6,
         type: "response.ok",
         requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d01",
         payload: {
@@ -291,7 +296,7 @@ describe("worker daemon egress", () => {
         },
       });
       expect(received[2]).toEqual({
-        version: 5,
+        version: 6,
         type: "response.error",
         requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d02",
         payload: {
@@ -348,7 +353,7 @@ describe("worker daemon disk quotas", () => {
     const daemon = new WorkerDaemon(
       { ...config, CONTROL_PLANE_URL: url },
       runtime,
-      { probe: vi.fn().mockResolvedValue(capabilities) },
+      { probe: vi.fn().mockResolvedValue(runtimeImages) },
       fakeEgress(true),
       fakeStorage(true),
       { info: vi.fn(), warn: vi.fn() },
@@ -367,7 +372,7 @@ describe("worker daemon disk quotas", () => {
 
       workerSocket?.send(
         JSON.stringify({
-          version: 5,
+          version: 6,
           type: "workspace.storage.set",
           requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d03",
           payload: { workspaceId: sample.workspaceId, diskLimitBytes: 5 * 1024 ** 3 },
@@ -445,14 +450,14 @@ describe("worker daemon model access (Phase 16.9)", () => {
     const daemon = new WorkerDaemon(
       { ...config, CONTROL_PLANE_URL: url },
       runtime,
-      { probe: vi.fn().mockResolvedValue(capabilities) },
+      { probe: vi.fn().mockResolvedValue(runtimeImages) },
       fakeEgress(true),
       fakeStorage(true),
       { info: vi.fn(), warn },
       modelAccess,
     );
     const command = (type: string, requestId: string, payload: Record<string, unknown>) =>
-      workerSocket?.send(JSON.stringify({ version: 5, type, requestId, payload }));
+      workerSocket?.send(JSON.stringify({ version: 6, type, requestId, payload }));
     const response = (requestId: string) => received.find((entry) => entry.requestId === requestId);
     try {
       daemon.start();
@@ -543,7 +548,7 @@ describe("worker daemon model access (Phase 16.9)", () => {
     const daemon = new WorkerDaemon(
       { ...config, CONTROL_PLANE_URL: url },
       fakeRuntime(),
-      { probe: vi.fn().mockResolvedValue(capabilities) },
+      { probe: vi.fn().mockResolvedValue(runtimeImages) },
       fakeEgress(true),
       fakeStorage(true),
       { info: vi.fn(), warn: vi.fn() },
@@ -554,7 +559,7 @@ describe("worker daemon model access (Phase 16.9)", () => {
       expect(received[0]?.payload.modelRelay).toEqual({ enabled: false, port: null, listening: false });
       workerSocket?.send(
         JSON.stringify({
-          version: 5,
+          version: 6,
           type: "workspace.model_key.set",
           requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d21",
           payload: { workspaceId, keyAlias, secret: SECRET },

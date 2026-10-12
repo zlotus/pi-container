@@ -39,6 +39,9 @@ export type ModelGatewayOperation =
   | "user_info";
 export type ModelGatewayResult = "ok" | "error" | "unreachable";
 export type BackgroundTask = "worker_offline_sweep" | "auth_throttle_cleanup" | "model_key_loop";
+export type RuntimeChangeDirection = "upgrade" | "rollback" | "retry" | "admin";
+/** ok: switched; reverted: the Worker refused without changes; incomplete: outcome unknown. */
+export type RuntimeChangeResult = "ok" | "reverted" | "incomplete";
 
 export interface PlatformMetricsOptions {
   /** Node.js process metrics (`nodejs_*`, `process_*`); off in unit tests. */
@@ -171,6 +174,13 @@ export class PlatformMetrics {
     registers: [this.registry],
   });
 
+  readonly runtimeChanges = new Counter({
+    name: "agent_runtime_runtime_changes_total",
+    help: "Workspace Runtime image changes by direction and result (Phase 18.4).",
+    labelNames: ["direction", "result"] as const,
+    registers: [this.registry],
+  });
+
   constructor(options: PlatformMetricsOptions = {}) {
     new Gauge({
       name: "agent_runtime_build_info",
@@ -247,5 +257,9 @@ export class PlatformMetrics {
 
   recordBackgroundFailure(task: BackgroundTask): void {
     this.backgroundFailures.labels(task).inc();
+  }
+
+  recordRuntimeChange(direction: RuntimeChangeDirection, result: RuntimeChangeResult): void {
+    this.runtimeChanges.labels(direction, result).inc();
   }
 }

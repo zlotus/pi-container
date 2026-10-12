@@ -55,7 +55,8 @@ export function createRecoveryRepository(database: DatabaseClient) {
           created_at, updated_at, last_activity_at,
           disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
           disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
-          pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
+          pi_limit_bytes::text as pi_limit_bytes, disk_usage_at,
+          previous_runtime_image, runtime_changed_at, last_access_at, last_stop_reason
       `;
       return rows.map(mapRecoveryWorkspace).sort((left, right) =>
         left.id.localeCompare(right.id),
@@ -78,6 +79,15 @@ export function createRecoveryRepository(database: DatabaseClient) {
               and ${input.state} in ('RUNNING', 'STOPPED')
             then ${input.state}
             else desired_state
+          end,
+          -- A Runtime change interrupted by the disconnect is complete when the Worker
+          -- observes the Workspace on its new image (specs.md Phase 18.4).
+          runtime_changed_at = case
+            when ${input.state} in ('RUNNING', 'STOPPED')
+              and previous_runtime_image is not null
+              and runtime_changed_at is null
+            then now()
+            else runtime_changed_at
           end,
           updated_at = now()
         where id = ${input.workspaceId}
