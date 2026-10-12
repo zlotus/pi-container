@@ -419,7 +419,8 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
       Cmd: [
         "sh",
         "-lc",
-        "unset PI_WEB_DEFAULT_CWD; exec pi-web --hostname 0.0.0.0 --port 30141 --no-open",
+        // pi-web-launch seeds the preview-secret file (Phase 18.3); pi-web alone cannot start.
+        "unset PI_WEB_DEFAULT_CWD; exec pi-web-launch --hostname 0.0.0.0 --port 30141 --no-open",
       ],
       ExposedPorts: { "30141/tcp": {} },
       HostConfig: {
@@ -445,7 +446,8 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
       });
       expect(response.statusCode).toBe(200);
       const payload = JSON.parse(response.body) as { cwd?: unknown };
-      expect(payload.cwd).toMatch(/^\/home\/agent\/pi-cwd-\d{8}$/);
+      // pi-web 0.10.0 moved its fallback from ~/pi-cwd-<date> to ~/pi-cwd/<date>.
+      expect(payload.cwd).toMatch(/^\/home\/agent\/pi-cwd[-/]\d{8}$/);
       if (typeof payload.cwd !== "string") {
         throw new Error("pi-web did not return its fallback cwd");
       }

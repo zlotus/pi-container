@@ -5,8 +5,10 @@ FROM ${RUST_IMAGE} AS rust-toolchain
 
 FROM ${NODE_IMAGE} AS runtime-packages
 
-ARG PI_WEB_VERSION=0.9.0
-ARG PI_VERSION=0.85.1
+ARG PI_WEB_VERSION=0.12.0
+# Must equal the exact Pi version pi-web depends on (checked below): one Pi version reads
+# and writes /agent/pi, whether through pi-web or the `pi` CLI (specs.md Phase 18.3).
+ARG PI_VERSION=1.1.0
 ARG PLAYWRIGHT_VERSION=1.63.0
 ARG PNPM_VERSION=11.24.0
 
@@ -19,13 +21,25 @@ RUN apt-get update \
       "@earendil-works/pi-coding-agent@${PI_VERSION}" \
       "playwright@${PLAYWRIGHT_VERSION}" \
       "pnpm@${PNPM_VERSION}" \
-    && rm -rf /var/lib/apt/lists/* /root/.npm
+    && rm -rf /var/lib/apt/lists/* /root/.npm \
+    && node -e ' \
+      const root = "/opt/agent-runtime/lib/node_modules"; \
+      const web = require(`${root}/@agegr/pi-web/package.json`); \
+      const cli = require(`${root}/@earendil-works/pi-coding-agent/package.json`); \
+      const wanted = web.dependencies["@earendil-works/pi-coding-agent"]; \
+      if (cli.version !== wanted || cli.version !== process.env.PI_VERSION) { \
+        throw new Error(`pi CLI ${cli.version} must equal pi-web dependency ${wanted} and PI_VERSION ${process.env.PI_VERSION}`); \
+      }'
 
-COPY patches/pi-web-0.9.0-default-cwd.mjs /tmp/pi-web-0.9.0-default-cwd.mjs
+COPY patches/pi-web-0.12.0.mjs /tmp/pi-web-patch.mjs
 
-RUN node /tmp/pi-web-0.9.0-default-cwd.mjs \
-      /opt/agent-runtime/lib/node_modules/@agegr/pi-web \
-    && rm /tmp/pi-web-0.9.0-default-cwd.mjs
+# The install is read-only at run time: the preview-mode secrets live in tmpfs, seeded from
+# this template by pi-web-launch on every start and rotated there by pi-web itself.
+RUN node /tmp/pi-web-patch.mjs /opt/agent-runtime/lib/node_modules/@agegr/pi-web \
+    && rm /tmp/pi-web-patch.mjs \
+    && cd /opt/agent-runtime/lib/node_modules/@agegr/pi-web/.next \
+    && mv prerender-manifest.json prerender-manifest.template.json \
+    && ln -s /var/tmp/pi-web/prerender-manifest.json prerender-manifest.json
 
 FROM ${NODE_IMAGE}
 
@@ -107,18 +121,22 @@ RUN /opt/agent-runtime/bin/playwright install --with-deps chromium \
 COPY scripts/browser-smoke.mjs /usr/local/lib/agent-runtime/browser-smoke.mjs
 COPY scripts/runtime-capability-probe.mjs /usr/local/lib/agent-runtime/runtime-capability-probe.mjs
 COPY scripts/runtime-smoke.sh /usr/local/bin/runtime-smoke
+COPY scripts/pi-web-launch.sh /usr/local/bin/pi-web-launch
 
 RUN chmod 0755 \
       /usr/local/lib/agent-runtime/browser-smoke.mjs \
       /usr/local/lib/agent-runtime/runtime-capability-probe.mjs \
       /usr/local/bin/runtime-smoke \
+      /usr/local/bin/pi-web-launch \
     && ln -s \
       /usr/local/lib/agent-runtime/runtime-capability-probe.mjs \
       /usr/local/bin/runtime-capability-probe
 
-LABEL io.agent-runtime.phase="7" \
+LABEL io.agent-runtime.phase="18" \
       io.agent-runtime.playwright.version="1.63.0" \
-      io.agent-runtime.runtime.version="phase-7"
+      io.agent-runtime.runtime.version="phase-18" \
+      io.agent-runtime.pi-web.version="0.12.0" \
+      io.agent-runtime.pi.version="1.1.0"
 
 ENV HOME=/home/agent \
     PI_CODING_AGENT_DIR=/agent/pi \
@@ -127,6 +145,8 @@ ENV HOME=/home/agent \
     PI_WEB_NO_OPEN=1 \
     PI_WEB_SKIP_VERSION_CHECK=1 \
     PI_WEB_IDLE_TIMEOUT_MS=0 \
+    PI_TELEMETRY=0 \
+    PI_SKIP_VERSION_CHECK=1 \
     PORT=30141
 
 WORKDIR /workspace
@@ -137,4 +157,4 @@ HEALTHCHECK --interval=5s --timeout=3s --start-period=20s --retries=12 \
   CMD curl --fail --silent --show-error http://127.0.0.1:30141/ >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["pi-web", "--hostname", "0.0.0.0", "--port", "30141", "--no-open"]
+CMD ["pi-web-launch", "--hostname", "0.0.0.0", "--port", "30141", "--no-open"]

@@ -165,7 +165,7 @@ XFS project quota 无法确认。见 `docs/storage-runbook.md`（挂载、`prjqu
 
 可调度的在线 Worker 没有提供平台默认 Runtime 镜像（`DEFAULT_RUNTIME_IMAGE`）：镜像未构建、`RUNTIME_IMAGES` 中漏写，或 tag
 被重新指向其他内容而与 pin 的 digest 不符。新 Workspace 不会分配到该 Worker，已有 Workspace 不受影响。Admin Workers 的
-“详情”列出该 Worker 提供的镜像；Worker 日志中有 “not offered” 的原因。处理见 `docs/runtime-upgrade-runbook.md`。
+“详情”列出该 Worker 提供的镜像；Worker 日志中有 “not offered” 的原因。处理见 `docs/lifecycle-runbook.md`。
 
 ### AgentRuntimeWorkerModelRelayDown
 

@@ -5994,7 +5994,7 @@ Admin 页面截图、`workspaces` 与 `model_keys` 相关行、Prometheus Alerts
 
 ### 18.15 日常 Runtime 镜像更新流程（运维约定）
 
-本 Phase 的机制之上，以后每次更新镜像按同一流程进行，写入 `docs/runtime-upgrade-runbook.md`。
+本 Phase 的机制之上，以后每次更新镜像按同一流程进行，写入 `docs/lifecycle-runbook.md`。
 
 **何时更新**：
 
@@ -6045,6 +6045,53 @@ Admin 页面截图、`workspaces` 与 `model_keys` 相关行、Prometheus Alerts
 - 变异检查（已执行，10 项全部被测试发现）：触发器不置 `WORKER_OFFLINE`；不吊销模型 key；去掉 `enabled`/`status` 约束；
   BEFORE 触发器不置 `DISABLED`；周期任务不关闭 Gateway 连接；不关闭控制通道；`worker:enable` 不轮换凭据；`worker:delete`
   不检查已禁用；`worker:rotate` 不置 `WORKER_OFFLINE`；按 Workspace 关闭时误关全部连接。
+
+**第二、三步：多镜像、升级/回滚与新镜像（2026-10-12）**
+
+- **S1 结论**（新镜像 `agent-runtime:phase18-pi1.1`，`sha256:a063037f…`，按 Workspace 方式运行：只读根、tmpfs、非 root、
+  cap-drop ALL）：
+  - 目标版本锁定为 **pi-web 0.12.0 + Pi 1.1.0**（pi-web 0.12.0 精确依赖的版本；Dockerfile 构建时校验全局 `pi` 与之相同）。
+    `verify-image.sh` 全部通过（含 Chromium 实际启动，六项 capability 为真）。
+  - default-cwd：`runtime/patches/pi-web-0.12.0.mjs` 按精确片段改为 `PI_WEB_DEFAULT_CWD` 优先；`POST /api/default-cwd` 返回
+    `/workspace`。**Files 根目录**：0.12.0 在没有 Session 时显示“选择项目”，“New”在选定项目前不可用；点“Use default directory”
+    即调用 default-cwd 与 `/api/cwd/validate`，后者登记 `/workspace` 为 Files 根，Files 随即列出 `/workspace`、可新建会话。
+    这是上游 0.10+ 的交互设计，因此**不额外 patch 根目录登记**；已有 `/workspace` 会话的 Workspace 直接以它为项目。
+  - preview 密钥：同一 patch 让 `rotate-preview-secrets.js` 写到符号链接目标；`.next/prerender-manifest.json` 指向
+    `/var/tmp/pi-web/`（tmpfs），由新的 `pi-web-launch`（镜像 CMD）每次启动从只读模板写入，pi-web 自己完成轮换。实测每次
+    启动密钥不同、文件 `0600`、日志无轮换警告。直接运行 `pi-web` 而不经 `pi-web-launch` 时 Next.js 无法启动（fail-closed）。
+  - 绕过探测：外部 Host 请求为 403；附带 `x-prerender-revalidate`（公开值或当前真实值）均为 400，0.9.0 镜像上同样为 400，
+    即简单探测未能复现上游描述的绕过（上游利用条件更复杂）。镜像侧轮换与 Gateway 剥离 Next.js 内部请求头仍保留为纵深防护。
+  - `open-in-explorer`：`GET` 返回 `supported:false, reason:"remote"`，`POST` 拒绝，不派生进程。`app-update` 在
+    `PI_WEB_SKIP_VERSION_CHECK=1` 下只返回当前版本。镜像 `ENV` 增加 `PI_TELEMETRY=0`、`PI_SKIP_VERSION_CHECK=1`（Q9）。
+  - project-trust 与 MCP：`/workspace/.pi/mcp.json`（stdio server）使 `/api/project-trust` 返回 `requiresTrust:true`，并列出
+    server 名称、传输方式与将执行的命令；信任后决定写入 `/agent/pi/trust.json`（`0600`），重启后重新打开项目仍生效。
+    MCP 工具的实际调用、指向内网的 HTTP MCP 被出口规则拒绝、MCP OAuth 回调的表现在人工验收中确认（需要真实模型）。
+- **S2 结论**（不调用真实模型：两个镜像中的真实 `pi` CLI 对接本地 mock OpenAI 兼容服务）：同一个 Session 由 Pi 0.85.1 创建、
+  Pi 1.1.0 继续、再回到 Pi 0.85.1 继续，三轮都完成且 bash 工具均执行；1.1.0 写入的条目类型都是 0.85.1 已知的
+  （`message`、`model_change`、`thinking_level_change`）。**回滚分档：普通对话与工具调用“完全可用”**；1.x 特有的条目
+  （`context_edit` 等，只在上下文编辑类扩展或功能下出现）未覆盖，runbook 写明此类会话回滚后可能无法完整显示。
+- **新旧镜像共用平台目录**：`catalog.docker.test.ts` 用 Worker 自己的写入函数渲染 `models.json`，在 Pi 0.85.1 与 1.1.0 中
+  无网络 `pi --list-models platform` 都列出全部模型。MiMo 的 compat 只写 `thinkingFormat` 与
+  `requiresReasoningContentOnAssistantMessages`：Pi 的 compat 推断对 MiMo 没有按域名的特例，经中继与直连得到相同的请求形态；
+  `supportsStrictMode` 不写（只有 1.x 认识，且 10-08 的 MiMo 冒烟也未使用）。
+- **镜像 pin**：`RUNTIME_IMAGES` 的 digest 与本地镜像 ID 或某个 `RepoDigests` 一致即视为匹配（containerd 镜像存储下本地构建的
+  镜像二者相同）；版本优先取镜像标签，过渡期的 `RUNTIME_IMAGE` 只在镜像没有标签时使用 `RUNTIME_VERSION`。
+- **“结果不确定”的判定**：Worker 返回 `RUNTIME_IMAGE_UNAVAILABLE`、`WORKSPACE_RUNNING`、`STORAGE_MIGRATION_REQUIRED`、
+  `WORKSPACE_METADATA_MISMATCH`、`WORKSPACE_NOT_MANAGED`、`UNMANAGED_CONTAINER_CONFLICT` 时保证未修改，平台恢复原状；其余失败
+  （超时、断线、引擎错误）标记为“切换未完成”（`ERROR` + 有 `previous_runtime_image` + 无 `runtime_changed_at`）。
+- **新增 `POST /api/workspaces/:id/runtime/retry`**：重复上次未完成切换的目标（升级只能到默认镜像、回滚只能到上一版本，都覆盖
+  不了“重试原目标”）。未完成期间 `start` 返回 `RUNTIME_CHANGE_INCOMPLETE`。
+- **Worker 对“上一镜像”的容器放宽身份校验**：切换中断后，容器可能仍来自 `previousRuntimeImage`；`setRuntime` 按创建它的镜像
+  校验安全基线（只跳过镜像 ID pin），从而支持对中断的切换做回滚。
+- **审计**：`workspace.runtime_change_requested` / `runtime_changed` / `runtime_change_reverted` 由 repository 在同一事务写入
+  （带 actor）；状态触发器另记 `workspace.runtime_upgrading`（触发器先于显式事件写入）。
+- **指标**：除 18.8 所列外，用 `agent_runtime_worker_default_runtime_image_available{worker_id}` 支撑
+  `AgentRuntimeDefaultRuntimeImageMissing`（可调度、在线且不提供默认镜像，15 分钟）。
+- **变异检查（已执行，22 项全部被测试发现）**：Worker 不检查容器是否运行、不校验受管容器基线（首轮存活，补“基线被篡改”测试后
+  被发现）、接受未提供的镜像、去掉镜像 ID pin、去掉创建时引用漂移检查、先删容器后写元数据、不校验来源镜像、目录不校验 digest、
+  不校验平台；Control Plane 在持久化 intent 前发命令、结果不确定时恢复原状、不校验 Worker 是否提供目标镜像、不要求已停止、普通
+  用户可指定镜像、未完成时允许启动、数据库在任意状态接受 intent、`UPGRADING` 时允许删除、offline 处理漏掉 `UPGRADING`、
+  调度使用 Worker 级而非镜像级 capability；Gateway 不剥离 Next.js 内部请求头、不剥离 `x-invoke-*`。
 
 ## Phase 19：生产部署与 v1.0 发布
 

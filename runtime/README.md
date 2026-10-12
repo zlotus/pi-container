@@ -1,4 +1,4 @@
-# Phase 7 Runtime Toolchain
+# Runtime Image
 
 The Phase 7 image keeps the pinned pi-web/Pi integration and adds the bounded
 engineering workstation toolchain from `specs.md`:
@@ -29,17 +29,17 @@ Pinned inputs:
 - uv `0.12.13`
 - pnpm `11.24.0`
 - Playwright `1.63.0` and its matching Chromium revision
-- `@agegr/pi-web` `0.9.0`
-- `@earendil-works/pi-coding-agent` `0.85.1`
+- `@agegr/pi-web` `0.12.0`
+- `@earendil-works/pi-coding-agent` `1.1.0` (the exact version pi-web depends on)
 
 Build and verify on each native architecture:
 
 ```bash
 docker build \
   --platform linux/arm64 \
-  --tag agent-runtime:phase7-toolchain \
+  --tag agent-runtime:phase18-pi1.1 \
   runtime
-runtime/scripts/verify-image.sh agent-runtime:phase7-toolchain arm64
+runtime/scripts/verify-image.sh agent-runtime:phase18-pi1.1 arm64
 ```
 
 Use `linux/amd64` and `amd64` respectively on an AMD64 host. The verification
@@ -81,15 +81,21 @@ native results and the exact acceptance boundary.
 
 ## Persistence and upgrade boundary
 
-The Worker still starts Workspaces as UID/GID 1000 by default, binds only
-`/workspace` and `/agent/pi`, and publishes pi-web only to an ephemeral host
-loopback port. `PI_CODING_AGENT_DIR=/agent/pi` keeps Pi credentials and sessions
-in the persistent Pi mount. `PI_WEB_DEFAULT_CWD=/workspace` retains the pinned,
-version-checked pi-web patch and existing legacy-container compatibility.
+The Worker starts Workspaces as UID/GID 1000 by default with a read-only root,
+binds only the managed `/workspace`, `/home/agent`, `/tmp` and `/agent/pi`
+directories, and publishes pi-web only to an ephemeral host loopback port.
+`PI_CODING_AGENT_DIR=/agent/pi` keeps Pi credentials, sessions, MCP settings and
+project-trust decisions in the persistent Pi mount.
 
-The Phase 7 image name is `agent-runtime:phase7-toolchain` and its runtime
-version is `phase-7`. Existing Workspace metadata remains pinned to the image
-name with which it was created; changing a Worker's configured image does not
-silently rebuild, migrate, or delete an existing Phase 3 Runtime. Recreate a
-Workspace only through the existing explicit destructive delete flow when the
-new toolchain is required.
+The current image is `agent-runtime:phase18-pi1.1` (runtime version `phase-18`,
+pi-web 0.12.0, Pi 1.1.0). `patches/pi-web-0.12.0.mjs` makes the default-cwd
+route honor `PI_WEB_DEFAULT_CWD=/workspace` and lets pi-web rotate its
+preview-mode secrets in tmpfs; `pi-web-launch` (the image command) seeds that
+file on every start. Never rebuild an existing tag: every content change gets a
+new tag and runtime version.
+
+Workers offer several images at once (`RUNTIME_IMAGES`, pinned by digest), and a
+stopped Workspace can be moved to another offered image and back without losing
+data. See `docs/lifecycle-runbook.md`. The previous image
+(`agent-runtime:phase7-toolchain`, pi-web 0.9.0 / Pi 0.85.1) can be rebuilt from
+tag `v1.0.0-alpha.5`.
