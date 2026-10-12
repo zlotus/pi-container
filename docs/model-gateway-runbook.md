@@ -4,7 +4,8 @@ Phase 16（`specs.md` 第 64 节 Phase 16）的运维说明：平台通过 LiteL
 Workspace 签发可吊销的虚拟 key，按平台用户计量与限额。Workspace 不能直接访问网关：Pi 只连接本机 Worker 的
 模型中继，中继按 TCP 连接识别 Workspace 并注入虚拟 key，虚拟 key 不进入容器。
 
-当前目录只包含 DeepSeek；Xiaomi MiMo 的接入放到 Phase 18（Pi / pi-web 升级后再验证，见 `specs.md` 16.15）。
+当前目录包含 DeepSeek（`deepseek-v4-flash`、`deepseek-v4-pro`）与 Xiaomi MiMo（`mimo-v2.6-flash`、`mimo-v2.6-pro`，
+Phase 18，`specs.md` 18.7）。MiMo v2.5 已于 2026-10-21 下线，不再接入。
 
 ## 1. 组成
 
@@ -69,6 +70,18 @@ WORKER_MODEL_RELAY_PORT=3101                         # 不能与 WORKER_GATEWAY_
    Admin 面板中“网关中缺少”应为空。
 4. 验证：`tools/dev/model-gateway-spike.py <env>`（真实上游，网关层面）与
    `pnpm --filter @agent-runtime/worker exec tsx ../../tools/dev/model-relay-smoke.ts <env>`（真实 Pi 经中继）。
+5. 新旧 Runtime 镜像共用一个目录：`TEST_DOCKER_RUNTIME=1 pnpm --filter @agent-runtime/worker exec vitest run
+   src/model-relay/catalog.docker.test.ts` 在本机已有的每个 Runtime 镜像中加载目录，任一 Pi 版本拒绝即不得上线。
+   只在全部在用 Pi 版本都认识的 `compat` 字段中取值（例如 `supportsStrictMode` 只有 Pi 1.x 认识）。
+
+**单价来源**：DeepSeek 沿用 LiteLLM 价目表；MiMo 取小米开放平台“按量计费”页的海外美元价
+（https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go，2026-10-12 核对：flash 输入 $0.14、输出 $0.28、缓存命中 $0.0028；
+pro 输入 $0.435、输出 $0.87、缓存命中 $0.0036，均为每百万 token）。服务商调价时更新 `config.yaml` 的 `model_info`
+与目录的 `cost`，并重启网关。
+
+**MiMo 要点**：只接受 `reasoning_effort` 为 low/medium/high，目录把 `minimal`、`xhigh`、`max` 设为 `null`；compat 与
+Pi 内置的 MiMo 定义一致（`thinkingFormat: "deepseek"`、`requiresReasoningContentOnAssistantMessages: true`），其余由 Pi
+按通用 OpenAI 兼容规则推断——Pi 对 MiMo 没有按域名的特殊处理，所以经中继与直连得到相同的请求形态。
 
 ## 4. 凭据生命周期
 

@@ -6,9 +6,10 @@
 # Every model uses the generic `litellm_proxy/` route: it forwards the OpenAI-compatible request
 # unchanged, which Pi's DeepSeek thinking format needs (`thinking`, `reasoning_effort`, tools and
 # replayed `reasoning_content`). The provider-specific routes rewrite it: `deepseek/` drops
-# `reasoning_effort`, `openai/` rejects `thinking` (Phase 16.15). Xiaomi MiMo is deferred to
-# Phase 18 (verified notes in specs.md Phase 16.15).
-# This route has no built-in prices, so `model_info` carries them (USD per token).
+# `reasoning_effort`, `openai/` rejects `thinking` (Phase 16.15). Xiaomi MiMo uses the same
+# route (specs.md Phase 16.17, 18.7); v2.5 is retired upstream on 2026-10-21.
+# This route has no built-in prices, so `model_info` carries them (USD per token). MiMo prices
+# are Xiaomi's published overseas (USD) pay-as-you-go prices, checked 2026-10-12.
 model_list:
   - model_name: deepseek-v4-flash
     litellm_params:
@@ -28,6 +29,24 @@ model_list:
       input_cost_per_token: 1.32e-06
       output_cost_per_token: 3.96e-06
       cache_read_input_token_cost: 4.4e-08
+  - model_name: mimo-v2.6-flash
+    litellm_params:
+      model: litellm_proxy/mimo-v2.6-flash
+      api_base: https://api.xiaomimimo.com/v1
+      api_key: os.environ/XIAOMI_API_KEY
+    model_info:
+      input_cost_per_token: 1.4e-07
+      output_cost_per_token: 2.8e-07
+      cache_read_input_token_cost: 2.8e-09
+  - model_name: mimo-v2.6-pro
+    litellm_params:
+      model: litellm_proxy/mimo-v2.6-pro
+      api_base: https://api.xiaomimimo.com/v1
+      api_key: os.environ/XIAOMI_API_KEY
+    model_info:
+      input_cost_per_token: 4.35e-07
+      output_cost_per_token: 8.7e-07
+      cache_read_input_token_cost: 3.6e-09
 
 litellm_settings:
   # Never rewrite or drop request parameters silently.
