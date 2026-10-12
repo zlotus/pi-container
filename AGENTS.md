@@ -23,7 +23,7 @@
 > 不是给大模型挂几个工具，而是给智能体提供一台隔离的计算机。
 
 当前状态：v0.x（Phase 0–12 与 v0.13 Portal 调整）已实现并验收，tag `v0.13.0`；v1.0 的 Phase 13 已验收，
-tag `v1.0.0-alpha.1`；Phase 14 已验收，tag `v1.0.0-alpha.2`；Phase 15 已验收，tag `v1.0.0-alpha.3`；Phase 16 已验收，tag `v1.0.0-alpha.4`。现在进入 v1.0 产品化，
+tag `v1.0.0-alpha.1`；Phase 14 已验收，tag `v1.0.0-alpha.2`；Phase 15 已验收，tag `v1.0.0-alpha.3`；Phase 16 已验收，tag `v1.0.0-alpha.4`；Phase 17 已验收，tag `v1.0.0-alpha.5`。现在进入 v1.0 产品化，
 按 Phase 13–19 逐个开发、逐个验收，目标是可交给企业内部团队长期使用。范围与顺序见
 `docs/v1-roadmap.md`，各 Phase 详细规范见 `specs.md` 第 64 节。
 

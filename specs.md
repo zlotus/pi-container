@@ -4916,7 +4916,7 @@ key 只写入负责人本机的 `0600` 文件，不进入仓库、对话或日�
 
 ## Phase 17：可观测性
 
-状态：**实现完成，待负责人人工验收**（2026-10-10），分支 `phase-17-observability`；运维见 `docs/observability-runbook.md`。17.13 的 Q1–Q12 负责人于 2026-10-10 确认全部按建议执行；实现中的调整见 17.14。方向见
+状态：**已验收（2026-10-12）**，经 PR #5 合入 master，tag `v1.0.0-alpha.5`；运维见 `docs/observability-runbook.md`。17.13 的 Q1–Q12 负责人于 2026-10-10 确认全部按建议执行；实现中的调整见 17.14。方向见
 `docs/v1-roadmap.md` Phase 17（G4）。
 
 目标：运维人员能从一处看到平台是否健康——Worker 是否在线、出口与配额是否生效、Workspace 状态分布、Gateway
@@ -5349,7 +5349,7 @@ Audit：不新增事件（指标与用量是观测数据，不是安全事件）
 2. 实际用量：在 Workspace Terminal 中运行 `yes > /dev/null & yes > /dev/null &`，30 秒内 Portal 卡片显示约 2 / 2 核，与宿主机
    `docker stats --no-stream` 的 CPU%/100 相差 < 10%；`python3 -c "b=bytearray(1<<30); input()"` 后内存与 `docker stats` 相差
    < 5%；停止进程后回落。Admin Workers 显示主机 CPU/内存与 Workspace 合计。
-3. OOM：在 Workspace 中分配超过 4 GiB 内存，进程被终止；Portal 显示 OOM 提示；`AgentRuntimeWorkspaceOOMKilled` 触发。
+3. OOM：在 Workspace 中写入超过“内存 + swap”总上限（默认 `MemorySwap` = 8 GiB）的内存，例如 `python3 -c "b=b'x'*(9*1024**3)"`，进程被终止；Portal 显示 OOM 提示；`AgentRuntimeWorkspaceOOMKilled` 触发。只超过 4 GiB 内存上限时多出的部分会进入 swap，不会 OOM（验收中发现，2026-10-12）。
 4. **Worker 离线**：停止 worker-c（或本机 Worker）进程；约 1.5 分钟内 Prometheus Alerts 中 `AgentRuntimeWorkerOffline`
    为 firing（35 s 离线判定 + 1m `for`），Grafana 总览显示该 Worker 离线；恢复后告警解除。
 5. **磁盘接近上限**：把某 Workspace 上限调到 2 GiB，`fallocate -l 1900M /workspace/fill`；约 6 分钟内（60 s 采样 + 5m `for`）

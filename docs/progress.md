@@ -17,7 +17,7 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
 
 ## Current Baseline
 
-- Phase 17（实现完成，待人工验收；分支 `phase-17-observability`）：可观测性。Control Plane 在独立端口以 Bearer token
+- Phase 17（已验收，`v1.0.0-alpha.5`，2026-10-12 负责人人工验收通过）：可观测性。Control Plane 在独立端口以 Bearer token
   暴露 Prometheus 指标（不在 Portal API 与 Workspace Gateway 上，配置不完整即拒绝启动，禁止通配地址）：scrape 时一次
   只读数据库快照得到 Worker/Workspace/凭据/锁定状态，进程内埋点覆盖 Portal API、Workspace Gateway（来源、状态类、首包
   时间、WebSocket）、Worker 命令（结果、超时、耗时）、认证与限速、模型网关管理调用与后台任务。Worker 不开放端口，每次

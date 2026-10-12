@@ -182,7 +182,7 @@ admin 可在 Admin Workspaces 调整上限（即时生效）。
 
 ### AgentRuntimeWorkspaceOOMKilled
 
-最近 15 分钟容器内有进程因内存超限被终止。Portal 卡片会提示用户。若频繁出现，考虑调整 `WORKSPACE_MEMORY_BYTES`。
+最近 15 分钟容器内有进程因内存超限被终止。超过内存上限的部分先进入 swap（Workspace 的 `MemorySwap` 默认为内存上限的 2 倍，即 8 GiB），总量超过它才会 OOM；在此之前内存会停在上限并触发 `AgentRuntimeWorkspaceMemoryNearLimit`。Portal 卡片会提示用户。若频繁出现，考虑调整 `WORKSPACE_MEMORY_BYTES`。
 
 ### AgentRuntimeWorkspacesInError
 
