@@ -1,6 +1,7 @@
 import type { ControlToWorkerMessage } from "@agent-runtime/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { PlatformMetrics } from "./metrics/platform-metrics.js";
 import { WorkerChannel } from "./worker-channel.js";
 import type { WorkerChannelError } from "./worker-channel.js";
 
@@ -33,7 +34,7 @@ class FakeSocket {
 
 function inspectCommand(): ControlToWorkerMessage {
   return {
-    version: 4,
+    version: 5,
     type: "workspace.inspect",
     requestId: REQUEST_ID,
     payload: { workspaceId: WORKSPACE_ID },
@@ -51,7 +52,7 @@ describe("worker command correlation", () => {
     channel.register("worker-01", socket);
     const result = channel.dispatch("worker-01", inspectCommand());
     const response = {
-      version: 4 as const,
+      version: 5 as const,
       type: "response.ok" as const,
       requestId: REQUEST_ID,
       payload: {
@@ -88,7 +89,7 @@ describe("worker command correlation", () => {
     channel.register("worker-01", socket);
     const result = channel.dispatch("worker-01", inspectCommand());
     const response = {
-      version: 4 as const,
+      version: 5 as const,
       type: "response.ok" as const,
       requestId: REQUEST_ID,
       payload: {
@@ -110,7 +111,7 @@ describe("worker command correlation", () => {
 
     expect(
       channel.acceptResponse("worker-01", {
-        version: 4,
+        version: 5,
         type: "response.ok",
         requestId: REQUEST_ID,
         payload: {
@@ -142,5 +143,81 @@ describe("worker command correlation", () => {
     });
     channel.unregister("worker-01", socket);
     await firstRejection;
+  });
+});
+
+describe("worker command metrics (Phase 17.4)", () => {
+  function command(requestId: string): ControlToWorkerMessage {
+    return { ...inspectCommand(), requestId };
+  }
+
+  async function count(metrics: PlatformMetrics, series: string): Promise<number> {
+    const line = (await metrics.registry.metrics())
+      .split("\n")
+      .find((candidate) => candidate.startsWith(`${series} `));
+    return line === undefined ? 0 : Number(line.slice(series.length + 1));
+  }
+
+  it("counts every command outcome, including timeouts", async () => {
+    vi.useFakeTimers();
+    const metrics = new PlatformMetrics();
+    const channel = new WorkerChannel(1_000, metrics);
+    const socket = new FakeSocket();
+
+    await expect(channel.dispatch("worker-01", command(crypto.randomUUID()))).rejects.toMatchObject({
+      code: "WORKER_NOT_CONNECTED",
+    });
+    channel.register("worker-01", socket);
+
+    const okId = crypto.randomUUID();
+    const ok = channel.dispatch("worker-01", command(okId));
+    channel.acceptResponse("worker-01", {
+      version: 5,
+      type: "response.ok",
+      requestId: okId,
+      payload: { requestType: "workspace.inspect", workspace: WORKSPACE_OBSERVATION },
+    });
+    await ok;
+
+    const errorId = crypto.randomUUID();
+    const failed = channel.dispatch("worker-01", command(errorId));
+    channel.acceptResponse("worker-01", {
+      version: 5,
+      type: "response.error",
+      requestId: errorId,
+      payload: { requestType: "workspace.inspect", code: "EGRESS_UNENFORCED", message: "x", retryable: false },
+    });
+    await failed;
+
+    const mismatchId = crypto.randomUUID();
+    const mismatched = channel.dispatch("worker-01", command(mismatchId));
+    channel.acceptResponse("worker-01", {
+      version: 5,
+      type: "response.ok",
+      requestId: mismatchId,
+      payload: { requestType: "workspace.start", workspace: WORKSPACE_OBSERVATION },
+    });
+    await expect(mismatched).rejects.toMatchObject({ code: "WORKER_RESPONSE_MISMATCH" });
+
+    const timedOut = channel.dispatch("worker-01", command(crypto.randomUUID()));
+    const timeoutAssertion = expect(timedOut).rejects.toMatchObject({ code: "WORKER_COMMAND_TIMEOUT" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await timeoutAssertion;
+
+    const closed = channel.dispatch("worker-01", command(crypto.randomUUID()));
+    channel.unregister("worker-01", socket);
+    await expect(closed).rejects.toMatchObject({ code: "WORKER_CONNECTION_CLOSED" });
+
+    const series = (result: string) =>
+      `agent_runtime_worker_commands_total{command="workspace.inspect",result="${result}"}`;
+    for (const result of ["ok", "error", "timeout", "not_connected", "connection_closed", "mismatch"]) {
+      expect(await count(metrics, series(result)), result).toBe(1);
+    }
+    expect(
+      await count(metrics, 'agent_runtime_worker_command_errors_total{command="workspace.inspect",code="EGRESS_UNENFORCED"}'),
+    ).toBe(1);
+    expect(
+      await count(metrics, 'agent_runtime_worker_command_duration_seconds_bucket{le="15",command="workspace.inspect"}'),
+    ).toBe(6);
   });
 });

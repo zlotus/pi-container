@@ -28,6 +28,7 @@ export function registerLocalAuthRoutes(app: FastifyInstance, context: RouteCont
     clientAddress,
     sendRateLimited,
     sendThrottleUnavailable,
+    recordThrottleHits,
     validateOrigin,
     authenticate,
     validateCsrf,
@@ -46,8 +47,8 @@ export function registerLocalAuthRoutes(app: FastifyInstance, context: RouteCont
           guard.addressKeys(address),
           now(),
         );
-        if (lockedUntil !== null) return sendRateLimited(reply, lockedUntil);
-        await dependencies.store.recordAuthThrottleHits({
+        if (lockedUntil !== null) return sendRateLimited(reply, lockedUntil, "local_login", "LOCAL");
+        await recordThrottleHits({
           hits: [guard.addressFailureHit(address)],
           now: now(),
           audit: authenticationAudit(request, "LOCAL", "local"),
@@ -76,7 +77,7 @@ export function registerLocalAuthRoutes(app: FastifyInstance, context: RouteCont
         now(),
       );
       // Locked attempts are answered before any password work and are not counted.
-      if (lockedUntil !== null) return sendRateLimited(reply, lockedUntil);
+      if (lockedUntil !== null) return sendRateLimited(reply, lockedUntil, "local_login", "LOCAL");
     } catch (error) {
       request.log.error({ err: error }, "login throttle unavailable");
       return sendThrottleUnavailable(reply);
@@ -88,7 +89,7 @@ export function registerLocalAuthRoutes(app: FastifyInstance, context: RouteCont
     );
     if (user === null || !passwordMatches || user.status !== "active") {
       try {
-        await dependencies.store.recordAuthThrottleHits({
+        await recordThrottleHits({
           hits: guard.localLoginFailureHits(account, address, user?.id ?? null),
           now: now(),
           audit: authenticationAudit(request, "LOCAL", "local"),
@@ -129,6 +130,7 @@ export function registerLocalAuthRoutes(app: FastifyInstance, context: RouteCont
         .send(errorBody("INVALID_CREDENTIALS", "Invalid login or password"));
     }
 
+    context.metrics.recordLogin("local", "success");
     // Only this account+address counter is forgiven; the address and account counters
     // keep running so one legitimate login cannot reset an ongoing attack.
     await dependencies.store.clearAuthThrottle([

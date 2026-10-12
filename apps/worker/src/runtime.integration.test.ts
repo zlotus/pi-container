@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
@@ -20,6 +20,8 @@ import { currentArchitecture } from "./daemon.js";
 import { buildWorkerGateway } from "./gateway.js";
 import { workspaceBridgeName } from "./egress/ruleset.js";
 import { DockerWorkspaceRuntime, type EgressGate, type StorageGate } from "./runtime.js";
+import { OomEventCounter } from "./usage/oom.js";
+import { WorkspaceUsageSampler } from "./usage/sampler.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -72,6 +74,7 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
   const isolationWorkspaceIds = [randomUUID(), randomUUID()] as const;
   const limitsWorkspaceId = randomUUID();
   const preQuotaWorkspaceId = randomUUID();
+  const usageWorkspaceId = randomUUID();
   const containerName = `agent-runtime-${workspaceId}`;
   const networkName = containerName;
   const fallbackContainerName = `pi-web-default-cwd-fallback-${randomUUID()}`;
@@ -168,6 +171,7 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
         ...isolationWorkspaceIds,
         limitsWorkspaceId,
         preQuotaWorkspaceId,
+        usageWorkspaceId,
       ]) {
         try {
           await runtime.delete(cleanupWorkspaceId);
@@ -184,6 +188,7 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
       ...isolationWorkspaceIds,
       limitsWorkspaceId,
       preQuotaWorkspaceId,
+      usageWorkspaceId,
     ]) {
       const cleanupName = `agent-runtime-${cleanupWorkspaceId}`;
       try {
@@ -489,6 +494,58 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
     await runtime.start(limitsWorkspaceId);
     expect(await run("test ! -e /tmp/left-over")).toBe(0);
     await runtime.stop(limitsWorkspaceId);
+  }, 180_000);
+
+  it("samples real container usage like docker stats and counts OOM events (Phase 17.5)", async () => {
+    await runtime.ensure(usageWorkspaceId, runtimeImage, resources, STORAGE);
+    await runtime.start(usageWorkspaceId);
+    const name = `agent-runtime-${usageWorkspaceId}`;
+    const container = docker.getContainer(name);
+    const oom = new OomEventCounter({ source: runtime, log: { warn: () => undefined, debug: () => undefined } });
+    oom.start();
+    const sampler = new WorkspaceUsageSampler({ source: runtime, oom, cpuLimitCores: resources.cpuCount });
+    const detached = async (script: string) => {
+      const execution = await container.exec({ Cmd: ["sh", "-c", script] });
+      await execution.start({ Detach: true });
+    };
+    try {
+      // Two busy loops against a 1-core limit: about one core in use.
+      await detached("yes > /dev/null & yes > /dev/null & sleep 40; kill %1 %2");
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      await sampler.sample();
+      await new Promise((resolve) => setTimeout(resolve, 6_000));
+      const [busy] = (await sampler.sample()).filter((sample) => sample.workspaceId === usageWorkspaceId);
+      expect(busy?.cpuCores).toBeGreaterThan(0.8);
+      expect(busy?.cpuCores).toBeLessThan(1.1);
+      expect(busy?.cpuLimitCores).toBe(1);
+      expect(busy?.pidsLimit).toBe(resources.pidsLimit);
+
+      // 300 MiB held in memory: the same figure `docker stats` prints.
+      // Filled, not zero pages: zero-filled allocations may stay unbacked on some kernels.
+      await detached(`python3 -c "import time; b = b'x' * (300 * 1024 * 1024); time.sleep(60)"`);
+      await new Promise((resolve) => setTimeout(resolve, 4_000));
+      const [sample] = (await sampler.sample()).filter((entry) => entry.workspaceId === usageWorkspaceId);
+      const cli = JSON.parse(
+        execFileSync("docker", ["stats", "--no-stream", "--format", "{{json .}}", name], { encoding: "utf8" }),
+      ) as { MemUsage: string };
+      const [used] = cli.MemUsage.split(" / ");
+      const cliBytes = Number.parseFloat(used ?? "0") * (used?.endsWith("GiB") ? 1024 ** 3 : 1024 ** 2);
+      expect(sample?.memoryBytes).toBeGreaterThan(300 * 1024 ** 2);
+      expect(Math.abs((sample?.memoryBytes ?? 0) - cliBytes)).toBeLessThan(Math.max(20 * 1024 ** 2, cliBytes * 0.05));
+      expect(sample?.memoryLimitBytes).toBe(resources.memoryBytes);
+
+      // Beyond the 1 GiB limit: the kernel kills the process and Docker reports an OOM event.
+      // The allocation above is released first so the new one is the only large process.
+      await execExitCode(container, ["sh", "-c", "pkill -f 'time.sleep\\(60\\)' || true"]);
+      // 3 GiB of written memory exceeds the 1 GiB limit plus its swap allowance.
+      expect(await execExitCode(container, ["python3", "-c", "b = b'x' * (3 * 1024 ** 3)"])).not.toBe(0);
+      await expect.poll(() => oom.count(usageWorkspaceId), { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+      const [afterOom] = (await sampler.sample()).filter((entry) => entry.workspaceId === usageWorkspaceId);
+      expect(afterOom?.oomKills).toBeGreaterThanOrEqual(1);
+    } finally {
+      oom.stop();
+      await runtime.stop(usageWorkspaceId);
+    }
   }, 180_000);
 
   it("never starts a pre-Phase-15 container, but stops and deletes it", async () => {

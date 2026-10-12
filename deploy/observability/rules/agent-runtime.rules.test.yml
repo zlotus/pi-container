@@ -1,0 +1,372 @@
+# promtool test rules agent-runtime.rules.test.yml (specs.md Phase 17.9, 17.11)
+rule_files:
+  - agent-runtime.rules.yml
+
+evaluation_interval: 30s
+
+tests:
+  # Control Plane scrape and collector health.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="agent-runtime-control-plane"}'
+        values: "1 0x6 1x4"
+      - series: 'agent_runtime_collector_up{collector="database"}'
+        values: "1 0x12"
+    alert_rule_test:
+      - eval_time: 90s
+        alertname: AgentRuntimeControlPlaneDown
+        exp_alerts: []
+      - eval_time: 150s
+        alertname: AgentRuntimeControlPlaneDown
+        exp_alerts:
+          - exp_labels: { severity: critical, job: agent-runtime-control-plane }
+            exp_annotations:
+              summary: "Control Plane 指标无法抓取"
+              description: "Prometheus 连续 2 分钟无法抓取 Control Plane 指标：进程停止、指标端口未监听或 token 不一致。"
+              runbook: "docs/observability-runbook.md#agentruntimecontrolplanedown"
+      - eval_time: 300s
+        alertname: AgentRuntimeControlPlaneDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: AgentRuntimeMetricsCollectorFailing
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: AgentRuntimeMetricsCollectorFailing
+        exp_alerts:
+          - exp_labels: { severity: warning, collector: database }
+            exp_annotations:
+              summary: "指标采集无法读取数据库"
+              description: "Control Plane 的 scrape 时数据库快照连续 5 分钟失败，平台状态类指标缺失。"
+              runbook: "docs/observability-runbook.md#agentruntimemetricscollectorfailing"
+
+  # Worker offline: only enabled Workers that have ever sent a heartbeat.
+  - interval: 30s
+    input_series:
+      - series: 'agent_runtime_worker_up{worker_id="worker-a"}'
+        values: "1 1 0x4 1x4"
+      - series: 'agent_runtime_worker_enabled{worker_id="worker-a"}'
+        values: "1x10"
+      - series: 'agent_runtime_worker_last_heartbeat_timestamp_seconds{worker_id="worker-a"}'
+        values: "1000x10"
+      # Revoked: never alerts.
+      - series: 'agent_runtime_worker_up{worker_id="worker-revoked"}'
+        values: "0x10"
+      - series: 'agent_runtime_worker_enabled{worker_id="worker-revoked"}'
+        values: "0x10"
+      - series: 'agent_runtime_worker_last_heartbeat_timestamp_seconds{worker_id="worker-revoked"}'
+        values: "1000x10"
+      # Provisioned but never connected: no heartbeat series, never alerts.
+      - series: 'agent_runtime_worker_up{worker_id="worker-new"}'
+        values: "0x10"
+      - series: 'agent_runtime_worker_enabled{worker_id="worker-new"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 90s
+        alertname: AgentRuntimeWorkerOffline
+        exp_alerts: []
+      - eval_time: 150s
+        alertname: AgentRuntimeWorkerOffline
+        exp_alerts:
+          - exp_labels: { severity: critical, worker_id: worker-a }
+            exp_annotations:
+              summary: "Worker worker-a 离线"
+              description: "已启用的 Worker worker-a 超过离线判定时间没有心跳；其 Workspace 处于 WORKER_OFFLINE。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkeroffline"
+      - eval_time: 270s
+        alertname: AgentRuntimeWorkerOffline
+        exp_alerts: []
+
+  # Egress, storage and model relay on online Workers only.
+  - interval: 30s
+    input_series:
+      - series: 'agent_runtime_worker_up{worker_id="worker-a"}'
+        values: "1x12"
+      - series: 'agent_runtime_worker_up{worker_id="worker-b"}'
+        values: "0x12"
+      - series: 'agent_runtime_worker_egress_enforced{worker_id="worker-a"}'
+        values: "0x12"
+      - series: 'agent_runtime_worker_egress_enforced{worker_id="worker-b"}'
+        values: "0x12"
+      - series: 'agent_runtime_worker_storage_enforced{worker_id="worker-a"}'
+        values: "1 0x11"
+      - series: 'agent_runtime_worker_model_relay_listening{worker_id="worker-a"}'
+        values: "0x12"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: AgentRuntimeWorkerEgressUnenforced
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: AgentRuntimeWorkerEgressUnenforced
+        exp_alerts:
+          - exp_labels: { severity: critical, worker_id: worker-a }
+            exp_annotations:
+              summary: "Worker worker-a 出口规则未生效"
+              description: "在线 Worker 无法确认出口规则；它不会启动 Workspace，并已停止运行中的 Workspace（fail-closed）。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkeregressunenforced"
+      - eval_time: 3m
+        alertname: AgentRuntimeWorkerStorageUnenforced
+        exp_alerts:
+          - exp_labels: { severity: critical, worker_id: worker-a }
+            exp_annotations:
+              summary: "Worker worker-a 磁盘配额未生效"
+              description: "在线 Worker 无法确认 XFS project quota；它不会启动 Workspace（fail-closed）。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkerstorageunenforced"
+      - eval_time: 4m
+        alertname: AgentRuntimeWorkerModelRelayDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: AgentRuntimeWorkerModelRelayDown
+        exp_alerts:
+          - exp_labels: { severity: warning, worker_id: worker-a }
+            exp_annotations:
+              summary: "Worker worker-a 模型中继未监听"
+              description: "配置了模型网关的 Worker 中继没有监听，该 Worker 上的 Workspace 无法使用平台模型。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkermodelrelaydown"
+
+  # Worker data filesystem: warning below 10 %, critical below 5 %.
+  - interval: 1m
+    input_series:
+      - series: 'agent_runtime_worker_filesystem_bytes{worker_id="worker-a",kind="total"}'
+        values: "1000x20"
+      - series: 'agent_runtime_worker_filesystem_bytes{worker_id="worker-a",kind="free"}'
+        values: "80x20"
+      - series: 'agent_runtime_worker_filesystem_bytes{worker_id="worker-b",kind="total"}'
+        values: "1000x20"
+      - series: 'agent_runtime_worker_filesystem_bytes{worker_id="worker-b",kind="free"}'
+        values: "40x20"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AgentRuntimeWorkerFilesystemLow
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: AgentRuntimeWorkerFilesystemLow
+        exp_alerts:
+          - exp_labels: { severity: warning, worker_id: worker-a }
+            exp_annotations:
+              summary: "Worker worker-a 数据盘剩余不足 10%"
+              description: "WORKER_MANAGED_ROOT 文件系统剩余 8%；Workspace 上限之和可以超过容量。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkerfilesystemlow"
+          - exp_labels: { severity: warning, worker_id: worker-b }
+            exp_annotations:
+              summary: "Worker worker-b 数据盘剩余不足 10%"
+              description: "WORKER_MANAGED_ROOT 文件系统剩余 4%；Workspace 上限之和可以超过容量。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkerfilesystemlow"
+      - eval_time: 5m
+        alertname: AgentRuntimeWorkerFilesystemCritical
+        exp_alerts:
+          - exp_labels: { severity: critical, worker_id: worker-b }
+            exp_annotations:
+              summary: "Worker worker-b 数据盘剩余不足 5%"
+              description: "WORKER_MANAGED_ROOT 文件系统剩余 4%，即将写满。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkerfilesystemlow"
+
+  # Workspace disk near its limit (data and Pi state); 89 % does not fire.
+  - interval: 1m
+    input_series:
+      - series: 'agent_runtime_workspace_disk_used_bytes{workspace_id="ws-full",worker_id="worker-a",project="data"}'
+        values: "50 91x10 50x3"
+      - series: 'agent_runtime_workspace_disk_limit_bytes{workspace_id="ws-full",worker_id="worker-a",project="data"}'
+        values: "100x14"
+      - series: 'agent_runtime_workspace_disk_used_bytes{workspace_id="ws-ok",worker_id="worker-a",project="data"}'
+        values: "89x14"
+      - series: 'agent_runtime_workspace_disk_limit_bytes{workspace_id="ws-ok",worker_id="worker-a",project="data"}'
+        values: "100x14"
+      - series: 'agent_runtime_workspace_disk_used_bytes{workspace_id="ws-full",worker_id="worker-a",project="pi"}'
+        values: "95x14"
+      - series: 'agent_runtime_workspace_disk_limit_bytes{workspace_id="ws-full",worker_id="worker-a",project="pi"}'
+        values: "100x14"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AgentRuntimeWorkspaceDiskNearLimit
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: AgentRuntimeWorkspaceDiskNearLimit
+        exp_alerts:
+          - exp_labels: { severity: warning, workspace_id: ws-full, worker_id: worker-a, project: data }
+            exp_annotations:
+              summary: "Workspace ws-full 磁盘超过上限的 90%"
+              description: "数据（/workspace、/home/agent、/tmp）已用 91%；写满后写入会失败。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkspacedisknearlimit"
+      - eval_time: 13m
+        alertname: AgentRuntimeWorkspaceDiskNearLimit
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: AgentRuntimeWorkspacePiStateNearLimit
+        exp_alerts:
+          - exp_labels: { severity: warning, workspace_id: ws-full, worker_id: worker-a, project: pi }
+            exp_annotations:
+              summary: "Workspace ws-full 的 Pi 状态超过上限的 90%"
+              description: "/agent/pi 已用 95%；写满后 Pi Session 无法继续保存。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkspacedisknearlimit"
+
+  # Workspace memory near its limit and OOM kills.
+  - interval: 1m
+    input_series:
+      - series: 'agent_runtime_workspace_memory_bytes{workspace_id="ws-a",worker_id="worker-a"}'
+        values: "95x20"
+      - series: 'agent_runtime_workspace_memory_limit_bytes{workspace_id="ws-a",worker_id="worker-a"}'
+        values: "100x20"
+      - series: 'agent_runtime_workspace_oom_kills_total{workspace_id="ws-a",worker_id="worker-a"}'
+        values: "0 0 1 1x20"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: AgentRuntimeWorkspaceMemoryNearLimit
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AgentRuntimeWorkspaceMemoryNearLimit
+        exp_alerts:
+          - exp_labels: { severity: warning, workspace_id: ws-a, worker_id: worker-a }
+            exp_annotations:
+              summary: "Workspace ws-a 内存超过上限的 90%"
+              description: "持续 15 分钟使用 95% 的内存上限，进程可能被 OOM 终止。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkspacememorynearlimit"
+      - eval_time: 1m
+        alertname: AgentRuntimeWorkspaceOOMKilled
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: AgentRuntimeWorkspaceOOMKilled
+        exp_alerts:
+          - exp_labels: { severity: warning, workspace_id: ws-a, worker_id: worker-a }
+            exp_annotations:
+              summary: "Workspace ws-a 发生 OOM"
+              description: "最近 15 分钟容器内有进程因内存超限被终止。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkspaceoomkilled"
+      - eval_time: 20m
+        alertname: AgentRuntimeWorkspaceOOMKilled
+        exp_alerts: []
+
+  # Workspace state distribution.
+  - interval: 1m
+    input_series:
+      - series: 'agent_runtime_workspaces{state="ERROR",worker_id="worker-a"}'
+        values: "1x20"
+      - series: 'agent_runtime_workspaces{state="STARTING",worker_id="worker-a"}'
+        values: "1x20"
+      - series: 'agent_runtime_workspaces{state="RUNNING",worker_id="worker-a"}'
+        values: "3x20"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: AgentRuntimeWorkspacesInError
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AgentRuntimeWorkspacesInError
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "1 个 Workspace 处于 ERROR"
+              description: "有 Workspace 持续 15 分钟处于 ERROR，需要用户重新启动或管理员排查。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkspacesinerror"
+      - eval_time: 15m
+        alertname: AgentRuntimeWorkspacesStuckTransitional
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Workspace 长时间处于过渡状态"
+              description: "持续 15 分钟有 Workspace 处于 SCHEDULING/STARTING/STOPPING/DELETING。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkspacesstucktransitional"
+
+  # Gateway platform 5xx ratio, only with enough traffic.
+  - interval: 1m
+    input_series:
+      - series: 'agent_runtime_gateway_http_requests_total{source="upstream",status_class="2xx"}'
+        values: "0+10x40"
+      # Healthy for 10 minutes, then 2 platform 5xx of 13 requests per minute.
+      - series: 'agent_runtime_gateway_http_requests_total{source="platform",status_class="5xx"}'
+        values: "0x10 0+2x30"
+      - series: 'agent_runtime_gateway_http_requests_total{source="upstream",status_class="5xx"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AgentRuntimeGatewayErrorRate
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: AgentRuntimeGatewayErrorRate
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Workspace Gateway 平台侧 5xx 超过 5%"
+              description: "Gateway 自身返回的 5xx（Worker 不可达等）占比 15.38%。"
+              runbook: "docs/observability-runbook.md#agentruntimegatewayerrorrate"
+
+  - interval: 1m
+    input_series:
+      # 1 platform 5xx per minute but far below 20 requests per 10 minutes: no alert.
+      - series: 'agent_runtime_gateway_http_requests_total{source="platform",status_class="5xx"}'
+        values: "0+1x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: AgentRuntimeGatewayErrorRate
+        exp_alerts: []
+
+  # Worker command timeouts and login lockout surge.
+  - interval: 1m
+    input_series:
+      - series: 'agent_runtime_worker_commands_total{command="workspace.start",result="timeout"}'
+        values: "0 0 1 1x20"
+      - series: 'agent_runtime_worker_commands_total{command="workspace.start",result="ok"}'
+        values: "0+5x22"
+      - series: 'agent_runtime_auth_lockouts_total{scope="login_ip"}'
+        values: "0 0+3x10"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: AgentRuntimeWorkerCommandTimeouts
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: AgentRuntimeWorkerCommandTimeouts
+        exp_alerts:
+          - exp_labels: { severity: warning, command: workspace.start, result: timeout }
+            exp_annotations:
+              summary: "Worker 命令超时（workspace.start）"
+              description: "最近 10 分钟有 Worker 命令超时未响应。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkercommandtimeouts"
+      - eval_time: 15m
+        alertname: AgentRuntimeWorkerCommandTimeouts
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: AgentRuntimeLoginLockoutSurge
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: AgentRuntimeLoginLockoutSurge
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "登录锁定次数异常"
+              description: "最近 15 分钟出现 15 次登录锁定，可能存在暴力破解。"
+              runbook: "docs/observability-runbook.md#agentruntimeloginlockoutsurge"
+
+  # Model gateway: revocation backlog and reachability.
+  - interval: 1m
+    input_series:
+      - series: "agent_runtime_model_key_revocation_oldest_pending_seconds"
+        values: "0 600 960 1020 1080 1140 1200 1260 0"
+      - series: "agent_runtime_model_gateway_reachable"
+        values: "0x12 1x3"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AgentRuntimeModelKeyRevocationStuck
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: AgentRuntimeModelKeyRevocationStuck
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: "模型凭据吊销积压超过 15 分钟"
+              description: "有虚拟 key 等待网关删除超过 15 分钟；在网关确认前该 key 仍可能在网关侧有效。"
+              runbook: "docs/observability-runbook.md#agentruntimemodelkeyrevocationstuck"
+      - eval_time: 8m
+        alertname: AgentRuntimeModelKeyRevocationStuck
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: AgentRuntimeModelGatewayUnreachable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: AgentRuntimeModelGatewayUnreachable
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "模型网关不可达"
+              description: "Control Plane 或 Prometheus 连续 10 分钟无法访问 LiteLLM；新的模型凭据无法签发，吊销会积压。"
+              runbook: "docs/observability-runbook.md#agentruntimemodelgatewayunreachable"
+      - eval_time: 14m
+        alertname: AgentRuntimeModelGatewayUnreachable
+        exp_alerts: []

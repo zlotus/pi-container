@@ -48,6 +48,7 @@ export function registerAdminWorkerRoutes(
           worker,
           currentTime,
           dependencies.workerOfflineAfterMs,
+          context.usage.worker(worker.id),
         ),
       ),
     };
@@ -87,7 +88,12 @@ export function registerAdminWorkerRoutes(
     }
     reply.header("cache-control", "no-store");
     return {
-      worker: publicWorker(result.worker, now(), dependencies.workerOfflineAfterMs),
+      worker: publicWorker(
+        result.worker,
+        now(),
+        dependencies.workerOfflineAfterMs,
+        context.usage.worker(result.worker.id),
+      ),
     };
   });
 
@@ -99,7 +105,11 @@ export function registerAdminWorkerRoutes(
     // Metadata only: admin role grants no Workspace content access or open/exchange.
     return {
       workspaces: workspaces.map((workspace) => ({
-        ...publicWorkspace(workspace),
+        ...publicWorkspace(
+          workspace,
+          undefined,
+          context.usage.workspace(workspace.id, workspace.workerId),
+        ),
         owner: {
           id: workspace.userId,
           username: workspace.ownerUsername,

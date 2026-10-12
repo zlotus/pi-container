@@ -42,10 +42,14 @@ export interface ProxyOptions {
 
 export interface HttpProxyOptions extends ProxyOptions {
   onConnected?: (disconnect: () => void) => (() => void) | undefined;
+  /** Called just before the upstream response headers are written (metrics). */
+  onUpstreamResponse?: (statusCode: number) => void;
 }
 
 export interface WebSocketProxyOptions extends ProxyOptions {
   onConnected?: (disconnect: () => void) => (() => void) | undefined;
+  /** Called when the upgrade ends without a WebSocket (upstream refusal or failure). */
+  onRejected?: (statusCode: number) => void;
 }
 
 function connectionHeaderTokens(headers: IncomingHttpHeaders): Set<string> {
@@ -220,6 +224,7 @@ export function proxyHttpRequest(
       options.target,
       options.publicOrigin,
     );
+    options.onUpstreamResponse?.(receivedResponse.statusCode ?? 502);
     response.writeHead(receivedResponse.statusCode ?? 502, headers);
     receivedResponse.once("aborted", disconnect);
     receivedResponse.once("error", disconnect);
@@ -289,6 +294,7 @@ export function proxyWebSocketUpgrade(
 ): void {
   const path = targetPath(request);
   if (path === null) {
+    options.onRejected?.(400);
     rejectUpgrade(socket, 400, "Invalid request path");
     return;
   }
@@ -308,6 +314,7 @@ export function proxyWebSocketUpgrade(
       headers,
     });
   } catch {
+    options.onRejected?.(502);
     rejectUpgrade(socket, 502, "Upstream is unavailable");
     return;
   }
@@ -356,6 +363,7 @@ export function proxyWebSocketUpgrade(
   upstreamRequest.once("response", (upstreamResponse) => {
     responseStarted = true;
     upstreamRequest.setTimeout(0);
+    options.onRejected?.(upstreamResponse.statusCode ?? 502);
     writeSocketResponse(
       socket,
       upstreamResponse.statusCode ?? 502,
@@ -371,6 +379,7 @@ export function proxyWebSocketUpgrade(
     if (responseStarted) {
       socket.destroy();
     } else {
+      options.onRejected?.(502);
       rejectUpgrade(socket, 502, "Upstream is unavailable");
     }
   });

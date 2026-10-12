@@ -8,11 +8,13 @@ import {
   ModelKeySecretSchema,
   ModelRelayStatusSchema,
 } from "./model-gateway.js";
+import { WorkerHostUsageSchema, WorkspaceUsageSchema } from "./usage.js";
 
 export * from "./egress.js";
 export * from "./model-gateway.js";
+export * from "./usage.js";
 
-export const WORKER_PROTOCOL_VERSION = 4 as const;
+export const WORKER_PROTOCOL_VERSION = 5 as const;
 
 export const WorkspaceIdSchema = z.string().uuid();
 
@@ -149,6 +151,8 @@ export const WorkerHeartbeatMessageSchema = RequestEnvelopeSchema.extend({
       storage: WorkerStorageStatusSchema,
       modelRelay: ModelRelayStatusSchema,
       workspaceDisk: z.array(WorkspaceDiskUsageSchema).max(10_000).optional(),
+      host: WorkerHostUsageSchema,
+      workspaceUsage: z.array(WorkspaceUsageSchema).max(10_000).optional(),
       observedAt: z.string().datetime({ offset: true }),
     })
     .strict(),

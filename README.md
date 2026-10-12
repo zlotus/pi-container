@@ -318,6 +318,14 @@ Audit，到期自动解除，管理员可在“用户”页或用 `pnpm auth:unl
 请求不受账户维度锁定影响（break-glass）。`X-Forwarded-For` 只在 `AUTH_TRUSTED_PROXIES` 中的代理转发时
 采信。见 [Authentication Runbook](docs/authentication-runbook.md#login-protection-phase-15)。
 
+## Metrics and alerts
+
+Control Plane 在独立端口（`METRICS_PORT`，建议 `127.0.0.1:9464`）上以 Bearer token 暴露 Prometheus 指标：Worker
+在线与心跳、出口/配额/中继状态、Workspace 状态分布、Gateway 请求量/首包耗时/错误、Worker 命令结果与超时、认证与
+锁定、模型凭据吊销积压，以及每个运行中 Workspace 容器的 CPU、内存、PID、网络与 OOM（Worker 经心跳上报，Worker
+不开放指标端口）。Portal 的 Workspace 卡片与管理页显示实际用量。`deploy/observability/` 提供开发用 Prometheus +
+Grafana、19 条示例告警规则（含 `promtool` 测试）与 3 个面板。见 [Observability Runbook](docs/observability-runbook.md)。
+
 ## Logs
 
 Control Plane 与 Worker 都向 stdout 输出 JSON 结构化日志，由部署环境（systemd/journald、容器运行时等）

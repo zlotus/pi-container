@@ -259,3 +259,26 @@ describe("model gateway configuration (Phase 16.8)", () => {
     expect(() => parseServerConfig({ ...REQUIRED_ENV, MODEL_GATEWAY_ADMIN_URL: GATEWAY.MODEL_GATEWAY_ADMIN_URL })).toThrow();
   });
 });
+
+describe("metrics configuration (Phase 17.7)", () => {
+  it("is off by default and needs a token file when a port is set", () => {
+    expect(parseServerConfig(REQUIRED_ENV)).toMatchObject({
+      METRICS_HOST: "127.0.0.1",
+      METRICS_PORT: null,
+      METRICS_TOKEN_FILE: "",
+    });
+    expect(
+      parseServerConfig({ ...REQUIRED_ENV, METRICS_PORT: "9464", METRICS_TOKEN_FILE: "/etc/agent-runtime/metrics.token" }),
+    ).toMatchObject({ METRICS_PORT: 9464 });
+  });
+
+  it.each([
+    { METRICS_PORT: "9464" },
+    { METRICS_PORT: "9464", METRICS_TOKEN_FILE: "metrics.token" },
+    { METRICS_PORT: "70000", METRICS_TOKEN_FILE: "/t" },
+    { METRICS_PORT: "abc", METRICS_TOKEN_FILE: "/t" },
+    { METRICS_TOKEN_FILE: "/etc/agent-runtime/metrics.token" },
+  ])("rejects an incomplete metrics setting: %o", (override) => {
+    expect(() => parseServerConfig({ ...REQUIRED_ENV, ...override })).toThrow();
+  });
+});

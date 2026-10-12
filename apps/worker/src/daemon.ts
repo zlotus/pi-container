@@ -15,10 +15,12 @@ import {
   type WorkerEgressStatus,
   type WorkerReconcileAssignment,
   type WorkerReconciliationReport,
+  type WorkerHostUsage,
   type WorkerStorageStatus,
   type WorkerToControlMessage,
   type WorkspaceDiskUsage,
   type WorkspaceResources,
+  type WorkspaceUsage,
 } from "@agent-runtime/protocol";
 import WebSocket from "ws";
 
@@ -30,6 +32,7 @@ import {
   WorkspaceRuntimeError,
   type WorkspaceRuntimeObservation,
 } from "./runtime.js";
+import { HOST_ONLY_USAGE, type WorkerUsage } from "./usage/reporter.js";
 
 type WorkerHelloMessage = Extract<
   WorkerToControlMessage,
@@ -133,9 +136,11 @@ export function buildWorkerHeartbeat(
   observedAt: Date,
   egress: WorkerEgressStatus,
   storage: WorkerStorageStatus,
+  host: WorkerHostUsage,
   allocatedWorkspaces = 0,
   workspaceDisk: WorkspaceDiskUsage[] | null = null,
   modelRelay: ModelRelayStatus = DISABLED_MODEL_ACCESS.status(),
+  workspaceUsage: WorkspaceUsage[] | null = null,
 ): WorkerHeartbeatMessage {
   return {
     version: WORKER_PROTOCOL_VERSION,
@@ -147,7 +152,9 @@ export function buildWorkerHeartbeat(
       egress,
       storage,
       modelRelay,
+      host,
       ...(workspaceDisk === null ? {} : { workspaceDisk }),
+      ...(workspaceUsage === null ? {} : { workspaceUsage }),
       observedAt: observedAt.toISOString(),
     },
   };
@@ -158,6 +165,7 @@ export class WorkerDaemon {
   #heartbeatTimer: NodeJS.Timeout | null = null;
   #egressTimer: NodeJS.Timeout | null = null;
   #diskTimer: NodeJS.Timeout | null = null;
+  #usageTimer: NodeJS.Timeout | null = null;
   /** The latest usage sample, sent once with the next heartbeat. */
   #pendingDiskUsage: WorkspaceDiskUsage[] | null = null;
   #reconnectTimer: NodeJS.Timeout | null = null;
@@ -173,6 +181,7 @@ export class WorkerDaemon {
     readonly storage: WorkerStorage,
     readonly log: Pick<Logger, "info" | "warn"> = createJsonLogger("worker"),
     readonly modelAccess: WorkerModelAccess = DISABLED_MODEL_ACCESS,
+    readonly usage: WorkerUsage = HOST_ONLY_USAGE(),
   ) {
     this.#reconnectDelayMs = config.WORKER_RECONNECT_INITIAL_MS;
   }
@@ -187,6 +196,10 @@ export class WorkerDaemon {
     this.#diskTimer ??= setInterval(() => {
       void this.sampleDiskUsage();
     }, DISK_USAGE_SAMPLE_INTERVAL_MS);
+    // Container usage is sampled on the heartbeat cadence without delaying the heartbeat.
+    this.#usageTimer ??= setInterval(() => {
+      void this.usage.refresh();
+    }, this.config.WORKER_HEARTBEAT_INTERVAL_MS);
     this.#connect();
   }
 
@@ -245,8 +258,10 @@ export class WorkerDaemon {
     if (this.#reconnectTimer !== null) clearTimeout(this.#reconnectTimer);
     if (this.#egressTimer !== null) clearInterval(this.#egressTimer);
     if (this.#diskTimer !== null) clearInterval(this.#diskTimer);
+    if (this.#usageTimer !== null) clearInterval(this.#usageTimer);
     this.#egressTimer = null;
     this.#diskTimer = null;
+    this.#usageTimer = null;
     this.#heartbeatTimer = null;
     this.#reconnectTimer = null;
     this.#socket?.close(1000, "Worker shutting down");
@@ -354,9 +369,11 @@ export class WorkerDaemon {
           new Date(),
           this.egress.status(),
           this.storage.status(),
+          this.usage.host(),
           allocatedWorkspaces,
           workspaceDisk,
           this.modelAccess.status(),
+          this.usage.workspaces(),
         ),
       );
     } catch (error) {

@@ -2,6 +2,7 @@ import { createAuditRepository } from "./audit.js";
 import { createAuthThrottleRepository } from "./auth-throttle.js";
 import { createEgressRepository } from "./egress.js";
 import { createIdentityRepository } from "./identities.js";
+import { createMetricsRepository } from "./metrics.js";
 import type { DatabaseClient } from "./index.js";
 import { createModelKeyRepository } from "./model-keys.js";
 import { createRecoveryRepository } from "./recovery.js";
@@ -30,6 +31,7 @@ export function createRepository(database: DatabaseClient, selectWorker: WorkerS
     ...createAuthThrottleRepository(database),
     ...createStorageRepository(database),
     ...createModelKeyRepository(database),
+    ...createMetricsRepository(database),
   };
 }
 

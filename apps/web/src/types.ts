@@ -30,6 +30,30 @@ export interface ModelAccess {
   reason: string | null;
 }
 
+/** Observed container usage while RUNNING (specs.md Phase 17.7); null without a fresh sample. */
+export interface WorkspaceUsage {
+  cpuCores: number | null;
+  cpuLimitCores: number;
+  memoryBytes: number;
+  memoryLimitBytes: number;
+  pids: number;
+  pidsLimit: number;
+  oomKills: number;
+  sampledAt: string;
+}
+
+/** A Worker host's observed usage and the sum over its running Workspaces. */
+export interface WorkerUsage {
+  hostCpuUtilization: number | null;
+  hostMemoryTotalBytes: number;
+  hostMemoryAvailableBytes: number;
+  load1: number;
+  workspaceCpuCores: number;
+  workspaceMemoryBytes: number;
+  runningWorkspaces: number;
+  sampledAt: string;
+}
+
 export interface Workspace {
   id: string;
   name: string;
@@ -39,6 +63,7 @@ export interface Workspace {
   disk: WorkspaceDisk;
   /** Absent on admin listings; "disabled" without a model gateway. */
   modelAccess?: ModelAccess;
+  usage?: WorkspaceUsage | null;
 }
 
 export interface ModelUsage {
@@ -101,6 +126,7 @@ export interface Worker {
   };
   /** The Worker's model relay (Phase 16.4). */
   modelRelay: { enabled: boolean; port: number | null; listening: boolean };
+  usage?: WorkerUsage | null;
 }
 
 export interface AuthLock {

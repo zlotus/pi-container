@@ -1,0 +1,347 @@
+{
+  "uid": "agent-runtime-resources",
+  "title": "Agent Runtime · Workspace 资源",
+  "tags": [
+    "agent-runtime"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "worker_id",
+        "label": "Worker",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "agent-runtime-prometheus"
+        },
+        "query": {
+          "query": "label_values(agent_runtime_worker_up, worker_id)",
+          "refId": "worker_id"
+        },
+        "definition": "label_values(agent_runtime_worker_up, worker_id)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 2,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "workspace_id",
+        "label": "Workspace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "agent-runtime-prometheus"
+        },
+        "query": {
+          "query": "label_values(agent_runtime_workspace_info{worker_id=~\"$worker_id\"}, workspace_id)",
+          "refId": "workspace_id"
+        },
+        "definition": "label_values(agent_runtime_workspace_info{worker_id=~\"$worker_id\"}, workspace_id)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 2,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "主机 CPU 使用率",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "agent_runtime_worker_host_cpu_utilization_ratio{worker_id=~\"$worker_id\"}",
+          "legendFormat": "{{worker_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 1
+    },
+    {
+      "type": "timeseries",
+      "title": "主机可用内存",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "agent_runtime_worker_host_memory_bytes{kind=\"available\",worker_id=~\"$worker_id\"}",
+          "legendFormat": "{{worker_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 2
+    },
+    {
+      "type": "bargauge",
+      "title": "数据盘剩余",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "agent_runtime_worker_filesystem_bytes{kind=\"free\",worker_id=~\"$worker_id\"} / ignoring(kind) agent_runtime_worker_filesystem_bytes{kind=\"total\",worker_id=~\"$worker_id\"}",
+          "legendFormat": "{{worker_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 3
+    },
+    {
+      "type": "timeseries",
+      "title": "Workspace CPU（核）",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "topk(10, rate(agent_runtime_workspace_cpu_seconds_total{worker_id=~\"$worker_id\",workspace_id=~\"$workspace_id\"}[2m]))",
+          "legendFormat": "{{workspace_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "id": 4
+    },
+    {
+      "type": "timeseries",
+      "title": "Workspace 内存",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "topk(10, agent_runtime_workspace_memory_bytes{worker_id=~\"$worker_id\",workspace_id=~\"$workspace_id\"})",
+          "legendFormat": "{{workspace_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 5
+    },
+    {
+      "type": "bargauge",
+      "title": "Workspace 磁盘（data）占上限",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "topk(15, agent_runtime_workspace_disk_used_bytes{project=\"data\",worker_id=~\"$worker_id\",workspace_id=~\"$workspace_id\"} / agent_runtime_workspace_disk_limit_bytes{project=\"data\"})",
+          "legendFormat": "{{workspace_id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 6
+    },
+    {
+      "type": "timeseries",
+      "title": "Workspace 网络",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "topk(10, rate(agent_runtime_workspace_network_bytes_total{worker_id=~\"$worker_id\",workspace_id=~\"$workspace_id\"}[5m]))",
+          "legendFormat": "{{workspace_id}} {{direction}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "id": 7
+    },
+    {
+      "type": "table",
+      "title": "OOM 与进程数",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "agent-runtime-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "increase(agent_runtime_workspace_oom_kills_total{worker_id=~\"$worker_id\",workspace_id=~\"$workspace_id\"}[24h])",
+          "legendFormat": "",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "agent-runtime-prometheus"
+          },
+          "expr": "agent_runtime_workspace_pids{worker_id=~\"$worker_id\",workspace_id=~\"$workspace_id\"}",
+          "legendFormat": "",
+          "refId": "B",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        }
+      ],
+      "id": 8
+    }
+  ]
+}

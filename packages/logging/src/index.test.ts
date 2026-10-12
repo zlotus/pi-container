@@ -44,9 +44,11 @@ describe("credential redaction", () => {
       secret: "secret-virtual-key",
       payload: { secret: "secret-payload-key" },
       masterKey: "secret-master-key",
+      metricsToken: "secret-metrics-token",
+      config: { metricsToken: "secret-nested-metrics-token" },
     }, "raw object");
     const output = lines.join("");
-    for (const secret of ["secret-cookie", "secret-bearer", "secret-password", "secret-token", "secret-raw", "secret-oauth-code", "secret-body", "secret-nested-cookie", "secret-nested-auth", "secret-virtual-key", "secret-payload-key", "secret-master-key"]) {
+    for (const secret of ["secret-cookie", "secret-bearer", "secret-password", "secret-token", "secret-raw", "secret-oauth-code", "secret-body", "secret-nested-cookie", "secret-nested-auth", "secret-virtual-key", "secret-payload-key", "secret-master-key", "secret-metrics-token", "secret-nested-metrics-token"]) {
       expect(output).not.toContain(secret);
     }
     expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({ service: "test", msg: "raw object" });

@@ -148,7 +148,7 @@ describe("Workspace disk limits", () => {
       } else if (command.type === "workspace.storage.set") {
         worker.send(
           JSON.stringify({
-            version: 4,
+            version: 5,
             type: "response.ok",
             requestId: command.requestId,
             payload: {
@@ -173,7 +173,7 @@ describe("Workspace disk limits", () => {
         type: "workspace.storage.set",
         payload: { workspaceId: WORKSPACE_ID, diskLimitBytes: 50 * GIB },
         requestId: expect.any(String),
-        version: 4,
+        version: 5,
       },
     ]);
     worker.terminate();

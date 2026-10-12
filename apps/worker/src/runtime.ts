@@ -37,6 +37,11 @@ import { workspaceBridgeName } from "./egress/ruleset.js";
 import { writePlatformProvider } from "./model-relay/pi-config.js";
 import type { RelayEndpoint } from "./model-relay/relay.js";
 import {
+  parseDockerStats,
+  type ContainerStatsSample,
+  type RunningWorkspaceContainer,
+} from "./usage/sampler.js";
+import {
   type ProjectUsage,
   StorageQuotaError,
   type StoragePolicy,
@@ -865,6 +870,65 @@ export class DockerWorkspaceRuntime {
       });
     }
     return endpoints;
+  }
+
+  /**
+   * Running Workspace containers of this Worker for usage sampling (specs.md Phase 17.5):
+   * the same label and name checks as every other Docker operation.
+   */
+  async runningWorkspaceContainers(): Promise<RunningWorkspaceContainer[]> {
+    let containers: Docker.ContainerInfo[];
+    try {
+      containers = await this.#docker.listContainers({
+        filters: {
+          status: ["running"],
+          label: [`app=${APP_LABEL}`, `managed_by=${MANAGED_BY_LABEL}`, `worker_id=${this.#workerId}`],
+        },
+      });
+    } catch (error) {
+      throw this.#engineError(error, "list running Workspace containers");
+    }
+    const running: RunningWorkspaceContainer[] = [];
+    for (const container of containers) {
+      const workspaceId = this.managedWorkspaceId(container.Labels ?? {});
+      if (workspaceId === null) continue;
+      if (!container.Names.includes(`/${this.#containerName(workspaceId)}`)) continue;
+      running.push({ workspaceId, containerId: container.Id });
+    }
+    return running;
+  }
+
+  /** One-shot Engine API stats (about 5 ms; no second sample is awaited). */
+  async containerStats(containerId: string): Promise<ContainerStatsSample> {
+    let raw: unknown;
+    try {
+      raw = await this.#docker.getContainer(containerId).stats({ stream: false, "one-shot": true });
+    } catch (error) {
+      throw this.#engineError(error, "read Workspace container stats");
+    }
+    const sample = parseDockerStats(raw);
+    if (sample === null) {
+      throw new WorkspaceRuntimeError("RUNTIME_ENGINE_ERROR", "Docker returned unusable container stats", true);
+    }
+    return sample;
+  }
+
+  /** The Engine API event stream, filtered to OOM events of this Worker's managed containers. */
+  oomEvents(): Promise<NodeJS.ReadableStream> {
+    return this.#docker.getEvents({
+      filters: {
+        type: ["container"],
+        event: ["oom"],
+        label: [`app=${APP_LABEL}`, `managed_by=${MANAGED_BY_LABEL}`, `worker_id=${this.#workerId}`],
+      },
+    });
+  }
+
+  /** The Workspace a set of container labels belongs to, when they are exactly ours. */
+  managedWorkspaceId(labels: Record<string, string>): string | null {
+    const workspaceId = WorkspaceIdSchema.safeParse(labels.workspace_id);
+    if (!workspaceId.success) return null;
+    return labelsMatch(labels, managedLabels(this.#workerId, workspaceId.data)) ? workspaceId.data : null;
   }
 
   async #networkGatewayAddress(workspaceId: string): Promise<string | null> {

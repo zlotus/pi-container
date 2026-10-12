@@ -17,6 +17,7 @@ import { registerHealthRoutes } from "./routes/health.js";
 import { registerModelGatewayRoutes } from "./routes/model-gateway.js";
 import { registerWorkspaceRoutes } from "./routes/workspaces.js";
 import { createRuntimeCommands } from "./runtime-commands.js";
+import { PlatformMetrics } from "./metrics/platform-metrics.js";
 import { WorkerChannel } from "./worker-channel.js";
 import { registerWorkerControlChannel } from "./worker-control.js";
 
@@ -34,22 +35,29 @@ export function buildControlPlane(
     requestIdLogLabel: "requestId",
     genReqId: () => newRequestId(),
   });
-  if (dependencies.log !== undefined) {
-    // One whitelisted line per request; serializers keep only the route template.
-    app.addHook("onResponse", async (request, reply) => {
-      const probe = request.routeOptions.url === "/health" || request.routeOptions.url === "/ready";
-      request.log[probe ? "debug" : "info"](
-        { req: request, res: reply, durationMs: Math.round(reply.elapsedTime) },
-        "request completed",
-      );
-    });
-  }
+  const metrics = dependencies.metrics ?? new PlatformMetrics();
   const workerChannel =
-    dependencies.workerChannel ?? new WorkerChannel(dependencies.workerCommandTimeoutMs);
+    dependencies.workerChannel ?? new WorkerChannel(dependencies.workerCommandTimeoutMs, metrics);
+  const context = createRouteContext({ ...dependencies, metrics, workerChannel });
+  app.addHook("onResponse", async (request, reply) => {
+    // Route templates only: the raw URL can carry user data (specs.md Phase 17.4).
+    context.metrics.recordHttp(
+      request.routeOptions.url,
+      request.method,
+      reply.statusCode,
+      reply.elapsedTime / 1_000,
+    );
+    if (dependencies.log === undefined) return;
+    // One whitelisted line per request; serializers keep only the route template.
+    const probe = request.routeOptions.url === "/health" || request.routeOptions.url === "/ready";
+    request.log[probe ? "debug" : "info"](
+      { req: request, res: reply, durationMs: Math.round(reply.elapsedTime) },
+      "request completed",
+    );
+  });
   void app.register(websocket, {
     options: { maxPayload: 8 * 1024 * 1024, perMessageDeflate: false },
   });
-  const context = createRouteContext(dependencies);
   const runtime = createRuntimeCommands(dependencies, workerChannel);
 
   void app.register(async (workerControlScope) => {
@@ -57,6 +65,8 @@ export function buildControlPlane(
       store: dependencies.workerStore,
       channel: workerChannel,
       now: context.now,
+      metrics: context.metrics,
+      usage: context.usage,
       ...(dependencies.log === undefined ? {} : { log: dependencies.log }),
       onHelloAccepted: (workerId) => {
         // The policy goes out before reconciliation so restored Workspaces run under it.

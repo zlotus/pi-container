@@ -96,6 +96,7 @@ export class ModelKeyManager implements ModelAccessService {
   readonly #catalog: ModelGatewayConfig;
   readonly #policy: ModelKeyPolicy;
   readonly #log: Pick<Logger, "info" | "warn"> | undefined;
+  readonly #onMaintenanceFailure: (() => void) | undefined;
   #timer: NodeJS.Timeout | null = null;
   #running: Promise<void> | null = null;
   #again = false;
@@ -115,6 +116,8 @@ export class ModelKeyManager implements ModelAccessService {
     catalog: ModelGatewayConfig;
     policy: ModelKeyPolicy;
     log?: Pick<Logger, "info" | "warn">;
+    /** Counts failed maintenance passes (specs.md Phase 17.4). */
+    onMaintenanceFailure?: () => void;
   }) {
     this.#store = options.store;
     this.#admin = options.admin;
@@ -122,6 +125,7 @@ export class ModelKeyManager implements ModelAccessService {
     this.#catalog = options.catalog;
     this.#policy = options.policy;
     this.#log = options.log;
+    this.#onMaintenanceFailure = options.onMaintenanceFailure;
   }
 
   get catalog(): ModelGatewayConfig {
@@ -281,6 +285,7 @@ export class ModelKeyManager implements ModelAccessService {
         try {
           await this.#pass();
         } catch (error) {
+          this.#onMaintenanceFailure?.();
           this.#log?.warn({ err: error }, "model key maintenance failed");
         } finally {
           this.#inPass = false;

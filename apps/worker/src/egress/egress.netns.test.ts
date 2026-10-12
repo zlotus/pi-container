@@ -147,6 +147,8 @@ describe.skipIf(!enabled)("egress rules on a real kernel", { timeout: 30_000 }, 
     server(pub, "public", [80]);
     server(null, "worker-host", [3100]);
     server(null, "relay", [3101]);
+    // Control Plane metrics, Prometheus and Grafana on a Worker host (Phase 17.8).
+    server(null, "observability", [9464, 9090, 3300]);
     server(container, "pi-web", [30141]);
     await waitForListeners();
 
@@ -320,5 +322,27 @@ describe.skipIf(!enabled)("egress rules on a real kernel", { timeout: 30_000 }, 
     await controller.ensure();
     expect(greeting(container, "172.30.0.1", 3101)).toBeNull();
     expect(greeting(other, "172.31.0.1", 3101)).toBe("relay");
+  });
+
+  it("keeps metrics, Prometheus and Grafana on the Worker host unreachable (Phase 17.8)", async () => {
+    for (const relayPort of [null, 3101]) {
+      const observed = new EgressController({
+        nft,
+        stateDirectory: join(stateRoot, `egress-observability-${relayPort ?? "none"}`),
+        resolveLocalProtected: async () => [],
+        relayPort,
+        log: { info: () => undefined, warn: () => undefined },
+      });
+      expect((await observed.initialize()).enforced).toBe(true);
+      for (const port of [9464, 9090, 3300]) {
+        for (const address of ["172.30.0.1", "10.99.0.1", "203.0.113.1"]) {
+          expect(greeting(container, address, port), `${address}:${port}`).toBeNull();
+        }
+        // A non-Workspace bridge and the host itself are unaffected.
+        expect(greeting(other, "172.31.0.1", port)).toBe("observability");
+        expect(greeting(null, "127.0.0.1", port)).toBe("observability");
+      }
+    }
+    await controller.ensure();
   });
 });

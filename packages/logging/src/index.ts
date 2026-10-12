@@ -46,6 +46,9 @@ export const REDACT_PATHS = [
   "payload.secret",
   "masterKey",
   "*.masterKey",
+  // Prometheus scrape token (specs.md Phase 17.8).
+  "metricsToken",
+  "*.metricsToken",
 ];
 
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

@@ -18,9 +18,18 @@ import { WorkspaceSessionExchange } from "./session-exchange.js";
 import { SessionConnectionRegistry } from "./session-connections.js";
 import { selectWorker } from "./scheduler.js";
 import { GenericOidcClient, OidcTransactionStore } from "./oidc.js";
-import { LiteLlmAdminClient } from "./model-gateway/admin-client.js";
+import { LiteLlmAdminClient, meteredModelGatewayAdmin } from "./model-gateway/admin-client.js";
 import { loadModelCatalog, ModelKeyManager } from "./model-gateway/key-manager.js";
 import { WorkerChannel } from "./worker-channel.js";
+import { MetricsCollector } from "./metrics/collector.js";
+import {
+  createMetricsServer,
+  readMetricsToken,
+  validateMetricsListen,
+} from "./metrics/listener.js";
+import { PlatformMetrics } from "./metrics/platform-metrics.js";
+import { UsageRegistry } from "./metrics/usage-registry.js";
+import { WORKER_PROTOCOL_VERSION } from "@agent-runtime/protocol";
 import {
   GenericOAuth2UserInfoClient,
   OAuth2TransactionStore,
@@ -28,6 +37,24 @@ import {
 
 const config = parseServerConfig(process.env);
 const log = await createLogger("control-plane", LoggingConfigSchema.parse(process.env));
+// Metrics are never unauthenticated: an incomplete configuration stops the start (Phase 17.8).
+const metricsToken =
+  config.METRICS_PORT === null ? null : await readMetricsToken(config.METRICS_TOKEN_FILE);
+if (config.METRICS_PORT !== null) {
+  validateMetricsListen({
+    metricsHost: config.METRICS_HOST,
+    metricsPort: config.METRICS_PORT,
+    listeners: [
+      { host: config.HOST, port: config.PORT },
+      { host: config.GATEWAY_HOST, port: config.GATEWAY_PORT },
+    ],
+  });
+}
+const metrics = new PlatformMetrics({
+  defaultMetrics: true,
+  version: process.env.npm_package_version ?? "dev",
+  protocolVersion: WORKER_PROTOCOL_VERSION,
+});
 const database = createDatabaseClient(config.DATABASE_URL);
 
 await migrateDatabase(database);
@@ -102,16 +129,22 @@ const loginGuard = new LoginGuard(
   },
   new AddressSet(config.AUTH_TRUSTED_NETWORKS),
 );
-const workerChannel = new WorkerChannel(config.WORKER_COMMAND_TIMEOUT_MS);
+const workerChannel = new WorkerChannel(config.WORKER_COMMAND_TIMEOUT_MS, metrics);
+const usage = new UsageRegistry(config.WORKER_OFFLINE_AFTER_MS, (workerId) =>
+  workerChannel.isConnected(workerId),
+);
 const modelGateway =
   config.MODEL_GATEWAY_ADMIN_URL === ""
     ? undefined
     : new ModelKeyManager({
         store: repository,
-        admin: new LiteLlmAdminClient({
-          adminUrl: config.MODEL_GATEWAY_ADMIN_URL,
-          masterKey: config.MODEL_GATEWAY_MASTER_KEY,
-        }),
+        admin: meteredModelGatewayAdmin(
+          new LiteLlmAdminClient({
+            adminUrl: config.MODEL_GATEWAY_ADMIN_URL,
+            masterKey: config.MODEL_GATEWAY_MASTER_KEY,
+          }),
+          (operation, result) => metrics.recordModelGatewayRequest(operation, result),
+        ),
         channel: workerChannel,
         catalog: await loadModelCatalog(config.MODEL_GATEWAY_CATALOG_FILE),
         policy: {
@@ -121,6 +154,7 @@ const modelGateway =
           tpmLimit: config.MODEL_GATEWAY_KEY_TPM,
         },
         log: log.child({ component: "model-gateway" }),
+        onMaintenanceFailure: () => metrics.recordBackgroundFailure("model_key_loop"),
       });
 const app = buildControlPlane({
   checkDatabase: async () => checkDatabase(database),
@@ -152,10 +186,18 @@ const app = buildControlPlane({
     config.PLATFORM_EGRESS_PROTECTED,
     config.DATABASE_URL,
     undefined,
-    config.MODEL_GATEWAY_ADMIN_URL === "" ? [] : [config.MODEL_GATEWAY_ADMIN_URL],
+    [
+      ...(config.MODEL_GATEWAY_ADMIN_URL === "" ? [] : [config.MODEL_GATEWAY_ADMIN_URL]),
+      // A non-loopback metrics address is a platform address no whitelist may open.
+      ...(config.METRICS_PORT === null
+        ? []
+        : [`http://${config.METRICS_HOST.includes(":") ? `[${config.METRICS_HOST}]` : config.METRICS_HOST}:${config.METRICS_PORT}`]),
+    ],
   ),
   workerChannel,
   ...(modelGateway === undefined ? {} : { modelGateway }),
+  metrics,
+  usage,
   reportRecoveryIssue: (issue) => {
     log.warn({ issue }, "worker recovery issue");
   },
@@ -173,13 +215,31 @@ const gateway = buildWorkspaceGateway({
   workerGatewayTokens: config.WORKER_GATEWAY_TOKENS_JSON,
   sessionConnections,
   log: log.child({ component: "workspace-gateway" }),
+  metrics,
 });
+const metricsCollector = new MetricsCollector({
+  metrics,
+  store: repository,
+  usage,
+  connectedWorkerIds: () => workerChannel.connectedWorkerIds(),
+  modelGatewayEnabled: modelGateway !== undefined,
+});
+const metricsServer =
+  metricsToken === null
+    ? null
+    : createMetricsServer({
+        token: metricsToken,
+        contentType: metrics.registry.contentType,
+        collect: () => metricsCollector.collect(),
+        log: log.child({ component: "metrics" }),
+      });
 
 const workerStatusTimer = setInterval(() => {
   const cutoff = new Date(Date.now() - config.WORKER_OFFLINE_AFTER_MS);
   void repository.markWorkersOffline(cutoff).catch((error: unknown) => {
     // Readiness and the Admin API expose database failure without terminating
     // healthy Worker sockets because of a transient sweep failure.
+    metrics.recordBackgroundFailure("worker_offline_sweep");
     log.error({ err: error }, "worker offline sweep failed");
   });
 }, config.WORKER_STATUS_SWEEP_MS);
@@ -189,6 +249,7 @@ const authThrottleCleanupTimer = setInterval(() => {
   void repository
     .deleteExpiredAuthThrottle(new Date(), loginGuard.maxWindowMs)
     .catch((error: unknown) => {
+      metrics.recordBackgroundFailure("auth_throttle_cleanup");
       log.error({ err: error }, "login throttle cleanup failed");
     });
 }, 60_000);
@@ -209,6 +270,7 @@ const shutdown = async (): Promise<void> => {
   await new Promise<void>((resolve, reject) => {
     gateway.close((error) => (error === undefined ? resolve() : reject(error)));
   });
+  metricsServer?.close();
   await app.close();
   await database.end({ timeout: 5 });
 };
@@ -233,3 +295,15 @@ await new Promise<void>((resolve, reject) => {
     resolve();
   });
 });
+if (metricsServer !== null && config.METRICS_PORT !== null) {
+  const port = config.METRICS_PORT;
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => reject(error);
+    metricsServer.once("error", onError);
+    metricsServer.listen(port, config.METRICS_HOST, () => {
+      metricsServer.off("error", onError);
+      log.info({ host: config.METRICS_HOST, port }, "metrics listening");
+      resolve();
+    });
+  });
+}

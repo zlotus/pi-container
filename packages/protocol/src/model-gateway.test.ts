@@ -49,7 +49,7 @@ describe("model gateway protocol (Phase 16)", () => {
   it("carries the model gateway config in workspace.ensure", () => {
     const ensure = (modelGateway: unknown) =>
       ControlToWorkerMessageSchema.safeParse({
-        version: 4,
+        version: 5,
         type: "workspace.ensure",
         requestId,
         payload: {
@@ -68,7 +68,7 @@ describe("model gateway protocol (Phase 16)", () => {
   it("binds a virtual key to its own Workspace and bounds the secret", () => {
     const set = (payload: Record<string, unknown>) =>
       ControlToWorkerMessageSchema.safeParse({
-        version: 4,
+        version: 5,
         type: "workspace.model_key.set",
         requestId,
         payload: { workspaceId, keyAlias: `arw-${workspaceId}-1`, secret: "sk-abcdefghijklmnop", ...payload },
@@ -82,7 +82,7 @@ describe("model gateway protocol (Phase 16)", () => {
     expect(set({ hostPath: "/var/lib" })).toBe(false);
     expect(
       ControlToWorkerMessageSchema.safeParse({
-        version: 4,
+        version: 5,
         type: "workspace.model_key.clear",
         requestId,
         payload: { workspaceId, keyAlias: `arw-${workspaceId}-1` },
@@ -90,7 +90,7 @@ describe("model gateway protocol (Phase 16)", () => {
     ).toBe(true);
     expect(
       ControlToWorkerMessageSchema.safeParse({
-        version: 4,
+        version: 5,
         type: "workspace.model_key.clear",
         requestId,
         payload: { workspaceId },
@@ -101,10 +101,11 @@ describe("model gateway protocol (Phase 16)", () => {
   it("requires the relay status in heartbeats and reports held key aliases", () => {
     const heartbeat = (modelRelay: unknown) =>
       WorkerToControlMessageSchema.safeParse({
-        version: 4,
+        version: 5,
         type: "worker.heartbeat",
         requestId,
         payload: {
+          host: { cpuUtilization: null, memoryTotalBytes: 8, memoryAvailableBytes: 4, load1: 0 },
           workerId: "worker-01",
           allocatedWorkspaces: 0,
           egress: { enforced: true, revision: 0 },
@@ -119,7 +120,7 @@ describe("model gateway protocol (Phase 16)", () => {
 
     const report = (modelKeys: unknown) =>
       WorkerToControlMessageSchema.safeParse({
-        version: 4,
+        version: 5,
         type: "response.ok",
         requestId,
         payload: {
@@ -133,7 +134,7 @@ describe("model gateway protocol (Phase 16)", () => {
 
     const keyResponse = (modelKey: unknown) =>
       WorkerToControlMessageSchema.safeParse({
-        version: 4,
+        version: 5,
         type: "response.ok",
         requestId,
         payload: { requestType: "workspace.model_key.set", modelKey },
