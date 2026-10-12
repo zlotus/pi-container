@@ -5434,15 +5434,596 @@ Prometheus/Grafana 容器。
 
 ## Phase 18：生命周期运维
 
-状态：待开工设计。
+状态：**设计已确认（2026-10-12，18.14），实现中**，分支 `phase-18-lifecycle`。方向见 `docs/v1-roadmap.md` Phase 18（G7、G8、G11）、
+决策 D6、D7，第 41 节与 16.17。
 
-- 空闲回收（第 41 节，默认关闭）。
-- Runtime 镜像升级与回滚：停止状态下重建容器、保留持久目录。
-- 以 pi-web 0.9.0 → 0.10.x、Pi 0.85.1 → 1.0.x 作为首次真实升级（含 default-cwd patch 重写与 MCP、
-  project-trust 行为验证），见 `docs/v1-roadmap.md` 决策 D7。
-- 修复 `enabled=false` 时 Workspace 未置为 `WORKER_OFFLINE` 的不一致，提供 `worker:disable` 运维命令。
-- 验收要点：空闲 Workspace 按规则停止且数据完整、有计算活动的不被停止；升级后 Pi Session 与文件完整；
-  回滚可用。
+目标：管理员能把 Runtime 镜像升级到新版本并在出问题时回滚，升级不丢失 Workspace 文件、Pi Session 与配置；以
+pi-web / Pi 的首次真实升级验证这套机制；闲置的 Workspace 可以按保守规则自动停止以释放内存与 CPU，但**绝不**
+停止仍有用户连接、近期访问或计算活动的 Workspace，也绝不删除数据；吊销 Worker 时平台状态立即一致、模型凭据随之
+失效，并提供相应的运维命令；平台模型目录接入 Xiaomi MiMo。
+
+### 18.1 开工环境核查（Q8B，2026-10-12，只读）
+
+**上游版本**（npm registry 与 GitHub releases，2026-10-12 查询；tarball 解包到临时目录后只读检查）：
+
+| pi-web | 发布 | 精确依赖的 Pi（`@earendil-works/pi-coding-agent` 等四个包） | 备注 |
+|---|---|---|---|
+| 0.9.0（当前 pin） | 2026-09 | 0.85.1 | |
+| 0.10.0 | 2026-10-02 | **1.0.0** | MCP、codemode、项目信任对话框列出 `.pi/mcp.json`；默认目录改为 `~/pi-cwd/YYYYMMDD` |
+| 0.11.0 / 0.11.1 | 10-08 / 10-10 | 1.1.0 | **安全修复**（见下）；侧边栏重做，置顶/归档/顺序保存在服务端 |
+| 0.12.0（最新） | 2026-10-11 | 1.1.0 | 子代理可连 MCP；性能改进 |
+
+Pi 最新为 1.1.0（2026-10-07），1.0.x 为 1.0.0～1.0.4。**pi-web 每个版本都精确依赖一个 Pi 版本**，pi-web 进程内用的是
+自己 `node_modules` 中的 Pi；镜像中全局安装的 `pi` CLI 必须与之同版本，否则同一 `/agent/pi` 会被两个 Pi 版本读写。
+因此路线图 D7 写的“pi-web 0.10.x + Pi 1.0.x”实际只有 0.10.0 + 1.0.0 一种组合，且不含 0.11.0 的安全修复与
+1.0.1～1.0.4 的修复（目标版本见 18.3、18.14 Q1）。
+
+**pi-web 0.9.0 → 0.12.0 的变化**（对 `.next/server` 构建产物与 `bin/` 的只读比对）：
+
+| 项 | 结论 | 对设计的影响 |
+|---|---|---|
+| default-cwd 路由 | 0.10.0 起 `POST /api/default-cwd` 返回 `~/pi-cwd/<本地日期 YYYYMMDD>` 并 `mkdir -p`；0.10.0 与 0.12.0 实现相同；不读环境变量 | 0.9.0 的 patch（按精确片段替换）不再适用，重写为按新片段替换、读取 `PI_WEB_DEFAULT_CWD`（18.3） |
+| Files 根目录 | 0.9.0：Session 的 `cwd`/`projectRoot` ∪ `~/pi-cwd-*` 扫描 ∪ 运行时登记集合，且 default-cwd 路由自己登记返回的目录。0.12.0：Session 的 `cwd`/`projectRoot` ∪ 登记集合；登记点为 `/api/cwd/validate`、`/api/agent/new`、`/api/files`（符号链接目标），**default-cwd 路由不再登记**；前端拿到 default-cwd 后交给自己的 cwd 校验流程 | “没有任何 Session 时 `/workspace` 是否已是 Files 根”需要在真实容器中确认（18.12 S1）；如不是，patch 一并登记该目录 |
+| 服务端状态文件 | 新增 `pi-web-session-state.json`（置顶/归档/顺序）、`trust.json`、`mcp.json`、`mcp-auth.json`；原有 `pi-web-session-index.json`、`web-push.json`、`models.json`、`auth.json`、`settings.json`。**全部经 `getAgentDir()`**，即 `PI_CODING_AGENT_DIR=/agent/pi`；`~/.agents`（skills）在 home 下，Phase 15 起已持久化 | 不需要新的持久目录（第 27 节） |
+| **preview 密钥（0.11.0 安全修复）** | 0.11.0 之前每个 npm 包内置同一个 Next.js `previewModeId`，带 `x-prerender-revalidate: <该值>` 的请求跳过 pi-web 的 `proxy.ts`（密码与 Host/Origin/Fetch-Metadata 校验）。0.11.0 起 `bin/pi-web.js` 每次启动重写 `.next/prerender-manifest.json` 中的密钥；**安装目录不可写时只打印警告并保留公开值** | 我们的镜像 rootfs 只读、pi-web 以 `agent` 运行，**原样升级时修复不生效**。镜像需让该文件可写（18.3），平台 Gateway 另外剥离 Next.js 内部请求头（18.10）。当前 0.9.0 同样受影响；由于 Gateway 先做认证、ownership 与 Fetch Metadata 校验，用户只能对自己的 pi-web 发出该头，现有风险低，但本 Phase 一并修复 |
+| 新增路由 | `mcp`、`web-auth`（`PI_WEB_PASSWORD`，未设置即关闭）、`open-in-explorer`（`spawn` `xdg-open`，镜像中没有该命令）、`provider-usage`（用用户自己的 key 查询 DeepSeek、Moonshot 等余额，走公网） | 均在容器内、以用户自己的权限运行，不跨越平台边界；不设置 `PI_WEB_PASSWORD`（`AGENTS.md` 第 7 节）。验收中确认 `open-in-explorer` 失败无副作用 |
+| 环境变量 | `PI_WEB_IDLE_TIMEOUT_MS`（Pi Session 空闲释放，保持 `0`）、`PI_WEB_ALLOWED_HOSTS`、`PI_WEB_SKIP_VERSION_CHECK` 语义不变；新增 `PI_WEB_APP_NAME`、`PI_WEB_SHUTDOWN_DEADLINE_MS` | Worker 下发的容器 Env 不变 |
+| 自更新 | 新增 `pi-web update` 命令；`app-update` 路由 0.9.0 已有 | 安装目录不可写，更新必然失败；版本检查保持关闭 |
+| Node | `engines.node >=22.19.0`；`node-pty` 改为 `1.2.0-beta.15` | 镜像的 Node 22.20.0 满足；`node-pty` 在 ARM64 上的构建由镜像构建验证 |
+
+**Pi 0.85.1 → 1.1.0 的变化**（`CHANGELOG.md`、`docs/`、`dist/`）：
+
+| 项 | 结论 | 对设计的影响 |
+|---|---|---|
+| 状态目录 | `getAgentDir()` 仍为 `PI_CODING_AGENT_DIR` 优先；新增的 `mcp.json`、`mcp-auth.json`（MCP OAuth token）、`mcp.log`、`trust.json`、`crashes.json` 都在其下 | 全部在 `/agent/pi`，受 Pi 状态配额（2 GiB）约束 |
+| Session 格式 | 头部版本仍为 `3`，旧 Session 加载时自动迁移的规则不变；新增条目类型（`context_edit`、`usage` 等） | 升级方向兼容。**回滚方向**：新版本写入的条目旧版本能否加载未经验证（18.12 S2），回滚语义据此确定（18.4） |
+| Breaking | Azure provider 改名、`shouldStopAfterTurn` 移除、`codemode-deferred` 成为别名、项目级 `.pi/mcp.json` 不允许 `auth` | 不影响平台 provider（`platform`，自定义 `openai-completions`）；用户自有 Azure 配置需自行改名（升级说明） |
+| MCP（1.0 新增） | 内置扩展；servers 来自全局 `mcp.json` 与（**项目信任后**）项目 `.pi/mcp.json`；stdio 或 streamable HTTP；OAuth 登录使用回调地址，pi-web 提供“复制代码”方式 | stdio server 在容器内运行，受同样的隔离；HTTP server 受出口规则约束（内网默认拒绝）；OAuth 在“浏览器与 pi-web 不在同一台机器”的条件下的可用性需要实测（18.12 S1） |
+| project-trust | 0.85.1 已有；默认 `defaultProjectTrust: "ask"`；决定保存在 `trust.json`；1.0 起 MCP 项目配置也受其约束 | 平台不改变默认值；验证决定在 stop/start 与升级后保留 |
+| 网络行为 | `PI_TELEMETRY` / `enableInstallTelemetry`（默认开启：匿名安装/更新上报与部分 provider attribution 头）、`PI_SKIP_VERSION_CHECK`、`PI_OFFLINE`；`/bug` 可把诊断信息上传到 Radius（用户主动触发） | 企业环境建议在镜像中关闭 telemetry 与版本检查（18.14 Q9）；`/bug` 属于用户主动行为，与“允许公网”的出口策略一致 |
+| `cacheWarming` | 默认 `"streaming"`（仅运行期间）；`"idle"` 需用户显式设置 | `"idle"` 会在空闲时发模型请求；不影响空闲判定（CPU 极低、不经 Gateway），会产生模型费用，由预算约束 |
+| 内置 MiMo 目录 | 0.85.1：`mimo-v2.5`、`mimo-v2.5-pro`、`mimo-v2.5-pro-ultraspeed`；1.1.0 另有 `mimo-v2.6-flash`、`mimo-v2.6-pro`、`mimo-v2.6-pro-ultraspeed`；均为 `openai-completions`、`https://api.xiaomimimo.com/v1`、上下文 1 048 576、输出 131 072；compat `thinkingFormat: "deepseek"`、`requiresReasoningContentOnAssistantMessages: true`，1.1.0 另有 `supportsStrictMode: true` | 平台目录独立于 Pi 内置目录（16.5）；但升级期间新旧镜像共用同一目录，目录中的 compat 必须两个 Pi 版本都接受（18.7） |
+
+**平台现状：镜像与容器**（代码，`master` @ `ac7c4e5`）：
+
+- Worker 只有一个 `RUNTIME_IMAGE`（默认 `agent-runtime:phase7-toolchain`）；`RUNTIME_VERSION` 是独立的环境变量（默认
+  `phase-7`），不从镜像读取。`#assertRuntimeImage` 要求命令中的镜像与之完全相同；Workspace 元数据 `metadata.json`
+  在首次创建时记录 `runtimeImage`（镜像引用字符串），容器身份校验比较 `Config.Image` 与它，**不校验镜像内容（ID）**。
+- capability 探针每次 hello 前对这一个镜像运行；hello 只上报一组 `runtimeImage`、`runtimeVersion`、`capabilities`。
+- Control Plane：新 Workspace 使用 `DEFAULT_RUNTIME_IMAGE` 写入 `workspaces.runtime_image`；Scheduler 要求 Worker 的
+  `runtime_image` 与之完全相同；生命周期命令结果校验 `runtimeImage`。
+- **Phase 15 起容器本身不保存任何状态**：只读根、四个 bind mount（`/workspace`、`/home/agent`、`/tmp`、`/agent/pi`）
+  与 tmpfs，配额按目录。删除容器后由下一次 `workspace.ensure` 按当前配置重建，Phase 15 的
+  `tools/dev/migrate-legacy-workspace.sh` 即依赖这一点。因此“升级镜像”= 停止状态下删除并用新镜像重建容器，持久目录、
+  网络、配额都不变。
+- Docker 29 使用 containerd 镜像存储，本地构建的镜像也有 `RepoDigests`（`agent-runtime@sha256:fec0e049…`，与镜像 ID
+  相同），可以按 digest 引用和校验。开发库中两个 Workspace（均在 worker-a）、两个 Worker（worker-a、worker-c）都使用
+  `agent-runtime:phase7-toolchain`（`sha256:fec0e049…`），容器的镜像 ID 与当前 tag 一致。
+- **遗留探针容器**：本机有一个 2026-10-05 创建、已退出的 `agent-runtime-capability-probe-<uuid>`。探针在 `finally` 中
+  删除容器，Worker 进程在探针期间被终止（如 `tsx watch` 重启）时会漏删；探针容器没有任何标签，reconcile 看不到它。
+  多镜像探针会放大这个问题（18.4）。
+
+**空闲判定可用的数据**：
+
+| 条件（D6） | 现有数据 | 缺口 |
+|---|---|---|
+| 1. 无用户连接 | `SessionConnectionRegistry`（Control Plane 进程内）登记每个经 Gateway 的 HTTP 请求、SSE 与 WebSocket，键为 `userId`/`sessionId` | 不记录 `workspaceId`，无法按 Workspace 计数 |
+| 2. 无用户访问 | `workspaces.last_activity_at` 只在 start/stop 状态转换时更新（等于“本次运行开始时间”） | 没有 Gateway 访问时间 |
+| 3. 无计算活动 | Phase 17 心跳（10 s）上报每个运行中容器的累计 `cpuUsageNanos` 与两次采样间的 `cpuCores`；`UsageRegistry` 只在内存中保留**每个 Worker 最新一份**样本 | 没有窗口统计；Control Plane 重启后无历史 |
+
+实测（本机两个运行中、无人使用的 Workspace，`docker stats` 三次采样）：CPU 0.00%～0.03%（含每 5 s 一次的容器
+healthcheck），即约 0.0003 核；Workspace 上限 2 核。
+
+**Worker 吊销现状**（G11 属实，并发现同类问题）：
+
+- `enabled` 只能直接改数据库，没有命令或 API。改为 `false` 后：Worker 的下一条消息被拒绝（1008 关闭），重连在 HTTP
+  升级阶段 401；Gateway 路由查询要求 `enabled`，打开 Workspace 已 fail-closed。但周期任务 `markWorkersOffline` 只处理
+  `enabled` 的 Worker，**该 Worker 的行保持 `ONLINE`、其 Workspace 保持 `RUNNING`**，直到 Control Plane 重启时
+  `markAllWorkersOfflineForRecovery` 才改为 `DISABLED` / `WORKER_OFFLINE`。
+- `worker:rotate`（`rotateWorkerCredential`）把 Worker 改为 `OFFLINE`/`DISABLED`，同样**不**把其 Workspace 置为
+  `WORKER_OFFLINE`；Worker 用新 token 重连后才经 reconcile 修正。
+- 被吊销 Worker 的宿主机上，Worker 进程与容器仍在运行（平台无法再下发命令）；中继仍持有这些 Workspace 的虚拟 key，
+  **Agent 仍能经中继使用平台模型并产生费用**（16.6 中“Worker 离线时其 Workspace 不可能运行中继流量”对吊销与网络分区
+  都不成立）。
+- `workspaces.worker_id` 是唯一引用 `workers` 的外键（`ON DELETE RESTRICT`）；Audit 的 `worker_id` 是普通列。开发库中
+  worker-b 的行已不存在且没有对应 Audit（推断为手工 SQL 删除），说明需要一个受约束的删除命令。
+
+### 18.2 范围与非目标
+
+范围：
+
+- **Runtime 镜像升级与回滚**：Worker 同时提供多个受支持镜像（按 digest pin）；Workspace 在停止状态下切换镜像（删除并
+  重建容器，持久目录不变），失败可重试或回滚；Owner 与 admin 可操作，Portal 显示版本与可用操作（18.4）。
+- **新 Runtime 镜像**：pi-web / Pi 升级（目标见 18.3、Q1），重写 default-cwd patch，修复只读安装下 preview 密钥不轮换
+  的问题，镜像标签记录 pi-web / Pi 版本；作为首次真实升级演练，在真实容器中验证 Files、Terminal、Session 恢复、持久化、
+  MCP 与 project-trust（18.3、18.12）。
+- **空闲回收**（D6）：默认关闭；三项条件全部满足并持续 N 小时才 `stop`，只停不删（18.5）。
+- **Worker 吊销一致性**：修复 `enabled=false` 与凭据轮换后的状态不一致；`worker:disable` / `worker:enable` 命令，吊销时
+  同时吊销该 Worker 上 Workspace 的模型凭据（18.6）。
+- **Xiaomi MiMo** 接入平台模型目录（16.17、18.7）。
+- 小项：capability 探针容器加标签并在 Worker 启动时清理遗留；Gateway 剥离 Next.js 内部请求头（18.10）。
+- Worker protocol v6、migration `0013_lifecycle`、Portal、Audit、指标与告警的相应扩展（18.8、18.9）。
+
+非目标（v1.0 不做）：
+
+- 平台内备份、快照；升级前自动复制 `/agent/pi` 作为回滚点（D5，18.14 Q6）。
+- 跨 Worker 迁移、镜像升级时改变 Worker 分配；运行中热升级（升级必须先停止）。
+- 批量升级 / 定时升级 / 强制升级、按用户或 Workspace 选择任意镜像版本；镜像仓库与分发（Phase 19 再定生产镜像来源）。
+- 空闲回收的“删除”、按 Workspace 的豁免或不同时长、空闲前通知用户（18.14 Q4）。
+- Portal 上的 Worker 吊销/删除按钮（只提供运维命令，18.14 Q7）。
+- 修改 Pi 的 telemetry 之外的任何默认行为（project-trust 默认值、MCP 开关、codemode 等保持上游默认）。
+- AMD64 镜像证据（沿用 D2：CI 原生 runner 构建通过即可，不宣称额外支持）。
+
+建议实现顺序（每步可独立测试）：① Worker 吊销与命令（18.6）→ ② 多镜像与升级/回滚机制，用现有镜像加一个仅改标签的
+测试镜像验证（18.4）→ ③ 新镜像与升级演练（18.3、18.12）→ ④ MiMo（18.7）→ ⑤ 空闲回收（18.5）。
+
+### 18.3 目标版本与新 Runtime 镜像
+
+**目标版本**（18.14 Q1）：建议 **pi-web 0.12.x 的最新补丁版本 + 其精确依赖的 Pi（当前为 1.1.0）**，开工 spike（18.12）
+时锁定具体版本并记录；不选 0.10.0（不含 0.11.0 的安全修复，Pi 1.0.0 不含 1.0.1～1.0.4 的修复）。镜像中全局 `pi` CLI
+的版本由 Dockerfile 从 pi-web 的 `package.json` 依赖中读取并校验，不单独指定，二者不一致时构建失败。
+
+**镜像**：
+
+- 引用 `agent-runtime:phase18-pi<Pi 主次版本>`（例如 `agent-runtime:phase18-pi1.1`），`io.agent-runtime.runtime.version`
+  标签 `phase-18`；新增标签 `io.agent-runtime.pi-web.version`、`io.agent-runtime.pi.version`（Worker 上报、Portal 显示）。
+  Node、Rust、uv、pnpm、Playwright 及系统包不变（本 Phase 只升级 pi-web / Pi，减少同时变化的因素）。
+- **同一 tag 不重新构建**：任何内容变化都使用新的 tag 与 runtime version；Worker 按 digest pin（18.4），重建同名 tag 会
+  使该镜像不被提供（fail-closed），runbook 写明。
+- **default-cwd patch**：`runtime/patches/pi-web-<版本>-default-cwd.mjs`，与 0.9.0 版相同的约束——只接受 pin 的 pi-web
+  版本，按精确片段（`h().join(b,"pi-cwd",…)` 所在的 IIFE）替换且必须恰好一次，改为
+  `process.env.PI_WEB_DEFAULT_CWD?.trim() || <上游表达式>`；未设置时保留上游行为。若 S1 证明没有 Session 时 `/workspace`
+  不是 Files 根，patch 在该路由中一并调用上游的根目录登记函数（同样以精确片段校验）。0.9.0 的 patch 文件随旧 Dockerfile
+  留在 git 历史中（旧镜像可从 `v1.0.0-alpha.5` 重建）。
+- **preview 密钥**：构建时把 `.next/prerender-manifest.json` 移为只读模板，原位置改为指向 `/var/tmp/pi-web/` 下文件的
+  符号链接（`/var/tmp` 是 Phase 15 的 tmpfs，容器每次启动为空）；镜像的启动脚本在 `exec pi-web` 前从模板生成该文件，
+  使 pi-web 自己的轮换逻辑能在其中写入随机密钥（如上游的临时文件写在 `.next/` 目录内而失败，则由启动脚本生成随机值，
+  并以 pinned 版本 + 精确片段的方式让上游跳过该步骤；具体方式由 S1 确定）。要求：每次容器启动密钥不同；启动日志中没有
+  “could not rotate pi-web's preview-mode secrets”警告；携带公开 `previewModeId` 的请求不能绕过 pi-web 的 Host 校验。
+- **环境**（镜像 `ENV`，不改变 Worker 下发的容器 Env，因此不触发容器配置校验差异）：保持现有各项；按 Q9 增加
+  `PI_TELEMETRY=0`、`PI_SKIP_VERSION_CHECK=1`。
+- `runtime/scripts/verify-image.sh`、capability 探针、`runtime-toolchain.yml` 对新镜像不变；验证脚本增加 pi-web/Pi 版本与
+  标签一致、default-cwd patch 生效、preview 密钥可轮换三项检查。
+
+### 18.4 Runtime 镜像升级与回滚
+
+**Worker 配置**：
+
+- `RUNTIME_IMAGES`：逗号分隔的 1～4 项，每项为 `<引用>@sha256:<digest>`（例如
+  `agent-runtime:phase7-toolchain@sha256:fec0e049…,agent-runtime:phase18-pi1.1@sha256:…`）。替代 `RUNTIME_IMAGE` 与
+  `RUNTIME_VERSION`：二者在过渡期仍可单独使用（单项、未 pin、版本取自环境变量，启动时记 `warn`），与
+  `RUNTIME_IMAGES` 同时设置时拒绝启动。
+- Worker 启动与每次 hello 前对每项 `docker image inspect <引用>`：镜像 ID 必须等于 pin 的 digest，平台必须是
+  `linux/<本机架构>`，必须有 `io.agent-runtime.runtime.version` 标签，且各项的引用与版本互不相同；不满足的项**不提供**
+  （不上报、不能用于创建或升级），记 `error`。全部不满足时不发送 hello（与现有探针失败行为一致）。
+- capability 探针对每个提供的镜像分别运行（串行，每个最多 `RUNTIME_CAPABILITY_PROBE_TIMEOUT_MS`）；探针容器带标签
+  `io.agent-runtime.probe=<workerId>`，Worker 启动时删除带该标签的已退出探针容器（无标签的历史遗留由 runbook 给出手工
+  删除命令）。
+
+**Workspace 元数据与容器校验**：
+
+- `metadata.json` 增加 `runtimeImageId`（创建容器时的镜像 ID）与 `previousRuntimeImage`。已有 Workspace 在首次
+  ensure/inspect 时从现有容器的 `.Image` 回填 `runtimeImageId`（trust-on-first-use，记 `info`）。
+- 容器身份校验增加 `inspection.Image === metadata.runtimeImageId`。命令中的镜像必须属于 Worker 当前提供的集合（替代
+  `#assertRuntimeImage` 的单值比较）。已存在的容器即使其镜像引用后来被重新打 tag，也继续使用自己的镜像层运行；只有新建
+  容器时才使用 pin 的 digest。
+- Workspace 的镜像不在 Worker 当前提供的集合中时（例如管理员过早移除旧镜像），ensure/start/runtime.set 返回
+  `RUNTIME_IMAGE_UNAVAILABLE`；inspect/stop/delete 不受影响（与现有 legacy 处理一致：可停止、可删除，不能启动）。
+
+**升级 / 回滚是同一个操作**：把一个**已停止**的 Workspace 的容器换成另一个受支持镜像。“升级”的目标是平台默认镜像
+（`DEFAULT_RUNTIME_IMAGE`），“回滚”的目标是 `previous_runtime_image`；admin 可选择该 Worker 提供的任一镜像（Q3）。
+
+Control Plane 流程（`changeWorkspaceRuntime`）：
+
+1. 校验：调用者是 Owner 或 admin；Workspace `STOPPED` 且 `desired_state = STOPPED`；目标 ≠ 当前；Worker 已连接、`ONLINE`、
+   提供目标镜像且该镜像的 capability 满足 Workspace 的 `required_capabilities`。不满足返回 409/503 与稳定错误码，不改变任何状态。
+2. 在一个事务中（条件更新 `where state = 'STOPPED' and runtime_image = <当前>`）：`state = 'UPGRADING'`、
+   `runtime_image = <目标>`、`previous_runtime_image = <当前>`，Audit `workspace.runtime_change_requested`
+   （from、to、direction=`upgrade`/`rollback`/`admin`）。持久化 intent 先于命令（与 Phase 6 的 desired state 一致）。
+3. 发送 `workspace.runtime.set { workspaceId, fromImage, toImage }`（超时沿用 `WORKER_COMMAND_TIMEOUT_MS`）。
+4. 结果：
+
+| 结果 | 平台状态 |
+|---|---|
+| 成功（Worker 报告 `STOPPED`、镜像 = 目标） | `STOPPED`；`runtime_changed_at = now()`；Audit `workspace.runtime_changed`；模型 key 不变（16.6，Workspace 未删除） |
+| Worker 返回“未做任何修改”类错误（`RUNTIME_IMAGE_UNAVAILABLE`、`WORKSPACE_RUNNING`、`STORAGE_MIGRATION_REQUIRED`、`WORKSPACE_METADATA_MISMATCH`） | 条件回退：`runtime_image = <原值>`、`previous_runtime_image` 恢复、`STOPPED`；返回错误码 |
+| 超时、断线、`RUNTIME_ENGINE_ERROR` 等结果不确定的情况 | `ERROR`，`runtime_image` 保持为目标（intent）；Portal 显示“Runtime 切换未完成”，提供“重试”（同一目标）与“回滚”（目标为 `previous_runtime_image`），二者都是同一个幂等命令 |
+
+5. Worker 在命令执行中断线：Workspace 随 Worker 进入 `WORKER_OFFLINE`（`UPGRADING` 加入 offline 处理的状态列表）；
+   重连 reconcile 时，容器存在、已停止且镜像与 `runtime_image` 一致 → `STOPPED`；否则按现有规则进入 `ERROR`，同样可重试或回滚。
+
+Worker 命令 `workspace.runtime.set`（幂等，任何一步都不接受用户输入的路径或容器 ID）：
+
+1. 校验 `toImage` 在提供集合中；`metadata.runtimeImage ∈ {fromImage, toImage}`，否则 `WORKSPACE_METADATA_MISMATCH`；
+   若容器存在：必须是本 Worker 的受管容器（label、名称、安全基线，与现有身份校验相同）、当前 generation（legacy 返回
+   `STORAGE_MIGRATION_REQUIRED`）、**未运行**（否则 `WORKSPACE_RUNNING`）。以上失败都保证未做修改。
+2. 若容器存在、镜像 ID = 目标 pin 且元数据已是目标：直接返回成功（重试场景）。
+3. 原子写元数据（同目录临时文件 `O_CREAT|O_EXCL|O_NOFOLLOW`、`fsync`、`rename`）：`runtimeImage = toImage`、
+   `runtimeImageId = <目标 digest>`、`previousRuntimeImage = fromImage`。
+4. 删除旧容器（`force: false`、`v: false`；容器只读根，无数据丢失）。
+5. 用与 `workspace.ensure` **同一个创建函数**创建新容器（相同 mounts、网络、资源、安全基线、Env），并做与新建容器相同的
+   完整配置校验；不启动。持久目录、网络、配额、`models.json` 都不触碰（下一次 start 前的 ensure 照常写入平台 provider）。
+6. 返回 `STOPPED` 观察结果（含 `runtimeImage`）。
+
+崩溃安全：3 之后、5 之前中断时元数据已是目标而容器缺失或仍是旧镜像，重试从 2/4 继续；任一时刻都不存在“新镜像容器 +
+旧元数据”的组合。
+
+**回滚的含义**（以 S2 结果为准，写入 runbook）：回滚保证 Runtime（镜像、容器配置）回到之前的版本，平台不修改任何持久
+数据。新版本 Pi/pi-web 写入 `/agent/pi` 的数据（新 Session 条目类型、`pi-web-session-state.json` 等）能否被旧版本完整读取
+取决于上游兼容性：S2 在真实容器中验证“新版本中继续过的 Session 回滚后能否列出与打开”，结论分三档记录——完全可用 /
+可用但新条目不显示 / 不可用（不可用时 runbook 规定只在升级后尚未使用时回滚）。
+
+**镜像下线**：从某 Worker 的 `RUNTIME_IMAGES` 移除旧镜像前，Admin Workers 中该镜像的 Workspace 计数必须为 0（Worker
+上报的镜像列表与 Control Plane 统计并列显示）。`DEFAULT_RUNTIME_IMAGE` 只能在**所有**可调度 Worker 都提供该镜像后切换
+（否则新 Workspace 无法调度；Admin 页面提示哪些 Worker 缺少默认镜像）。
+
+### 18.5 空闲回收（D6）
+
+**配置**（Control Plane；Q2）：
+
+- `IDLE_STOP_AFTER_HOURS`：未设置 = 关闭（默认）；整数 1～720，建议 24。
+- `IDLE_CPU_THRESHOLD_CORES`：默认 `0.05`（2 核上限的 2.5%；实测空闲基线约 0.0003 核）；范围 0.01～1。
+- 不是安全开关：关闭只意味着不自动停止。
+
+**判定**：Workspace 满足以下全部条件时才被认为空闲（截止时间 `cutoff = now − N`）：
+
+0. 资格：`state = RUNNING`、`desired_state = RUNNING`；本次运行开始（`last_activity_at`）早于 `cutoff`；Worker
+   `ONLINE` 且已连接；距 Control Plane 本次启动已超过 N（重启后没有连接与 CPU 历史，窗口重新计时）。
+1. **无用户连接**：`SessionConnectionRegistry` 增加 `workspaceId`，该 Workspace 当前登记的 HTTP 请求、SSE 与 WebSocket
+   数为 0。
+2. **无用户访问**：最后一次 Gateway 访问早于 `cutoff`。新增 `workspaces.last_access_at`：Gateway 在每个已授权的 HTTP 请求
+   与 WebSocket 升级时更新进程内时间，连接结束时也更新（窗口从最后一个连接关闭时开始计）；写库按 Workspace 节流为每 60 s
+   最多一次，连接结束时立即写。判定取进程内值与库中值的较大者。
+3. **无计算活动**：Control Plane 在处理心跳用量（Phase 17）时按 Workspace 维护**5 分钟桶**：桶内平均 CPU =
+   Δ`cpuUsageNanos` / Δ时间；平均 ≥ 阈值即记“最近计算活动时间”。**未知视为活动**：样本缺失、相邻样本间隔 > 60 s、累计值
+   回退（容器重启）、Worker 断开，都把最近计算活动时间设为当时。该状态只在内存中，Control Plane 重启后从零开始（与条件 0
+   一致）。要求最近计算活动时间早于 `cutoff`。
+
+用 5 分钟平均而不是单个 10 s 样本：短暂的 `git status`、pi-web 内部定时器不应重置一天的窗口，而持续的构建、服务或 Agent
+任务（哪怕单核 5%）都会被识别。
+
+**执行**：周期任务每 5 分钟运行一次（仅在启用时）：
+
+1. 数据库按条件 0 与 2 的库中部分选出候选（每轮最多 50 个，最久未访问优先），内存中逐个检查条件 1、2（进程内值）、3。
+2. 对仍满足的 Workspace，复用与用户 stop 相同的服务函数（从 `routes/workspaces.ts` 抽出 `stopWorkspace`），actor 为
+   `system`；开始事务的条件更新额外要求 `coalesce(last_access_at, '-infinity') <= cutoff`，与并发访问竞争时以访问为准。
+   每轮最多停止 10 个，串行执行。
+3. 成功后 `last_stop_reason = 'idle'`（start 时清空）；Audit `workspace.idle_stopped`（owner、idleAfterHours、lastAccessAt、
+   cpuThresholdCores），现有触发器照常记录 `stopping/stopped`。模型 key 保留（16.6）。
+4. 停止过程中到达的访问得到与用户手动停止时相同的结果（Workspace 未运行）；用户可随时再次启动。
+
+不触碰：`STOPPED`、`ERROR`、`WORKER_OFFLINE`、`UPGRADING` 等其他状态；不删除任何数据；不改变 Worker 分配（capacity 不释放，
+第 41 节）。
+
+**Portal**：启用时 Workspace 卡片显示“空闲 N 小时后自动停止”；被空闲停止的卡片显示“因空闲于 <时间> 自动停止，数据完整
+保留”。Admin Workspaces 增加“最近访问”列；Admin Workers 页首显示空闲回收策略（关闭 / N 小时、CPU 阈值）。
+
+### 18.6 Worker 吊销一致性与运维命令
+
+**修复**：
+
+- `markWorkersOffline`（每 `WORKER_STATUS_SWEEP_MS`）增加：`enabled = false and status <> 'DISABLED'` 的 Worker 改为
+  `DISABLED`，其 Workspace（`STARTING`、`RUNNING`、`STOPPING`、`STOPPED`、`ERROR`、`UPGRADING`）置为 `WORKER_OFFLINE`。
+  覆盖直接改库等任何路径。
+- `rotateWorkerCredential` 在同一事务中把其 Workspace 置为 `WORKER_OFFLINE`。
+- 同一周期任务关闭“数据库中已不是 `enabled` 且 `ONLINE`”的 Worker 的控制通道（1008），清除其用量，并经连接注册表关闭指向
+  其 Workspace 的 Gateway HTTP/SSE/WebSocket（与 Phase 9 的撤销断开同一机制）。命令行在独立进程中执行，因此以数据库为准、
+  ≤ 5 s 内生效。
+
+**命令**（`apps/control-plane/src/provision-worker.ts` 增加动作，与 `worker:rotate` 相同的调用方式与输出风格）：
+
+- `WORKER_ID=<id> pnpm worker:disable`：一个事务内锁定 Worker 行 → `enabled = false`、`status = 'DISABLED'` → 其 Workspace
+  置 `WORKER_OFFLINE` → 这些 Workspace 的 `issuing`/`active` 模型 key 置 `revoking`（新原因 `worker_disabled`，由 16.6 的后台
+  循环在网关删除，网关确认前保持 `revoking`）→ Audit `worker.disabled`（details：source=`cli`、workspaces、modelKeys）。幂等；
+  输出受影响 Workspace 数、待吊销 key 数，并提示“宿主机上的 Worker 进程与容器仍在运行，如需停止请在该主机上操作”及命令。
+- `WORKER_ID=<id> pnpm worker:enable`（Q7）：同时**轮换凭据**（输出新 `WORKER_TOKEN`），`enabled = true`、`status = 'OFFLINE'`，
+  Audit `worker.enabled`。Worker 以新 token 连接后经现有 reconcile 恢复其 Workspace（sticky，不迁移）；模型 key 由后台循环
+  按 16.6 重新签发。
+- `WORKER_ID=<id> pnpm worker:delete`（待决，Q8，建议纳入）：要求 `enabled = false` 且没有任何 Workspace 引用（外键已保证，
+  命令先给出可读的错误）；删除 Worker 行，Audit `worker.deleted`（Audit 无外键，历史保留）；提示从
+  `WORKER_GATEWAY_TOKENS_JSON` 中移除该 Worker。不删除 Worker 宿主机上的任何数据。
+
+吊销后宿主机上的情况（runbook 写明）：容器继续运行、Agent 任务不受影响，但用户无法经 Gateway 访问，模型 key 在网关删除后
+立即 401；Worker 持续以 401 重连。被吊销 Worker 上的 Workspace 无法删除（Worker 不能确认删除，第 6 节），需要重新启用该
+Worker，或在接受数据留在该主机的前提下保留其记录。
+
+### 18.7 Xiaomi MiMo 接入
+
+- `deploy/model-gateway/config.yaml`：MiMo 模型走 `litellm_proxy/` + `api_base: https://api.xiaomimimo.com/v1`、
+  `api_key: os.environ/XIAOMI_API_KEY`（16.17 已验证此路由原样转发 `thinking`、`reasoning_effort` 与 `reasoning_content`），
+  `model_info` 写明单价。**模型集合（Q5 已确认）：`mimo-v2.6-flash`、`mimo-v2.6-pro`**。不纳入 v2.5：小米官方定价页
+  （2026-10-12 查阅）说明 `mimo-v2.5`、`mimo-v2.5-pro` 自 2026-10-14 18:00（UTC+8）起自动转发到 V2.6 系列，2026-10-21 10:00
+  下线，原模型名失效。`mimo-v2.6-pro-ultraspeed` 单价为 pro 的 10 倍，默认不纳入，需要时由管理员在网关配置与目录中追加。
+- **单价**（官方“海外定价”，美元 / 百万 token，实时推理；与网关预算的 USD 口径一致，不做汇率折算；国内人民币价为
+  flash ¥0.02 / ¥1.00 / ¥2.00、pro ¥0.025 / ¥3.00 / ¥6.00，按约 6.9 的比例对应）：
+
+  | 模型 | 输入（命中缓存） | 输入（未命中） | 输出 |
+  |---|---|---|---|
+  | `mimo-v2.6-flash` | 0.0028 | 0.14 | 0.28 |
+  | `mimo-v2.6-pro` | 0.0036 | 0.435 | 0.87 |
+
+  写入 `model_info` 时换算为每 token（例如 flash：`input_cost_per_token: 1.4e-07`、`output_cost_per_token: 2.8e-07`、
+  `cache_read_input_token_cost: 2.8e-09`）。页面没有按上下文长度分档。价格变化时只改网关配置，runbook 写明核对来源。
+- **平台目录与镜像无关**：MiMo 经平台 provider 提供，`phase7-toolchain`（Pi 0.85.1，其内置目录只有 v2.5）中的 Workspace
+  同样可用。用户自己在 `auth.json` 中配置 `xiaomi` key、使用 Pi 内置 `mimo-v2.5*` 的，10-21 后会失败（开发环境中有一个
+  Workspace 属于此类）：改用平台模型，或升级镜像后改选内置的 v2.6 模型。
+- `catalog.example.json`：MiMo 条目的 `thinkingLevelMap` 把 `minimal`、`xhigh`、`max` 设为 `null`（只接受 low/medium/high，
+  16.17）；compat 显式写全（平台 provider 的 baseUrl 是中继，Pi 不会按域名推断，16.16）：`thinkingFormat: "deepseek"`、
+  `requiresReasoningContentOnAssistantMessages: true`，以及 S3 中用 mock 上游确认的 `supportsStore`、`supportsDeveloperRole`、
+  `maxTokensField`。`supportsStrictMode` 只有 Pi 1.x 认识，只有在 Pi 0.85.1 接受未知 compat 字段时才写入。
+- **新旧镜像共用一个目录**：测试把目录渲染成 `models.json`，分别在 `phase7-toolchain`（Pi 0.85.1）与新镜像（Pi 1.1.x）中
+  无网络运行 `pi --list-models`，两者都必须列出全部平台模型，任一失败即目录不合格。
+- 不修改中继、虚拟 key、计量逻辑；预算按 LiteLLM 的单价计算。
+
+### 18.8 Control Plane：数据模型、配置、API、Portal、Audit、指标
+
+migration `0013_lifecycle`：
+
+```text
+workspaces
+  state check                + 'UPGRADING'
+  + last_access_at           timestamptz null      -- Gateway 最后访问（18.5，节流写入）
+  + last_stop_reason         text null check (last_stop_reason in ('idle'))   -- start 时清空
+  + previous_runtime_image   text null             -- 回滚目标
+  + runtime_changed_at       timestamptz null
+
+workers
+  + runtime_images           jsonb not null default '[]'
+      -- [{ image, imageId, runtimeVersion, piWebVersion, piVersion, capabilities }]，hello 时整体替换
+  runtime_image / runtime_version / capabilities   -- 保留列，写入第一个镜像的值，兼容现有 Audit 触发器与旧查询，
+                                                   -- 调度改读 runtime_images
+
+model_keys
+  revoke_reason check        + 'worker_disabled'
+
+Audit 触发器：UPGRADING → workspace.runtime_upgrading；worker.runtime_reported 在 runtime_images 变化时记录
+（details 为各镜像的 image 与 runtimeVersion）
+```
+
+配置（Control Plane）：`IDLE_STOP_AFTER_HOURS`、`IDLE_CPU_THRESHOLD_CORES`（18.5）；`DEFAULT_RUNTIME_IMAGE` 含义不变（新
+Workspace 与“升级”的目标）。
+
+Scheduler：候选 Worker 的 `runtime_images` 中必须有 Workspace 的 `runtime_image`，且**该镜像**的 capability 满足要求（替代
+Worker 级 `runtime_image` 与 `capabilities` 比较）。
+
+API：
+
+- `GET /api/workspaces`、`GET /api/workspaces/:id`、`GET /api/admin/workspaces` 增加
+  `runtime: { image, runtimeVersion, piWebVersion, piVersion, previousImage, upgradeAvailable, rollbackAvailable }`
+  （版本取自所在 Worker 的上报；`upgradeAvailable` = 当前 ≠ 默认且 Worker 提供默认镜像；`rollbackAvailable` = 有
+  `previousImage` 且 Worker 提供）与 `idle: { stopAfterHours: number | null, lastAccessAt, stoppedForIdle }`。
+- `POST /api/workspaces/:id/runtime/upgrade`、`POST /api/workspaces/:id/runtime/rollback`：Owner（及 admin，Q3）；无请求体，
+  目标由平台决定，用户不能指定镜像。
+- `POST /api/admin/workspaces/:id/runtime`：`{ image }`，只接受该 Worker 提供的镜像（Q3）。
+- 错误码：`WORKSPACE_NOT_STOPPED`、`RUNTIME_ALREADY_CURRENT`、`RUNTIME_IMAGE_UNAVAILABLE`、`RUNTIME_NO_PREVIOUS`、
+  `WORKER_UNAVAILABLE`、`RUNTIME_CHANGE_INCOMPLETE`。
+- `GET /api/admin/workers`：增加 `runtimeImages: [{ image, runtimeVersion, piWebVersion, piVersion, capabilities,
+  workspaces }]`（`workspaces` 为该 Worker 上使用该镜像的 Workspace 数），以及 `defaultImageAvailable`。
+- `GET /api/admin/lifecycle`：`{ idle: { enabled, stopAfterHours, cpuThresholdCores }, defaultRuntimeImage }`。
+- 全部写操作沿用 Origin、CSRF；普通用户只能操作自己的 Workspace，跨用户一律 404。
+
+Portal：
+
+- Workspace 卡片：“Runtime phase-7（pi-web 0.9.0 · Pi 0.85.1）”；停止状态且可升级时显示“升级到 <版本>”，有上一版本时
+  “更多”菜单中提供“回滚到 <版本>”；确认对话框说明“将重建容器，文件与会话保留；升级期间不能启动”。`UPGRADING` 显示
+  “Runtime 切换中”并轮询；`ERROR` 且原因为切换未完成时显示“重试 / 回滚”。空闲相关显示见 18.5。
+- Admin Workspaces：Runtime 版本列与筛选、“最近访问”列、admin 的 Runtime 切换（Q3）。
+- Admin Workers：每个 Worker 的镜像列表（版本、pi-web/Pi 版本、capability、使用中的 Workspace 数）；默认镜像缺失提示；空闲
+  回收策略。
+- 中文错误说明覆盖上述错误码。
+
+Audit：`workspace.runtime_change_requested`、`workspace.runtime_changed`、`workspace.runtime_upgrading`（触发器）、
+`workspace.idle_stopped`、`worker.disabled`（CLI 写 details）、`worker.enabled`、`worker.deleted`（若纳入）、
+`model.key_revoke_requested`（原因 `worker_disabled`）。details 不含路径、镜像内容或任何凭据。
+
+指标（扩展 Phase 17，标签规则不变）：
+
+| 指标 | 类型 | 标签 |
+|---|---|---|
+| `agent_runtime_workspaces_by_runtime` | gauge | `runtime_image`（受支持镜像，个位数） |
+| `agent_runtime_worker_runtime_image_info` | gauge（恒为 1） | `worker_id`、`runtime_image`、`runtime_version` |
+| `agent_runtime_runtime_changes_total` | counter | `direction`=`upgrade`/`rollback`/`admin`、`result`=`ok`/`reverted`/`incomplete` |
+| `agent_runtime_idle_policy_enabled` | gauge | — |
+| `agent_runtime_idle_stops_total` | counter | `result`=`stopped`/`skipped_race`/`failed` |
+
+告警：`AgentRuntimeWorkspacesStuckTransitional` 的状态集合加入 `UPGRADING`；新增
+`AgentRuntimeDefaultRuntimeImageMissing`（可调度且在线的 Worker 不提供默认镜像，15m，warning）。`promtool` 测试同步扩展。
+
+### 18.9 Worker Protocol v6
+
+`WORKER_PROTOCOL_VERSION` 升到 `6`，与 v5 不兼容（同时升级，同 14.11 Q5、15.12 Q9、16.14、17.13 Q12）：
+
+- `worker.hello`：以 `runtimeImages: [{ image, imageId, runtimeVersion, piWebVersion: string | null, piVersion: string | null,
+  capabilities }]`（1～4 项，`image`、`runtimeVersion` 各自唯一）替代 `runtimeImage`、`runtimeVersion`、`capabilities`。
+- `WorkspaceState` 增加 `UPGRADING`（只由 Control Plane 写入；Worker 观察结果中出现即视为协议错误）。
+- 新命令 `workspace.runtime.set`：`{ workspaceId, fromImage, toImage }` → 观察结果（`state: "STOPPED"`、`runtimeImage`）。
+  新错误码：`RUNTIME_IMAGE_UNAVAILABLE`、`WORKSPACE_RUNNING`（均不可重试，保证未修改）；沿用 `STORAGE_MIGRATION_REQUIRED`、
+  `WORKSPACE_METADATA_MISMATCH`（未修改）与 `RUNTIME_ENGINE_ERROR`（可重试，可能部分完成）。
+- `workspace.ensure` / `start` / reconcile assignment 中的 `runtimeImage` 必须属于 Worker 当前提供的集合。
+- 心跳、用量、中继字段不变。
+
+### 18.10 安全边界与 fail-closed
+
+- **升级不扩大任何权限**：新容器由与 ensure 相同的函数创建并经完整配置校验（非特权、cap-drop ALL、no-new-privileges、
+  只读根、四个受管 bind mount、loopback 端口、每 Workspace bridge、资源与配额）；`workspace.runtime.set` 只接受 Workspace ID
+  与 Worker 自己配置的镜像引用，不接受路径、容器 ID 或任意镜像；只操作带正确 managed label 的已停止容器。
+- **镜像内容可校验**：每个提供的镜像按 digest pin；tag 被重新指向其他内容时该镜像不被提供；容器的镜像 ID 与元数据不符视为
+  配置不符。用户只能在“平台默认”与“上一版本”之间切换。
+- **持久数据**：升级与回滚不读取、复制、改写 `/workspace`、`/home/agent`、`/agent/pi`；`/tmp` 照常在下次启动前清空（与
+  Phase 15 一致）。
+- **空闲回收只停不删**，三项条件“未知即活动”：没有样本、样本间断、Worker 断开、Control Plane 刚重启，都不会让 Workspace
+  被判空闲；条件更新与访问竞争时以访问为准；单轮数量有上限。浏览器断开本身不会触发停止（第 40 节），只有在 N 小时内既无
+  连接、无访问、又无计算活动时才停止。
+- **Worker 吊销**：Gateway 与控制通道在 ≤ 5 s 内 fail-closed；模型 key 以网关删除为准（16.6 的 fail-closed 规则不变），吊销
+  完成前 Admin 显示待吊销；平台不尝试远程停止已失去信任的主机上的容器。
+- **pi-web 内部请求头**：`packages/gateway` 的请求头清洗增加 `x-prerender-revalidate`、`x-prerender-revalidate-if-generated`、
+  `x-middleware-subrequest`、`x-middleware-invoke` 与 `x-invoke-*`（Next.js 内部用途，浏览器正常请求不会发送；App Router
+  需要的 `rsc`、`next-router-*`、`next-action`、`next-url` 不受影响）。与镜像侧的密钥轮换构成两层防护。
+- **新 pi-web / Pi 功能**：MCP server、codemode、`/bug` 上传、provider 余额查询都在容器内以用户自己的权限与网络策略运行，
+  不改变平台边界；平台不启用 pi-web 密码（第 7 节）。
+- 日志：新字段只有 workspaceId、workerId、镜像引用与版本、枚举结果；不记录 Session 内容或路径。
+
+### 18.11 测试计划
+
+单元 / 组件测试（CI 常规任务）：
+
+- Worker 配置：`RUNTIME_IMAGES` 解析（数量、digest 格式、重复引用/版本）；与 `RUNTIME_IMAGE` 同时设置拒绝启动；digest 不符、
+  平台不符、缺少版本标签的镜像不提供；全部不可用时不发 hello；探针容器带标签、启动时只清理带本 Worker 标签的已退出探针。
+- `workspace.runtime.set`（fake Docker）：正常切换；容器运行中、legacy、目标不在集合、元数据不符时**未做修改**；各步骤之间
+  中断后的重试收敛；只操作受管容器；新容器配置与 ensure 新建的完全一致；元数据原子写入（`O_EXCL|O_NOFOLLOW`）；
+  `runtimeImageId` 回填与校验（容器镜像被替换时拒绝）。
+- Control Plane：升级/回滚/admin 切换的授权（他人 Workspace 404、普通用户不能指定镜像、Origin/CSRF）；前置条件；intent 先于
+  命令；三类结果的状态处理；`UPGRADING` 期间 start/open/delete/空闲回收都不可进行；reconcile 收敛；Scheduler 按镜像匹配
+  capability；Audit 与指标。
+- 空闲回收：每个条件单独不满足时不停止（有连接、有访问、5 分钟平均 ≥ 阈值、样本缺失/间断/回退、Worker 断开、本次运行或
+  Control Plane 启动不足 N、非 RUNNING）；全部满足时停止并记 Audit；与并发访问竞争时不停止；每轮上限；关闭时不运行；
+  `last_access_at` 节流写入与连接结束时写入；start 清空 `last_stop_reason`。
+- Worker 吊销：直接改库 `enabled=false` 后 ≤ 一个周期内 Worker 为 `DISABLED`、Workspace 为 `WORKER_OFFLINE`、通道关闭、
+  Gateway 连接断开；`worker:rotate` 后 Workspace 为 `WORKER_OFFLINE`；`worker:disable` 幂等、吊销该 Worker 上的 key 且网关
+  确认前保持 `revoking`；`worker:enable` 轮换凭据、旧 token 不能连接；`worker:delete` 在有 Workspace 或未禁用时拒绝。
+- Gateway：Next.js 内部请求头被剥离，App Router 头保留。
+- 目录：MiMo 条目 schema；`thinkingLevelMap` 与 compat 渲染。
+- 协议 v6 正反例；v5 hello 被拒绝；Worker 上报 `UPGRADING` 被拒绝。
+- migration 在 `agent_runtime_test` 上验证（含现有行回填 `runtime_images`、状态约束）。
+
+真实环境测试：
+
+- `pnpm test:e2e:runtime` 增加：用两个真实镜像（`phase7-toolchain` 与新镜像）对同一 Workspace 执行“创建并写入文件与 Session
+  → 停止 → 升级 → 启动 → 文件、Session、`models.json` 平台条目仍在 → 停止 → 回滚 → 启动”；新镜像中 default-cwd 为
+  `/workspace`、无 Session 时 Files 可列出 `/workspace`；preview 密钥每次启动不同且日志无警告；平台目录在两个 Pi 版本中都能
+  加载（18.7）。CI 的 `runtime-toolchain.yml` 只构建新镜像，双镜像用例在本机运行（旧镜像不在 CI 重建），CI 中跳过并说明。
+- `pnpm test:model-gateway`：MiMo 路由经 mock 上游原样转发 `thinking`、`reasoning_effort`、`reasoning_content`。
+- 指标与告警的 `promtool` 测试扩展。
+
+**变异检查**（实现时执行并记录）：`runtime.set` 不检查容器是否运行；不检查 managed label；接受集合外镜像；先删容器后写
+元数据；不校验 `runtimeImageId`；忽略 digest pin；Control Plane 在命令后才持久化 intent；“结果不确定”时回退为 `STOPPED`；
+普通用户可指定镜像；`UPGRADING` 时允许 start；空闲判定去掉连接条件 / 访问条件 / CPU 条件；样本缺失视为空闲；Control Plane
+重启后不重新计时；条件更新不检查 `last_access_at`；`markWorkersOffline` 不处理 `enabled=false`；`worker:disable` 不吊销模型
+key；吊销在网关失败时标记 `revoked`；Gateway 不剥离 `x-prerender-revalidate`——对应测试均应失败。
+
+### 18.12 开工 spike（编码早期，部分需要负责人）
+
+- **S1 新镜像与 pi-web 行为**（本机，需要外网访问 npm 与 Playwright 下载，构建约 20～40 分钟）：按 18.3 构建新镜像，在一次性
+  容器中确认：新 patch 生效；无 Session 时 Files 根是否包含 `/workspace`；preview 密钥轮换方式与日志；`open-in-explorer` 的
+  失败形态；MCP：添加一个本地 stdio server（容器内脚本）并在 Session 中调用；HTTP server 访问内网地址被出口规则拒绝；
+  MCP OAuth 的回调在“浏览器不在本机”条件下的表现（预期需要“复制代码”方式或不可用，写入已知限制）；project-trust 对话框
+  与 `trust.json` 持久化。结论写入本节并据此定稿 patch。
+- **S2 Session 双向兼容**：在 `phase7-toolchain` 中创建含工具调用与压缩的 Session → 升级后在新版本中打开、继续对话（产生新
+  条目类型）→ 回滚后在旧版本中列出与打开。按 18.4 的三档记录结论。需要真实模型调用（经平台中继，DeepSeek，费用很小）。
+- **S3 MiMo**（需要负责人同意，真实上游计费）：用 `tools/dev/model-gateway-spike.py` 增加 MiMo 用例，对 `mimo-v2.6-flash`、
+  `mimo-v2.6-pro` 各做一次带 `thinking` 的两轮工具调用，并确认 v2.6 接受的 `reasoning_effort` 取值（16.17 只验证过 v2.5）；
+  用 mock 上游记录 Pi 1.1.x 对 MiMo 的实际请求形态，确定目录 compat。
+- **worker-c**（负责人执行）：在 worker-c 上从 `phase-18-lifecycle` 构建同一镜像并记录 digest（本地构建的 digest 与 worker-a
+  不同，各自写入自己的 `RUNTIME_IMAGES`）：
+
+  ```bash
+  git -C <worker-c 上的仓库> fetch && git -C <仓库> switch phase-18-lifecycle
+  docker build --platform linux/arm64 --tag agent-runtime:phase18-pi1.1 <仓库>/runtime
+  docker image inspect agent-runtime:phase18-pi1.1 --format '{{.Id}} {{.Os}}/{{.Architecture}} {{json .Config.Labels}}'
+  docker ps -a --filter name=agent-runtime-capability-probe- --format '{{.Names}} {{.Status}} {{.CreatedAt}}'
+  ```
+
+  遗留探针容器（本机一个、worker-c 若有）确认为已退出后可手工删除：`docker rm <名称>`。
+
+### 18.13 验收
+
+自动验收：上述测试全部通过，CI 绿。
+
+人工验收（详细步骤随交付说明给出），要点与预期结果：
+
+0. **准备**（负责人，主 checkout 切到 `phase-18-lifecycle`）：worker-a、worker-c 构建新镜像；两台 Worker 的 `.env` 设置
+   `RUNTIME_IMAGES`（旧镜像 + 新镜像，按各自 digest）；先不改 `DEFAULT_RUNTIME_IMAGE`；按 runbook 在网关配置中加入 MiMo 并
+   `up -d --force-recreate`；重启 Control Plane 与两台 Worker（协议 v6）。预期：Admin Workers 显示两台 Worker 各两个镜像及
+   版本、capability 全部为真；存量 Workspace 正常启动、打开（仍为旧版本）。
+1. **默认镜像切换**：`DEFAULT_RUNTIME_IMAGE` 改为新镜像并重启 Control Plane；新建 Workspace 落在新版本；Files 与新会话的工作
+   目录都是 `/workspace`；Terminal、Prompt streaming、平台模型（DeepSeek、`mimo-v2.6-flash`、`mimo-v2.6-pro` 各一次带工具调用
+   的对话）正常；旧版本 Workspace 中同样能选用并使用平台的 MiMo 模型。
+2. **升级存量 Workspace**：选一个有文件与历史 Session 的旧 Workspace，停止 → “升级到 phase-18” → 启动：文件、历史 Session
+   （可继续对话）、`/agent/pi` 中的自有 provider 与 `settings.json`、home 下的配置都在；Audit 有 `runtime_change_requested` /
+   `runtime_changed`；运行中时升级按钮不可用，API 返回 `WORKSPACE_NOT_STOPPED`。
+3. **回滚**：在新版本中继续一次对话后停止 → 回滚 → 启动：Runtime 显示旧版本，文件完整，Session 列表与打开行为符合 S2 记录的
+   结论；再次升级回新版本正常。
+4. **升级中断**：升级时在命令发出后立即 `kill -STOP` Worker 15 秒以上再 `kill -CONT`（或停止 Worker 进程后重启）：Workspace
+   显示“Runtime 切换未完成”或经 reconcile 收敛为 `STOPPED`；“重试”或“回滚”后可正常启动，数据完整。
+5. **MCP 与 project-trust**：在 `/workspace` 中放置含 `.pi/mcp.json`（本地 stdio server）的项目，新会话出现信任对话框；信任后
+   MCP 工具可用；停止/启动后信任决定与 MCP 配置保留；指向内网地址的 HTTP MCP server 连接失败（出口规则）。
+6. **安全**：在 Workspace Terminal 中读取 `/opt/agent-runtime/.../prerender-manifest.json` 模板中的公开 `previewModeId`，从浏览器
+   开发者工具或 `curl`（经 Gateway、带合法 Cookie）发送 `x-prerender-revalidate: <该值>` 与伪造 Host 的请求，被拒绝；pi-web
+   启动日志（`docker logs`）没有 preview 密钥警告。
+7. **空闲回收**（为验收临时设置 `IDLE_STOP_AFTER_HOURS=1`）：(a) 打开后关闭浏览器标签、无任何进程的 Workspace，约 1～1.1 小时
+   后被停止，Portal 显示“因空闲自动停止”，Audit 有 `workspace.idle_stopped`，再次启动后数据完整；(b) 关闭浏览器但在 Terminal
+   中运行 `nohup sh -c 'while :; do :; done' &` 的 Workspace 不被停止；(c) 保持 pi-web 标签页打开的 Workspace 不被停止；
+   (d) 在窗口期内重启 Control Plane，停止时间相应顺延。验收后恢复配置。
+8. **Worker 吊销**：`WORKER_ID=worker-c pnpm worker:disable`：5 秒内 Admin Workers 显示 `DISABLED`、其 Workspace 为
+   `WORKER_OFFLINE`，已打开的 pi-web 断开，该 Worker 上 Workspace 的模型 key 变为 `revoked`（`worker_disabled`），在 worker-c 上
+   `docker exec` 调用中继得到网关 401；`pnpm worker:enable` 输出新 token，更新 worker-c 的 `.env` 并重启后，Workspace 恢复为
+   原状态，平台模型 30 秒内重新可用。另：直接在数据库把某 Worker `enabled` 改为 false，同样 5 秒内一致。
+9. 对没有 Workspace 的已禁用 Worker 执行 `pnpm worker:delete` 成功并有 Audit；对有 Workspace 的 Worker 拒绝。
+10. **镜像 pin**：在 worker-a 上把新镜像的 tag 重新指向另一个镜像（例如 `docker tag agent-runtime:phase7-toolchain
+    agent-runtime:phase18-pi1.1`）后重启 Worker：该镜像不再被提供，Admin 显示缺失并触发 `AgentRuntimeDefaultRuntimeImageMissing`；
+    已在运行的新版本 Workspace 不受影响；恢复 tag 后重启恢复。
+
+失败时收集：Control Plane / Worker 日志（按 workspaceId、workerId）、`docker inspect agent-runtime-<workspaceId>` 的 `.Image`
+与 `.Config.Image`、该 Workspace 的 `metadata/metadata.json`、`docker image ls --digests`、`docker logs agent-runtime-<workspaceId>`、
+Admin 页面截图、`workspaces` 与 `model_keys` 相关行、Prometheus Alerts。
+
+### 18.14 待决问题
+
+2026-10-12：负责人确认 Q1–Q4、Q6–Q11 按建议执行；Q5 改为只接入 MiMo v2.6（v2.5 于 10-21 下线），单价取官方海外美元价（18.7）。
+
+- **Q1 目标版本**（**已确认：按建议**）：pi-web 0.12.x 最新补丁 + 其精确依赖的 Pi（当前 1.1.0），开工 spike 时锁定。这偏离
+  路线图 D7 的“0.10.x / 1.0.x”：0.10.0 不含 0.11.0 的安全修复，且 pi-web 精确依赖 Pi，不能把 pi-web 0.10.0 与 Pi 1.0.4 组合。
+  路线图 D7 已同步修订。
+- **Q2 空闲回收配置方式**（**已确认：按建议**）：环境变量 `IDLE_STOP_AFTER_HOURS`、`IDLE_CPU_THRESHOLD_CORES`，Admin 页面只读
+  显示；默认阈值 0.05 核 / 5 分钟平均，建议时长 24 小时。
+- **Q3 谁能切换 Runtime**（**已确认：按建议**）：Owner 可对自己已停止的 Workspace“升级到默认 / 回滚到上一版本”；admin 可对任意
+  已停止的 Workspace 切换到该 Worker 提供的任一镜像（不打开、不启动、不删除）。这是 admin 首次对他人 Workspace 执行生命周期类
+  操作，范围限定为 Runtime 切换。
+- **Q4 空闲回收的豁免与通知**（**已确认：按建议**）：v1.0 不提供按 Workspace 豁免、不提前通知；确有长期低负载服务需要常驻的，
+  由管理员关闭空闲回收或调大 N。
+- **Q5 MiMo 模型与单价**（**已确认，2026-10-12：只接入 v2.6**）：`mimo-v2.6-flash`、`mimo-v2.6-pro`；v2.5 已公告下线不再接入；
+  ultraspeed 默认不纳入；单价按官方海外美元价（18.7）。
+- **Q6 回滚点**（**已确认：按建议**）：不在升级前复制 `/agent/pi`；回滚的数据兼容性以 S2 结论为准、写入 runbook。
+- **Q7 吊销与重新启用**（**已确认：按建议**）：`worker:disable` 同时吊销该 Worker 上 Workspace 的模型 key；`worker:enable` 必须
+  同时轮换凭据；只提供命令行。
+- **Q8 `worker:delete`**（**已确认：纳入**）：条件为“已禁用 + 没有任何 Workspace”，只删 Control Plane 记录并写 Audit。
+- **Q9 Pi telemetry**（**已确认：按建议**）：新镜像设置 `PI_TELEMETRY=0`、`PI_SKIP_VERSION_CHECK=1`；不设置 `PI_OFFLINE`。
+- **Q10 镜像 pin 与过渡**（**已确认：按建议**）：`RUNTIME_IMAGES` 每项必须带 digest；`RUNTIME_IMAGE` 只在过渡期作为不 pin 的
+  单镜像写法保留并告警，Phase 19 移除。
+- **Q11 协议 v6**（**已确认：按建议**）：与 v5 不兼容，同时升级。
+
+### 18.15 日常 Runtime 镜像更新流程（运维约定）
+
+本 Phase 的机制之上，以后每次更新镜像按同一流程进行，写入 `docs/runtime-upgrade-runbook.md`。
+
+**何时更新**：
+
+- 不追随上游的每个版本。触发条件为：安全修复（pi-web、Pi、Node、Chromium、系统包）、用户确实需要的功能或模型、上游宣布的
+  兼容性截止（例如服务商下线旧接口）。
+- 非安全更新在上游发布后至少观察一周（看是否有紧跟的补丁版本）；安全更新尽快，但同样走下面的验证。
+- 一次只改一个维度：pi-web/Pi 升级、基础镜像与系统包刷新、工具链（Node、Rust、Python、Playwright）变化分开出镜像，出问题时
+  容易定位、回滚面小。建议基础镜像与系统包每季度刷新一次，与 pi-web/Pi 升级错开。
+
+**步骤**：
+
+1. **准备**：在分支上修改 `runtime/Dockerfile` 的 pin（版本与基础镜像 digest）；pi-web 版本变化时按新版本重新确认 default-cwd
+   patch 与 preview 密钥处理（patch 只接受 pin 的版本，版本不符时构建直接失败，不会悄悄失效），并核对 pi-web 与 Pi 的 release
+   notes 中的 breaking change、状态文件路径与 Session 格式变化（同 18.1 的检查表）。
+2. **命名**：使用新的 tag 与 `io.agent-runtime.runtime.version`（例如 `agent-runtime:2026.11-pi1.2`），**永不重建已有 tag**。
+3. **构建与验证**：每种架构原生构建；`runtime/scripts/verify-image.sh`；CI `runtime-toolchain.yml`；本机运行双镜像
+   `pnpm test:e2e:runtime`（新旧镜像之间升级、回滚、平台目录在两个 Pi 版本中都能加载）。任一失败不进入下一步。
+4. **上架**：在每台 Worker 上取得同一镜像并把 `<tag>@sha256:<digest>` **追加**到 `RUNTIME_IMAGES`（保留旧镜像），重启 Worker；
+   Admin Workers 中确认各 Worker 都提供新镜像、capability 全部为真。
+5. **试点**：先由管理员把一两个自己或试点用户的 Workspace 切到新镜像，使用至少一个工作日。
+6. **切换默认**：所有可调度 Worker 都提供新镜像后，修改 `DEFAULT_RUNTIME_IMAGE` 并重启 Control Plane；此后新 Workspace 使用新
+   版本，存量 Workspace 的卡片出现“可升级”，用户在方便时自行停止并升级；管理员可代为升级。
+7. **保留回滚窗口**：旧镜像至少保留两周（或到下一次更新），期间任何 Workspace 都可回滚。
+8. **下线旧镜像**：Admin Workers 中旧镜像的 Workspace 计数为 0 后，从 `RUNTIME_IMAGES` 移除并重启 Worker，再 `docker image rm`；
+   仍有少量 Workspace 停留在旧版本时，先通知其 Owner 或由管理员代为升级。Worker 同时提供的镜像最多 4 个。
+
+**镜像来源**：当前开发环境在每台 Worker 上本地构建，因此各 Worker 的 digest 不同、需要分别填写。生产环境（Phase 19 设计）建议
+改为由 CI 构建一次、推送到企业内部镜像仓库，各 Worker 按**同一个仓库 digest** 拉取，保证所有 Worker 运行完全相同的内容；
+平台本身不负责镜像分发。
 
 ## Phase 19：生产部署与 v1.0 发布
 

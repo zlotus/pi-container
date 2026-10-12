@@ -110,10 +110,11 @@ v0.x 证明了主链可行：多用户、Workspace 隔离、多 Worker 调度、
 - **空闲回收**（定义见第 4 节决策 D6）：默认关闭，管理员启用后按保守规则只停不删。
 - **Runtime 镜像升级**：Worker 可同时持有多个受支持镜像；Workspace 在停止状态下升级到新镜像（重建
   容器、保留持久目录），失败可回滚。
-- **首次真实升级演练**：pi-web 0.9.0 → 0.10.x、Pi 0.85.1 → 1.0.x（决策 D7）。需重写只适用于 0.9.0 的
+- **首次真实升级演练**：pi-web 0.9.0 → 0.12.x、Pi 0.85.1 → 1.1.x（决策 D7；2026-10-12 由 0.10.x / 1.0.x 修订，见 `specs.md` 18.14 Q1）。需重写只适用于 0.9.0 的
   default-cwd patch（0.10.0 的默认目录改为 `~/pi-cwd/<日期>`，且不再在该路由登记 Files 根目录），并在真实
   容器中重新验证 Files、Terminal、Session 恢复、持久化，以及 Pi 1.0 新增的 MCP 与 project-trust 行为。
-- 修复 `enabled=false` 的 offline 不一致，提供 `worker:disable` 运维命令。
+- 修复 `enabled=false` 的 offline 不一致，提供 `worker:disable` / `worker:enable` / `worker:delete` 运维命令。
+- 平台模型目录接入 Xiaomi MiMo v2.6（v2.5 已于 2026-10-21 下线）。
 
 ### Phase 19：生产部署与 v1.0 发布（G9）
 
@@ -135,7 +136,7 @@ v0.x 证明了主链可行：多用户、Workspace 隔离、多 Worker 调度、
 | D4 | 模型网关采用现成组件，平台只做集成。 |
 | D5 | **平台不提供备份功能**。备份由虚拟化平台、操作系统或专用备份软件针对挂载点完成；平台负责保持数据布局清晰、文档化，并保证在原路径恢复后 Worker reconciliation 能接管。 |
 | D6 | 空闲回收采用保守定义（见下），默认关闭。 |
-| D7 | pi-web / Pi 升级（含新模型目录）放在 Phase 18 与镜像升级机制一起做，不提前单独升级。在此之前，需要新模型时由用户在 `/agent/pi/models.json` 中按 Pi 0.85.1 的 Custom Models 机制追加模型定义。 |
+| D7 | pi-web / Pi 升级（含新模型目录）放在 Phase 18 与镜像升级机制一起做，不提前单独升级；目标版本 2026-10-12 修订为 pi-web 0.12.x + 其精确依赖的 Pi 1.1.x（0.11.0 起才含 preview 密钥安全修复）。在此之前，需要新模型时由用户在 `/agent/pi/models.json` 中按 Pi 0.85.1 的 Custom Models 机制追加模型定义。 |
 
 ### D6：空闲的定义
 
