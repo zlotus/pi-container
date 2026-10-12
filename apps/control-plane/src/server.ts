@@ -224,6 +224,7 @@ const metricsCollector = new MetricsCollector({
   usage,
   connectedWorkerIds: () => workerChannel.connectedWorkerIds(),
   modelGatewayEnabled: modelGateway !== undefined,
+  defaultRuntimeImage: config.DEFAULT_RUNTIME_IMAGE,
 });
 const metricsServer =
   metricsToken === null

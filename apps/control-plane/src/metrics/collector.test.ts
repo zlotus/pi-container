@@ -19,9 +19,14 @@ function snapshot(overrides: Partial<MetricsSnapshot> = {}): MetricsSnapshot {
       { state: "STOPPED", workerId: "worker-a", count: 1 },
       { state: "CREATED", workerId: null, count: 2 },
     ],
+    workspacesByRuntime: [{ runtimeImage: "agent-runtime:phase7-toolchain", count: 4 }],
     workers: [
       {
         workerId: "worker-a",
+        runtimeImages: [
+          { image: "agent-runtime:phase7-toolchain", runtimeVersion: "phase-7" },
+          { image: "agent-runtime:phase18-pi1.1", runtimeVersion: "phase-18" },
+        ],
         status: "ONLINE",
         enabled: true,
         schedulable: true,
@@ -38,6 +43,7 @@ function snapshot(overrides: Partial<MetricsSnapshot> = {}): MetricsSnapshot {
       },
       {
         workerId: "worker-b",
+        runtimeImages: [{ image: "agent-runtime:phase7-toolchain", runtimeVersion: "phase-7" }],
         status: "OFFLINE",
         enabled: true,
         schedulable: true,
@@ -133,6 +139,7 @@ function setup(options: { fail?: boolean; connected?: string[]; modelGatewayEnab
     usage: registry,
     connectedWorkerIds: () => [...connected],
     modelGatewayEnabled: options.modelGatewayEnabled ?? true,
+    defaultRuntimeImage: "agent-runtime:phase18-pi1.1",
   });
   return {
     metrics,
@@ -255,12 +262,26 @@ describe("scrape-time metrics (Phase 17.4)", () => {
       "worker_id", "workspace_id", "user_id", "state", "status", "kind", "project", "direction",
       "scope", "collector", "route", "method", "status_class", "source", "result", "command", "code",
       "protocol", "category", "endpoint", "operation", "task", "version", "protocol_version", "le",
+      "runtime_image", "runtime_version",
     ]);
     for (const series of text.split("\n").filter((entry) => entry.startsWith("agent_runtime_"))) {
       for (const match of series.matchAll(/([a-z_]+)="/g)) {
         expect(allowedLabels.has(match[1] ?? ""), `${match[1]} in ${series}`).toBe(true);
       }
     }
+  });
+
+  it("reports Runtime images per Workspace and Worker and the default image's availability (Phase 18.8)", async () => {
+    const text = await setup().collector.collect();
+    expect(line(text, 'agent_runtime_workspaces_by_runtime{runtime_image="agent-runtime:phase7-toolchain"}')).toMatch(/ 4$/);
+    expect(
+      line(
+        text,
+        'agent_runtime_worker_runtime_image_info{worker_id="worker-a",runtime_image="agent-runtime:phase18-pi1.1",runtime_version="phase-18"}',
+      ),
+    ).toMatch(/ 1$/);
+    expect(line(text, 'agent_runtime_worker_default_runtime_image_available{worker_id="worker-a"}')).toMatch(/ 1$/);
+    expect(line(text, 'agent_runtime_worker_default_runtime_image_available{worker_id="worker-b"}')).toMatch(/ 0$/);
   });
 
   it("keeps concurrent scrapes independent", async () => {

@@ -3,8 +3,12 @@ import type { DatabaseClient } from "./index.js";
 /** Platform state read once per Prometheus scrape (specs.md Phase 17.4). */
 export interface MetricsSnapshot {
   workspaces: Array<{ state: string; workerId: string | null; count: number }>;
+  /** Workspaces per Runtime image (Phase 18.8). */
+  workspacesByRuntime: Array<{ runtimeImage: string; count: number }>;
   workers: Array<{
     workerId: string;
+    /** The images the Worker offers. */
+    runtimeImages: Array<{ image: string; runtimeVersion: string }>;
     status: string;
     enabled: boolean;
     schedulable: boolean;
@@ -83,9 +87,11 @@ export function createMetricsRepository(database: DatabaseClient) {
             model_relay_enabled: boolean;
             model_relay_listening: boolean;
             disk_limit_allocated_bytes: string;
+            runtime_images: Array<{ image: string; runtimeVersion: string }>;
           }>
         >`
           select
+            w.runtime_images,
             w.id, w.status, w.enabled, w.schedulable, w.last_heartbeat_at,
             w.allocated_workspaces, w.max_workspaces, w.egress_enforced, w.storage_enforced,
             w.storage_total_bytes::text as storage_total_bytes,
@@ -96,6 +102,9 @@ export function createMetricsRepository(database: DatabaseClient) {
             ), 0)::text as disk_limit_allocated_bytes
           from workers w
           order by w.id
+        `;
+        const byRuntime = await transaction<Array<{ runtime_image: string; count: string }>>`
+          select runtime_image, count(*)::text as count from workspaces group by runtime_image
         `;
         const disk = await transaction<
           Array<{
@@ -147,8 +156,16 @@ export function createMetricsRepository(database: DatabaseClient) {
             workerId: row.worker_id,
             count: Number(row.count),
           })),
+          workspacesByRuntime: byRuntime.map((row) => ({
+            runtimeImage: row.runtime_image,
+            count: Number(row.count),
+          })),
           workers: workers.map((row) => ({
             workerId: row.id,
+            runtimeImages: row.runtime_images.map((image) => ({
+              image: image.image,
+              runtimeVersion: image.runtimeVersion,
+            })),
             status: row.status,
             enabled: row.enabled,
             schedulable: row.schedulable,
