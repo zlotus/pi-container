@@ -4,7 +4,7 @@ import { api } from "../api.js";
 import { ConfirmDialog } from "../components/Modal.js";
 import { ModelGatewayPanel } from "../components/ModelGatewayPanel.js";
 import { RelativeTime } from "../components/RelativeTime.js";
-import { formatBytes as formatSize, formatCores, workerStatusLabel } from "../labels.js";
+import { formatBytes as formatSize, formatCores, runtimeLabel, workerStatusLabel } from "../labels.js";
 import type { SessionResponse, Worker } from "../types.js";
 
 const CAPABILITY_LABELS: Record<string, string> = {
@@ -71,11 +71,13 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedWorkerId, setExpandedWorkerId] = useState<string | null>(null);
+  const [defaultRuntimeImage, setDefaultRuntimeImage] = useState<string | null>(null);
 
   const refreshWorkers = useCallback(async () => {
     try {
-      const result = await api<{ workers: Worker[] }>("/api/admin/workers");
+      const result = await api<{ workers: Worker[]; defaultRuntimeImage?: string }>("/api/admin/workers");
       setWorkers(result.workers);
+      setDefaultRuntimeImage(result.defaultRuntimeImage ?? null);
       setError(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "无法载入 Worker");
@@ -144,6 +146,7 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
                         <span className="state-group">
                           <span className={`state worker-${worker.status.toLowerCase()}`}>{workerStatusLabel(worker.status)}</span>
                           {worker.schedulable ? null : <span className="state worker-paused" title="不再分配新的 Workspace，已有 Workspace 不受影响">暂停调度</span>}
+                          {worker.defaultImageAvailable === false ? <span className="state worker-offline" title="该 Worker 未提供平台默认 Runtime，新 Workspace 不会分配到这里">缺少默认 Runtime</span> : null}
                         </span>
                       </td>
                       <td>
@@ -187,8 +190,16 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
                       <tr className="metadata-row">
                         <td colSpan={9}>
                           <dl className="worker-details">
-                            <div><dt>运行环境版本</dt><dd>{worker.runtimeVersion ?? "—"}</dd></div>
-                            <div><dt>运行环境镜像</dt><dd>{worker.runtimeImage ?? "尚未上报"}</dd></div>
+                            <div><dt>Runtime 镜像</dt><dd>{worker.runtimeImages.length === 0 ? "尚未上报" : (
+                              <ul className="runtime-image-list">
+                                {worker.runtimeImages.map((image) => (
+                                  <li key={image.image} title={image.image}>
+                                    <strong>{runtimeLabel(image)}</strong> · {image.workspaces} 个 Workspace
+                                    {image.image === defaultRuntimeImage ? <small>（平台默认）</small> : null}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}{worker.unofferedWorkspaces > 0 ? <small className="error">另有 {worker.unofferedWorkspaces} 个 Workspace 使用的镜像已不再提供，无法启动</small> : null}</dd></div>
                             <div><dt>Worker 上报的 Workspace</dt><dd>{worker.allocatedWorkspaces}</dd></div>
                             <div><dt>模型中继</dt><dd>{modelRelayText(worker)}</dd></div>
                             <div><dt>可用能力</dt><dd><span className="capability-list">{Object.entries(CAPABILITY_LABELS).map(([key, label]) => <span className={worker.capabilities[key] ? "capability pass" : "capability fail"} key={key}>{label}</span>)}</span></dd></div>

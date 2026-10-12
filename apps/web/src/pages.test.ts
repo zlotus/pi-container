@@ -57,6 +57,7 @@ describe("Admin Workspace filtering", () => {
     updatedAt: "2026-09-01T00:00:00.000Z",
     lastActivityAt: "2026-09-01T00:00:00.000Z",
     owner: { id: "u", username: "alice", email: null },
+    offeredImages: [],
     ...overrides,
   });
   const workspaces = [

@@ -3,9 +3,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
 import { DiskUsage } from "../components/DiskUsage.js";
 import { ResourceUsage } from "../components/ResourceUsage.js";
-import { useTextPrompt } from "../components/Modal.js";
+import { ConfirmDialog, useTextPrompt } from "../components/Modal.js";
 import { RelativeTime } from "../components/RelativeTime.js";
-import { formatBytes, parseGibInput, workspaceStateLabel } from "../labels.js";
+import { formatBytes, parseGibInput, runtimeLabel, workspaceStateLabel } from "../labels.js";
 import type { AdminWorkspace, SessionResponse } from "../types.js";
 
 export interface AdminWorkspaceFilter {
@@ -35,6 +35,14 @@ export function filterAdminWorkspaces(
   });
 }
 
+/** Whether an admin may switch this Workspace's Runtime now (stopped, or a change was interrupted). */
+export function runtimeChangeable(workspace: Pick<AdminWorkspace, "state" | "runtime" | "offeredImages">): boolean {
+  return (
+    (workspace.state === "STOPPED" || workspace.runtime?.changeIncomplete === true) &&
+    workspace.offeredImages.length > 1
+  );
+}
+
 export function AdminWorkspacesPage({ session }: { session: SessionResponse }) {
   const [workspaces, setWorkspaces] = useState<AdminWorkspace[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
@@ -43,6 +51,8 @@ export function AdminWorkspacesPage({ session }: { session: SessionResponse }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<AdminWorkspaceFilter>({ query: "", state: "", workerId: "" });
+  const [runtimeTarget, setRuntimeTarget] = useState<AdminWorkspace | null>(null);
+  const [runtimeImage, setRuntimeImage] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -114,6 +124,26 @@ export function AdminWorkspacesPage({ session }: { session: SessionResponse }) {
     }
   }
 
+  async function switchRuntime(workspace: AdminWorkspace, image: string) {
+    setPendingId(workspace.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await api(`/api/admin/workspaces/${workspace.id}/runtime`, {
+        method: "POST",
+        headers: { "x-csrf-token": session.csrfToken },
+        body: JSON.stringify({ image }),
+      });
+      setNotice(`已将 ${workspace.name} 的 Runtime 切换为 ${image}。`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Runtime 切换失败");
+    } finally {
+      setRuntimeTarget(null);
+      setPendingId(null);
+      await refresh();
+    }
+  }
+
   return (
     <>
       <div className="page-heading">
@@ -161,7 +191,7 @@ export function AdminWorkspacesPage({ session }: { session: SessionResponse }) {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>Workspace</th><th>所有者</th><th>状态</th><th>Worker</th><th>磁盘</th><th>CPU / 内存</th><th>创建于</th><th>最近活动</th><th>操作</th></tr>
+                <tr><th>Workspace</th><th>所有者</th><th>状态</th><th>Worker</th><th>磁盘</th><th>CPU / 内存</th><th>Runtime</th><th>创建于</th><th>最近访问</th><th>操作</th></tr>
               </thead>
               <tbody>
                 {visible.map((workspace) => (
@@ -172,14 +202,31 @@ export function AdminWorkspacesPage({ session }: { session: SessionResponse }) {
                     <td>{workspace.workerId ?? "未分配"}</td>
                     <td><DiskUsage disk={workspace.disk} /></td>
                     <td>{workspace.usage === undefined || workspace.usage === null ? "—" : <ResourceUsage usage={workspace.usage} />}</td>
+                    <td title={workspace.runtime?.image}>
+                      {workspace.runtime === undefined || workspace.runtime === null ? "—" : runtimeLabel(workspace.runtime)}
+                      {workspace.runtime?.changeIncomplete === true ? <small className="error">切换未完成</small> : null}
+                    </td>
                     <td><RelativeTime value={workspace.createdAt} /></td>
-                    <td><RelativeTime value={workspace.lastActivityAt} /></td>
+                    <td><RelativeTime value={workspace.lastAccessAt ?? workspace.lastActivityAt} /></td>
                     <td>
-                      <button
-                        className="secondary"
-                        disabled={pendingId === workspace.id || workspace.state === "DELETING"}
-                        onClick={() => void changeDiskLimit(workspace)}
-                      >调整上限</button>
+                      <span className="row-actions">
+                        <button
+                          className="secondary compact-button"
+                          disabled={pendingId === workspace.id || workspace.state === "DELETING"}
+                          onClick={() => void changeDiskLimit(workspace)}
+                        >调整上限</button>
+                        <button
+                          className="secondary compact-button"
+                          disabled={pendingId === workspace.id || !runtimeChangeable(workspace)}
+                          title={runtimeChangeable(workspace) ? "以所在 Worker 提供的其他镜像重建容器" : "仅已停止、且所在 Worker 提供多个镜像时可切换"}
+                          onClick={() => {
+                            setRuntimeImage(
+                              workspace.offeredImages.find((image) => image.image !== workspace.runtime?.image)?.image ?? "",
+                            );
+                            setRuntimeTarget(workspace);
+                          }}
+                        >切换 Runtime</button>
+                      </span>
                     </td>
                   </tr>
                 ))}
@@ -189,6 +236,32 @@ export function AdminWorkspacesPage({ session }: { session: SessionResponse }) {
         )}
       </section>
       {promptDialog}
+      <ConfirmDialog
+        open={runtimeTarget !== null}
+        title="切换 Runtime"
+        confirmLabel="切换"
+        tone="primary"
+        pending={runtimeTarget !== null && pendingId === runtimeTarget.id}
+        onConfirm={() => {
+          if (runtimeTarget !== null && runtimeImage !== "") void switchRuntime(runtimeTarget, runtimeImage);
+        }}
+        onCancel={() => setRuntimeTarget(null)}
+      >
+        <p>
+          以所选镜像重新创建 <strong>{runtimeTarget?.name}</strong>（所有者 {runtimeTarget === null ? "" : ownerName(runtimeTarget.owner)}）
+          的容器。文件、主目录、Pi 会话与配置保留不变；不会启动或打开该 Workspace。
+        </p>
+        <label>
+          目标镜像
+          <select value={runtimeImage} onChange={(event) => setRuntimeImage(event.target.value)}>
+            {runtimeTarget?.offeredImages.map((image) => (
+              <option key={image.image} value={image.image}>
+                {image.runtimeVersion}（{image.image}）{image.image === runtimeTarget.runtime?.image ? " · 当前" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      </ConfirmDialog>
     </>
   );
 }

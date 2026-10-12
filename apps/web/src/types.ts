@@ -54,6 +54,18 @@ export interface WorkerUsage {
   sampledAt: string;
 }
 
+/** A Workspace's Runtime version and the changes it allows (specs.md Phase 18.8). */
+export interface WorkspaceRuntime {
+  image: string;
+  runtimeVersion: string | null;
+  piWebVersion: string | null;
+  piVersion: string | null;
+  previousImage: string | null;
+  upgradeAvailable: boolean;
+  rollbackAvailable: boolean;
+  changeIncomplete: boolean;
+}
+
 export interface Workspace {
   id: string;
   name: string;
@@ -64,6 +76,9 @@ export interface Workspace {
   /** Absent on admin listings; "disabled" without a model gateway. */
   modelAccess?: ModelAccess;
   usage?: WorkspaceUsage | null;
+  runtime?: WorkspaceRuntime | null;
+  lastAccessAt?: string | null;
+  lastStopReason?: "idle" | null;
 }
 
 export interface ModelUsage {
@@ -93,6 +108,18 @@ export interface AdminWorkspace extends Workspace {
   updatedAt: string;
   lastActivityAt: string;
   owner: { id: string; username: string | null; email: string | null };
+  /** Images the Workspace's Worker offers, for the admin Runtime change (Phase 18.4). */
+  offeredImages: Array<{ image: string; runtimeVersion: string }>;
+}
+
+export interface WorkerRuntimeImage {
+  image: string;
+  runtimeVersion: string;
+  piWebVersion: string | null;
+  piVersion: string | null;
+  capabilities: Record<string, boolean>;
+  /** Workspaces on this Worker using the image. */
+  workspaces: number;
 }
 
 export interface Worker {
@@ -105,6 +132,12 @@ export interface Worker {
   runtimeImage: string | null;
   runtimeVersion: string | null;
   capabilities: Record<string, boolean>;
+  /** Every Runtime image the Worker offers (Phase 18.4). */
+  runtimeImages: WorkerRuntimeImage[];
+  /** Workspaces on images the Worker no longer offers; they cannot start. */
+  unofferedWorkspaces: number;
+  /** Whether the Worker offers the platform default image; null when unknown. */
+  defaultImageAvailable: boolean | null;
   maxWorkspaces: number | null;
   assignedWorkspaces: number;
   allocatedWorkspaces: number;

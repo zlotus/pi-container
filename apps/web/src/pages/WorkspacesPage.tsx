@@ -9,6 +9,7 @@ import {
   formatAbsoluteTime,
   formatUsd,
   modelAccessLabel,
+  runtimeLabel,
   STARTABLE_WORKSPACE_STATES,
   TRANSITIONAL_WORKSPACE_STATES,
   workspaceStateLabel,
@@ -43,6 +44,40 @@ function ModelAccessBadge({ access }: { access: ModelAccess }) {
   );
 }
 
+export type RuntimeAction = "upgrade" | "rollback" | "retry";
+
+/** The Runtime changes a Workspace card offers, in menu order (specs.md Phase 18.8). */
+export function runtimeActions(workspace: Pick<Workspace, "runtime">): RuntimeAction[] {
+  const runtime = workspace.runtime;
+  if (runtime === undefined || runtime === null) return [];
+  if (runtime.changeIncomplete) return runtime.rollbackAvailable ? ["retry", "rollback"] : ["retry"];
+  return [
+    ...(runtime.upgradeAvailable ? (["upgrade"] as const) : []),
+    ...(runtime.rollbackAvailable ? (["rollback"] as const) : []),
+  ];
+}
+
+const RUNTIME_ACTION_LABELS: Record<RuntimeAction, string> = {
+  upgrade: "升级 Runtime…",
+  rollback: "回滚到上一版本…",
+  retry: "重试 Runtime 切换…",
+};
+
+function RuntimeSummary({ workspace }: { workspace: Workspace }) {
+  const runtime = workspace.runtime;
+  if (runtime === undefined || runtime === null) return <>—</>;
+  return (
+    <span title={runtime.image}>
+      {runtimeLabel(runtime)}
+      {runtime.changeIncomplete ? (
+        <small className="error" role="status">Runtime 切换未完成，请在“⋯”中重试或回滚</small>
+      ) : runtime.upgradeAvailable ? (
+        <small className="muted">有新版本可升级（“⋯”菜单）</small>
+      ) : null}
+    </span>
+  );
+}
+
 export const WORKSPACE_POLL_INTERVAL_MS = 3_000;
 /** Refresh of observed CPU/memory while a Workspace runs and the page is visible (Phase 17.7). */
 export const WORKSPACE_USAGE_POLL_INTERVAL_MS = 15_000;
@@ -62,6 +97,7 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
   const [error, setError] = useState<string | null>(null);
   const [pendingWorkspaceId, setPendingWorkspaceId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Workspace | null>(null);
+  const [runtimeTarget, setRuntimeTarget] = useState<{ workspace: Workspace; action: RuntimeAction } | null>(null);
   const [modelUsage, setModelUsage] = useState<ModelUsageResponse | null>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -169,6 +205,24 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
       await loadWorkspaces();
     } finally {
       setPendingWorkspaceId(null);
+    }
+  }
+
+  async function changeRuntimeVersion(workspace: Workspace, action: RuntimeAction) {
+    setError(null);
+    setPendingWorkspaceId(workspace.id);
+    try {
+      await api(`/api/workspaces/${workspace.id}/runtime/${action}`, {
+        method: "POST",
+        headers: { "x-csrf-token": session.csrfToken },
+        body: "{}",
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Runtime 切换失败");
+    } finally {
+      setRuntimeTarget(null);
+      setPendingWorkspaceId(null);
+      await loadWorkspaces().catch(() => undefined);
     }
   }
 
@@ -287,6 +341,7 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
                 <div><dt>运行节点</dt><dd>{workspace.workerId ?? "等待分配"}</dd></div>
                 <div><dt>创建于</dt><dd><RelativeTime value={workspace.createdAt} /></dd></div>
                 <div><dt>磁盘</dt><dd><DiskUsage disk={workspace.disk} /></dd></div>
+                <div><dt>Runtime</dt><dd><RuntimeSummary workspace={workspace} /></dd></div>
                 {workspace.usage === undefined || workspace.usage === null ? null : (
                   <div><dt>实际用量</dt><dd><ResourceUsage usage={workspace.usage} /></dd></div>
                 )}
@@ -299,6 +354,17 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
                 <details className="more-menu">
                   <summary aria-label={`${workspace.name} 的更多操作`} title="更多操作">⋯</summary>
                   <div role="menu">
+                    {runtimeActions(workspace).map((action) => (
+                      <button
+                        key={action}
+                        role="menuitem"
+                        disabled={pendingWorkspaceId === workspace.id}
+                        onClick={(event) => {
+                          event.currentTarget.closest("details")?.removeAttribute("open");
+                          setRuntimeTarget({ workspace, action });
+                        }}
+                      >{RUNTIME_ACTION_LABELS[action]}</button>
+                    ))}
                     <button
                       role="menuitem"
                       className="danger"
@@ -315,6 +381,26 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
           ))}
         </section>
       )}
+      <ConfirmDialog
+        open={runtimeTarget !== null}
+        title={runtimeTarget === null ? "" : RUNTIME_ACTION_LABELS[runtimeTarget.action].replace("…", "")}
+        confirmLabel={runtimeTarget?.action === "rollback" ? "回滚" : runtimeTarget?.action === "retry" ? "重试" : "升级"}
+        tone="primary"
+        pending={runtimeTarget !== null && pendingWorkspaceId === runtimeTarget.workspace.id}
+        onConfirm={() => {
+          if (runtimeTarget !== null) void changeRuntimeVersion(runtimeTarget.workspace, runtimeTarget.action);
+        }}
+        onCancel={() => setRuntimeTarget(null)}
+      >
+        <p>
+          将以{runtimeTarget?.action === "rollback" ? "上一版本" : runtimeTarget?.action === "retry" ? "上次请求的版本" : "平台当前版本"}
+          重新创建 Workspace <strong>{runtimeTarget?.workspace.name}</strong> 的容器。<code>/workspace</code>、
+          主目录、Pi 会话与配置都保留不变；切换期间不能启动。
+        </p>
+        {runtimeTarget?.action === "rollback" ? (
+          <p className="muted">新版本中产生的会话在旧版本中可能无法完整显示，文件不受影响。</p>
+        ) : null}
+      </ConfirmDialog>
       <ConfirmDialog
         open={deleteTarget !== null}
         title="永久删除 Workspace"
