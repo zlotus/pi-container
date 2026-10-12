@@ -575,7 +575,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
     expect(listA.json()).toMatchObject({
       workspaces: [{ name: "persisted-workspace", state: "CREATED" }],
     });
-    expect(listB.json()).toEqual({ workspaces: [] });
+    expect(listB.json()).toEqual({ idleStopAfterHours: null, workspaces: [] });
 
     const auditA = await app.inject({
       method: "GET",

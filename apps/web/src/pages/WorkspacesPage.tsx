@@ -78,6 +78,20 @@ function RuntimeSummary({ workspace }: { workspace: Workspace }) {
   );
 }
 
+/** The idle-stop line of a card (specs.md Phase 18.5); null when there is nothing to say. */
+export function idleNote(
+  workspace: Pick<Workspace, "state" | "lastStopReason">,
+  idleStopAfterHours: number | null,
+): string | null {
+  if (workspace.state === "STOPPED" && workspace.lastStopReason === "idle") {
+    return "因长时间空闲已自动停止，数据完整保留，可随时启动";
+  }
+  if (workspace.state === "RUNNING" && idleStopAfterHours !== null) {
+    return `无连接、无访问且无计算活动 ${idleStopAfterHours} 小时后将自动停止`;
+  }
+  return null;
+}
+
 export const WORKSPACE_POLL_INTERVAL_MS = 3_000;
 /** Refresh of observed CPU/memory while a Workspace runs and the page is visible (Phase 17.7). */
 export const WORKSPACE_USAGE_POLL_INTERVAL_MS = 15_000;
@@ -99,6 +113,7 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
   const [deleteTarget, setDeleteTarget] = useState<Workspace | null>(null);
   const [runtimeTarget, setRuntimeTarget] = useState<{ workspace: Workspace; action: RuntimeAction } | null>(null);
   const [modelUsage, setModelUsage] = useState<ModelUsageResponse | null>(null);
+  const [idleStopAfterHours, setIdleStopAfterHours] = useState<number | null>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -114,8 +129,9 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
   }, []);
 
   const loadWorkspaces = useCallback(async () => {
-    const result = await api<{ workspaces: Workspace[] }>("/api/workspaces");
+    const result = await api<{ workspaces: Workspace[]; idleStopAfterHours?: number | null }>("/api/workspaces");
     setWorkspaces(result.workspaces);
+    setIdleStopAfterHours(result.idleStopAfterHours ?? null);
   }, []);
 
   useEffect(() => {
@@ -342,6 +358,9 @@ export function WorkspacesPage({ session }: { session: SessionResponse }) {
                 <div><dt>创建于</dt><dd><RelativeTime value={workspace.createdAt} /></dd></div>
                 <div><dt>磁盘</dt><dd><DiskUsage disk={workspace.disk} /></dd></div>
                 <div><dt>Runtime</dt><dd><RuntimeSummary workspace={workspace} /></dd></div>
+                {idleNote(workspace, idleStopAfterHours) === null ? null : (
+                  <div><dt>空闲回收</dt><dd className="muted">{idleNote(workspace, idleStopAfterHours)}</dd></div>
+                )}
                 {workspace.usage === undefined || workspace.usage === null ? null : (
                   <div><dt>实际用量</dt><dd><ResourceUsage usage={workspace.usage} /></dd></div>
                 )}

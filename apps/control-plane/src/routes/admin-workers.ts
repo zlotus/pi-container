@@ -56,6 +56,21 @@ export function registerAdminWorkerRoutes(
     };
   });
 
+  /** The lifecycle policies an operator configured (specs.md Phase 18.8); read-only. */
+  app.get("/api/admin/lifecycle", async (request, reply) => {
+    const auth = await authenticateAdmin(request, reply);
+    if (auth === null) return reply;
+    reply.header("cache-control", "no-store");
+    const idle = dependencies.idle?.policy;
+    return {
+      idle:
+        idle === undefined
+          ? { enabled: false, stopAfterHours: null, cpuThresholdCores: null }
+          : { enabled: true, stopAfterHours: idle.stopAfterHours, cpuThresholdCores: idle.cpuThresholdCores },
+      defaultRuntimeImage: dependencies.defaultRuntimeImage,
+    };
+  });
+
   app.patch("/api/admin/workers/:id", async (request, reply) => {
     const auth = await authenticateAdmin(request, reply);
     if (auth === null) return reply;

@@ -8,7 +8,7 @@ export function createWorkspaceLifecycleRepository(database: DatabaseClient) {
     }): Promise<boolean> {
       const rows = await database<{ id: string }[]>`
         update workspaces
-        set state = 'RUNNING', updated_at = now(), last_activity_at = now()
+        set state = 'RUNNING', updated_at = now(), last_activity_at = now(), last_stop_reason = null
         where id = ${input.workspaceId}
           and worker_id = ${input.workerId}
           and state = 'STARTING'

@@ -90,3 +90,16 @@ release notes。
 
 - 被吊销 Worker 上的 Workspace 不能删除（Worker 无法确认删除）；要么重新启用该 Worker，要么接受数据留在该主机。
 - Audit：`worker.disabled`（含受影响 Workspace 数与吊销的模型 key 数）、`worker.enabled`、`worker.deleted`。
+
+## 3. 空闲回收（idle stop）
+
+- 默认关闭。在 Control Plane 的环境中设置 `IDLE_STOP_AFTER_HOURS`（整数 1～720，建议 24）启用，`IDLE_CPU_THRESHOLD_CORES`
+  （默认 0.05 核）为“有计算活动”的阈值；修改后重启 Control Plane。Admin Workers 页首显示当前策略。
+- 一个运行中的 Workspace 只有在**同时**满足以下条件并持续 N 小时时才被停止：没有经过 Gateway 的打开连接（浏览器标签页、
+  SSE、WebSocket）；N 小时内没有经过 Gateway 的访问；CPU 的 5 分钟平均一直低于阈值。不知道的情况一律算作“有活动”：
+  Worker 断开、样本缺失或间断、容器重启，以及 Control Plane 启动后的头 N 小时（重启后窗口重新计时）。
+- 只执行 `stop`：文件、会话、模型凭据与 Worker 分配都保留，capacity 名额不释放；卡片显示“因长时间空闲已自动停止”，用户随时
+  可再启动。每 5 分钟检查一次，每轮最多停止 10 个；Audit `workspace.idle_stopped`（含时长、阈值、最后访问时间）。
+- 停不下来的常见原因：保持打开的 pi-web 标签页（会一直保持连接，这是有意的）；Workspace 中仍在运行的进程（构建、服务、Agent
+  任务）；Worker 离线。Admin Workspaces 的“最近访问”列显示最后一次 Gateway 访问。
+- 指标：`agent_runtime_idle_policy_enabled`、`agent_runtime_idle_stops_total{result="stopped|skipped_race|failed"}`。

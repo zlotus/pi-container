@@ -6093,6 +6093,21 @@ Admin 页面截图、`workspaces` 与 `model_keys` 相关行、Prometheus Alerts
   用户可指定镜像、未完成时允许启动、数据库在任意状态接受 intent、`UPGRADING` 时允许删除、offline 处理漏掉 `UPGRADING`、
   调度使用 Worker 级而非镜像级 capability；Gateway 不剥离 Next.js 内部请求头、不剥离 `x-invoke-*`。
 
+**第五步：空闲回收（2026-10-12）**
+
+- **访问时间总是记录**：`last_access_at` 不论空闲回收是否启用都按 18.5 写入（Admin Workspaces“最近访问”列使用）；在
+  Gateway 为每个已授权请求登记连接时记录，连接结束时再记录一次。
+- **停止流程**：空闲停止与用户停止使用同一组 Worker 命令与收尾函数（`workspace.stop`、结果校验、`finishWorkspaceStop` 或
+  失败标记），但用专门的条件开始函数 `beginIdleStop`（在 SQL 中再次要求“运行中、期望运行、本次运行与最后访问都早于截止时间”）
+  并在同一事务写 `workspace.idle_stopped`；不经过 `routes/workspaces.ts` 的用户 stop 路由（它要求 Owner 身份）。
+- **候选只来自在线、启用的 Worker**（SQL 联表），连接与 CPU 条件在内存中检查，检查与开始之间没有异步间隙。
+- **CPU**：5 分钟桶之外，查询时也计算“正在填充的桶”（满 1 分钟后）的平均值，使刚开始的持续工作立即算作活动。
+- **API**：`GET /api/workspaces` 顶层增加 `idleStopAfterHours`（卡片说明使用），Workspace 对象增加 `lastAccessAt`、
+  `lastStopReason`（代替 18.8 中嵌套的 `idle` 字段）。
+- **变异检查（已执行，11 项全部被测试发现）**：去掉连接 / 访问 / CPU / Worker 连接条件；未知历史视为空闲；样本间断不算活动；
+  去掉 Control Plane 重启窗口；SQL 开始函数不检查最后访问；候选包含离线 Worker；Gateway 在连接结束时不记录访问；不计算正在
+  填充的桶。
+
 ## Phase 19：生产部署与 v1.0 发布
 
 状态：待开工设计。

@@ -31,6 +31,7 @@ import { z } from "zod";
 
 import type { PlatformMetrics } from "./metrics/platform-metrics.js";
 import type { WorkspaceSessionExchange } from "./session-exchange.js";
+import type { WorkspaceAccessTracker } from "./idle/access-tracker.js";
 import type { SessionConnectionRegistry } from "./session-connections.js";
 
 const ExchangeBodySchema = z.object({ code: z.string().min(32).max(256) }).strict();
@@ -51,6 +52,8 @@ export interface WorkspaceGatewayDependencies {
   workerOfflineAfterMs: number;
   workerGatewayTokens: Readonly<Record<string, string>>;
   sessionConnections?: SessionConnectionRegistry;
+  /** Last Gateway access per Workspace, for idle stop (specs.md Phase 18.5). */
+  access?: WorkspaceAccessTracker;
   now?: () => Date;
   log?: Logger;
   metrics?: PlatformMetrics;
@@ -240,7 +243,9 @@ function trackSessionConnection(
   authorized: AuthorizedWorkspace,
   disconnect: () => void,
 ): (() => void) | undefined {
-  const unregister = dependencies.sessionConnections?.register(
+  const workspaceId = authorized.workspace.id;
+  dependencies.access?.touch(workspaceId);
+  const registered = dependencies.sessionConnections?.register(
     {
       userId: authorized.userId,
       sessionId: authorized.sessionId,
@@ -263,7 +268,11 @@ function trackSessionConnection(
       }
     })
     .catch(disconnect);
-  return unregister;
+  // The idle window starts when the last connection ends, not when it began.
+  return () => {
+    registered?.();
+    dependencies.access?.touch(workspaceId, true);
+  };
 }
 
 async function handleExchange(

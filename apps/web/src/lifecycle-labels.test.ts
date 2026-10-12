@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import { describeAuditEvent } from "./components/AuditEventRow.js";
 import { runtimeLabel, TRANSITIONAL_WORKSPACE_STATES, workspaceStateLabel } from "./labels.js";
 import { runtimeChangeable } from "./pages/AdminWorkspacesPage.js";
-import { runtimeActions } from "./pages/WorkspacesPage.js";
+import { idleNote, runtimeActions } from "./pages/WorkspacesPage.js";
+import { idlePolicyText } from "./pages/AdminWorkersPage.js";
 import type { WorkspaceRuntime } from "./types.js";
 
 const event = (eventType: string, details: Record<string, unknown>) => ({
@@ -90,5 +91,23 @@ describe("Runtime version display and actions (Phase 18.8)", () => {
   it("names the UPGRADING state and polls while it lasts", () => {
     expect(workspaceStateLabel("UPGRADING")).toBe("Runtime 切换中");
     expect(TRANSITIONAL_WORKSPACE_STATES).toContain("UPGRADING");
+  });
+});
+
+describe("idle stop notes (Phase 18.5)", () => {
+  it("explains an idle stop and warns while running under the policy", () => {
+    expect(idleNote({ state: "STOPPED", lastStopReason: "idle" }, null)).toContain("因长时间空闲已自动停止");
+    expect(idleNote({ state: "STOPPED", lastStopReason: null }, 24)).toBeNull();
+    expect(idleNote({ state: "RUNNING", lastStopReason: null }, 24)).toBe(
+      "无连接、无访问且无计算活动 24 小时后将自动停止",
+    );
+    expect(idleNote({ state: "RUNNING", lastStopReason: null }, null)).toBeNull();
+  });
+
+  it("states the admin policy", () => {
+    expect(idlePolicyText({ idle: { enabled: false, stopAfterHours: null, cpuThresholdCores: null }, defaultRuntimeImage: "a" }))
+      .toBe("空闲回收：未启用。");
+    expect(idlePolicyText({ idle: { enabled: true, stopAfterHours: 24, cpuThresholdCores: 0.05 }, defaultRuntimeImage: "a" }))
+      .toContain("0.05 核持续 24 小时");
   });
 });

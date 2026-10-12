@@ -131,7 +131,7 @@ describe("Phase 9 Admin Users", () => {
     expect(metadata.json()).toMatchObject({
       workspaces: [{ name: "phase9-owned" }],
     });
-    expect(adminOwnWorkspaces.json()).toEqual({ workspaces: [] });
+    expect(adminOwnWorkspaces.json()).toEqual({ idleStopAfterHours: null, workspaces: [] });
     expect(ownershipRewrite.statusCode).toBe(400);
     expect(
       dependencies.testState.workspaces.find(

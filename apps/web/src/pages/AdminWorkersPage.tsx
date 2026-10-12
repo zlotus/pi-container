@@ -64,6 +64,19 @@ export function beginWorkerPolling(
   return () => cancel(timer);
 }
 
+export interface LifecyclePolicy {
+  idle: { enabled: boolean; stopAfterHours: number | null; cpuThresholdCores: number | null };
+  defaultRuntimeImage: string;
+}
+
+/** The idle stop policy as one sentence for the page heading (Phase 18.8). */
+export function idlePolicyText(policy: LifecyclePolicy): string {
+  const idle = policy.idle;
+  return idle.enabled
+    ? `空闲回收：已启用，无连接、无访问且 CPU 低于 ${idle.cpuThresholdCores} 核持续 ${idle.stopAfterHours} 小时后停止（不删除数据）。`
+    : "空闲回收：未启用。";
+}
+
 export function AdminWorkersPage({ session }: { session: SessionResponse }) {
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [schedulingTarget, setSchedulingTarget] = useState<Worker | null>(null);
@@ -72,6 +85,11 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
   const [error, setError] = useState<string | null>(null);
   const [expandedWorkerId, setExpandedWorkerId] = useState<string | null>(null);
   const [defaultRuntimeImage, setDefaultRuntimeImage] = useState<string | null>(null);
+  const [lifecycle, setLifecycle] = useState<LifecyclePolicy | null>(null);
+
+  useEffect(() => {
+    void api<LifecyclePolicy>("/api/admin/lifecycle").then(setLifecycle).catch(() => undefined);
+  }, []);
 
   const refreshWorkers = useCallback(async () => {
     try {
@@ -120,7 +138,10 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
       <div className="page-heading">
         <div>
           <h1>Worker</h1>
-          <p>Worker 状态、Workspace 容量与运行环境信息，每 5 秒自动更新。</p>
+          <p>
+            Worker 状态、Workspace 容量与运行环境信息，每 5 秒自动更新。
+            {lifecycle === null ? null : ` ${idlePolicyText(lifecycle)}`}
+          </p>
         </div>
         <button className="secondary" onClick={() => void refreshWorkers()}>刷新</button>
       </div>

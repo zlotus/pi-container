@@ -92,6 +92,8 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
     );
     const [access, runtimes] = await Promise.all([modelAccessOf(workspaces), runtimeOf(workspaces)]);
     return {
+      /** Hours of idleness after which the platform stops a Workspace; null when off (18.5). */
+      idleStopAfterHours: dependencies.idle?.policy.stopAfterHours ?? null,
       workspaces: workspaces.map((workspace) =>
         publicWorkspace(
           workspace,

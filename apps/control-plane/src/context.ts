@@ -35,6 +35,9 @@ import type { OAuth2Runtime } from "./oauth2.js";
 import type { OidcRuntime } from "./oidc.js";
 import type { SessionConnectionRegistry } from "./session-connections.js";
 import type { WorkspaceSessionExchange } from "./session-exchange.js";
+import type { WorkspaceAccessTracker } from "./idle/access-tracker.js";
+import type { ComputeActivityTracker } from "./idle/compute-activity.js";
+import type { IdlePolicy } from "./idle/idle-stopper.js";
 import type { WorkerChannel } from "./worker-channel.js";
 import type { WorkerControlStore } from "./worker-control.js";
 
@@ -59,6 +62,8 @@ type Phase1Store = Pick<
   | "beginWorkspaceDelete"
   | "deleteConfirmedWorkspace"
   | "markWorkspaceRuntimeFailure"
+  | "listIdleStopCandidates"
+  | "beginIdleStop"
   | "beginWorkerReconciliation"
   | "reconcileWorkspaceRecovery"
   | "deleteRecoveredWorkspace"
@@ -136,6 +141,14 @@ export interface ControlPlaneDependencies {
   log?: Logger;
   /** Prometheus instruments (specs.md Phase 17.4); a private registry when omitted. */
   metrics?: PlatformMetrics;
+  /** Idle stop (specs.md Phase 18.5); absent when the administrator has not enabled it. */
+  idle?: {
+    policy: IdlePolicy;
+    access: WorkspaceAccessTracker;
+    compute: ComputeActivityTracker;
+    /** When this Control Plane process started. */
+    startedAt: Date;
+  };
   /** Latest Worker-reported usage (Phase 17.7); an empty registry when omitted. */
   usage?: UsageRegistry;
 }

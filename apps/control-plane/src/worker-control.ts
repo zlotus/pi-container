@@ -8,6 +8,7 @@ import type { Logger } from "@agent-runtime/logging";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 
 import type { PlatformMetrics } from "./metrics/platform-metrics.js";
+import type { ComputeActivityTracker } from "./idle/compute-activity.js";
 import type { UsageRegistry } from "./metrics/usage-registry.js";
 import type { WorkerChannel } from "./worker-channel.js";
 
@@ -42,6 +43,7 @@ export function registerWorkerControlChannel(
     log?: Logger;
     metrics?: PlatformMetrics;
     usage?: UsageRegistry;
+    computeActivity?: ComputeActivityTracker;
   },
 ): void {
   const identities = new WeakMap<FastifyRequest, WorkerConnectionIdentity>();
@@ -188,6 +190,11 @@ export function registerWorkerControlChannel(
                   identity.workerId,
                   reported.map((sample) => sample.workspaceId),
                 );
+                // CPU history for idle stop, from the same accepted samples (Phase 18.5).
+                dependencies.computeActivity?.record(
+                  identity.workerId,
+                  reported.filter((sample) => assigned.has(sample.workspaceId)),
+                );
                 const { ignored } = dependencies.usage.record({
                   workerId: identity.workerId,
                   receivedAt: dependencies.now(),
@@ -236,6 +243,7 @@ export function registerWorkerControlChannel(
           dependencies.channel.unregister(identity.workerId, socket);
           if (!dependencies.channel.isConnected(identity.workerId)) {
             dependencies.usage?.forget(identity.workerId);
+            dependencies.computeActivity?.forgetWorker(identity.workerId);
           }
         }
       });

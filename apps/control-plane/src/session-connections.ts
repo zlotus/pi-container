@@ -28,6 +28,15 @@ export class SessionConnectionRegistry {
     this.#closeMatching((connection) => connection.userId === userId);
   }
 
+  /** Open Gateway HTTP requests, SSE streams and WebSockets of one Workspace (18.5). */
+  activeCount(workspaceId: string): number {
+    let count = 0;
+    for (const connection of this.#connections) {
+      if (connection.workspaceId === workspaceId) count += 1;
+    }
+    return count;
+  }
+
   /** Closes every connection to these Workspaces, e.g. when their Worker is revoked. */
   closeWorkspaces(workspaceIds: Iterable<string>): void {
     const targets = new Set(workspaceIds);

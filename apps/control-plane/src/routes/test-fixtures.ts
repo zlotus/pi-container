@@ -1244,6 +1244,13 @@ export async function createTestDependencies(
         workspaces.splice(index, 1);
         return true;
       },
+      // Idle stop is tested against PostgreSQL and in src/idle; routes never call these.
+      async listIdleStopCandidates() {
+        return [];
+      },
+      async beginIdleStop() {
+        return false;
+      },
       async findWorkspaceById(id) {
         return workspaces.find((workspace) => workspace.id === id) ?? null;
       },
