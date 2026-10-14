@@ -24,7 +24,7 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
   探针），Workspace 元数据 pin 容器的镜像 ID；已停止的 Workspace 经 `workspace.runtime.set` 用另一个镜像重建容器（与 ensure
   同一创建函数，持久目录不变，幂等，先持久化 intent），失败可重试或回滚；Owner 可升级到默认 / 回滚 / 重试，admin 可切换到
   Worker 提供的任一镜像。协议 v6，migration `0013_lifecycle`，Portal 显示版本与操作，指标与告警
-  `AgentRuntimeDefaultRuntimeImageMissing`。**新镜像** `agent-runtime:phase18-pi1.1`：pi-web 0.12.0 + Pi 1.1.0，重写
+  `AgentRuntimeDefaultRuntimeImageMissing`。**新镜像** `agent-runtime:phase18-pi1.1-r2`：pi-web 0.12.0 + Pi 1.1.0（全部 Node 依赖由 lockfile 固定），重写
   default-cwd patch，preview 密钥在 tmpfs 中每次启动轮换（`pi-web-launch`），关闭 Pi telemetry；Gateway 剥离 Next.js 内部
   请求头。**MiMo** v2.6 flash / pro 接入平台目录。**空闲回收**：默认关闭，无连接、无访问且 CPU 5 分钟平均低于阈值持续 N 小时
   才停止，未知即活动，只停不删。验证：单元/路由/PostgreSQL 集成、真实 Docker（含新旧镜像切换、Session 跨 Pi 版本、目录在两个

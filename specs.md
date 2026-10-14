@@ -6108,6 +6108,21 @@ Admin 页面截图、`workspaces` 与 `model_keys` 相关行、Prometheus Alerts
   去掉 Control Plane 重启窗口；SQL 开始函数不检查最后访问；候选包含离线 Worker；Gateway 在连接结束时不记录访问；不计算正在
   填充的桶。
 
+**验收中发现：镜像依赖漂移（2026-10-14）**
+
+- 现象：worker-c 上 10-14 构建的 `phase18-pi1.1` 镜像中，pi-web 打开后读写 Pi 状态的接口（`/api/sessions`、
+  `/api/sessions/ui-state`、`/api/agent/running`）返回 500；worker-a 上 10-12 构建的同名镜像正常。
+- 原因：Dockerfile 用 `npm install --global` 安装，没有 lockfile，传递依赖按构建当天解析。worker-c 的镜像中全局 `pi` CLI
+  的核心包（pi-ai、pi-agent-core、pi-mcp、pi-tui、chord）为 10-12 23:00 UTC 发布的 1.2.0，pi-web 中的 `pi-telemetry` 也为
+  1.2.0，而 pi-web 精确依赖 Pi 1.1.0；同一镜像里混入了两个 Pi 版本。这违反了“drift-prone 依赖必须 pin”的规则（18.3 只 pin
+  了顶层包）。
+- 修复：`runtime/packages/package.json` + `package-lock.json` 固定全部 Node 包，`npm ci` 安装；lockfile 用
+  `npm install --package-lock-only --before=2026-10-12T06:45:00Z` 生成，与 worker-a 上已验证镜像的依赖树逐项对比一致。
+  原有路径以符号链接保留（`/opt/agent-runtime/lib/node_modules`、`/opt/agent-runtime/bin/*`）。镜像自检增加 `npm ls`
+  （树与 lockfile 不符即失败）。按“同一 tag 不重建”的规则改用新 tag `agent-runtime:phase18-pi1.1-r2`（版本 `phase-18-r2`）。
+- 仍存在的差异来源：Debian 系统包按构建当天解析。开发环境改为一台构建、`docker save | docker load` 分发（各 Worker digest
+  相同）；生产由 CI 构建并推送镜像仓库（Phase 19）。runbook 已写明。
+
 ## Phase 19：生产部署与 v1.0 发布
 
 状态：待开工设计。

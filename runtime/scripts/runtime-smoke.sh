@@ -40,6 +40,8 @@ node -e '
   }
   console.log(`pi-web ${web.version}, Pi ${cli.version}`);
 '
+# The installed tree is exactly runtime/packages/package-lock.json (npm ci); npm ls fails on drift.
+(cd /opt/agent-runtime && npm ls --omit=dev --all >/dev/null)
 grep -q 'process.env.PI_WEB_DEFAULT_CWD' "${pi_web_root}/.next/server/app/api/default-cwd/route.js"
 grep -q 'fs.realpathSync(manifestPath)' "${pi_web_root}/bin/rotate-preview-secrets.js"
 test -L "${pi_web_root}/.next/prerender-manifest.json"

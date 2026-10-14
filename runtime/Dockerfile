@@ -9,26 +9,32 @@ ARG PI_WEB_VERSION=0.12.0
 # Must equal the exact Pi version pi-web depends on (checked below): one Pi version reads
 # and writes /agent/pi, whether through pi-web or the `pi` CLI (specs.md Phase 18.3).
 ARG PI_VERSION=1.1.0
-ARG PLAYWRIGHT_VERSION=1.63.0
-ARG PNPM_VERSION=11.24.0
 
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
+# The whole dependency tree is pinned by packages/package-lock.json and installed with
+# npm ci, so every Worker that builds this image gets the same content (a global npm
+# install resolves transitive dependencies to whatever is newest on the day). The old
+# global layout is kept as links: lib/node_modules and bin/<command>.
+COPY packages/package.json packages/package-lock.json /opt/agent-runtime/
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends build-essential python3 \
-    && npm install --global --prefix /opt/agent-runtime \
-      "@agegr/pi-web@${PI_WEB_VERSION}" \
-      "@earendil-works/pi-coding-agent@${PI_VERSION}" \
-      "playwright@${PLAYWRIGHT_VERSION}" \
-      "pnpm@${PNPM_VERSION}" \
+    && cd /opt/agent-runtime \
+    && npm ci --omit=dev --no-audit --no-fund \
+    && mkdir -p lib bin \
+    && ln -s ../node_modules lib/node_modules \
+    && for command in pi pi-web playwright pnpm pnpx; do \
+         test -e "node_modules/.bin/${command}"; \
+         ln -s "../node_modules/.bin/${command}" "bin/${command}"; \
+       done \
     && rm -rf /var/lib/apt/lists/* /root/.npm \
     && node -e ' \
-      const root = "/opt/agent-runtime/lib/node_modules"; \
+      const root = "/opt/agent-runtime/node_modules"; \
       const web = require(`${root}/@agegr/pi-web/package.json`); \
       const cli = require(`${root}/@earendil-works/pi-coding-agent/package.json`); \
       const wanted = web.dependencies["@earendil-works/pi-coding-agent"]; \
-      if (cli.version !== wanted || cli.version !== process.env.PI_VERSION) { \
-        throw new Error(`pi CLI ${cli.version} must equal pi-web dependency ${wanted} and PI_VERSION ${process.env.PI_VERSION}`); \
+      if (web.version !== process.env.PI_WEB_VERSION || cli.version !== wanted || cli.version !== process.env.PI_VERSION) { \
+        throw new Error(`pi-web ${web.version} / pi CLI ${cli.version} must match ${process.env.PI_WEB_VERSION} / ${wanted} / ${process.env.PI_VERSION}`); \
       }'
 
 COPY patches/pi-web-0.12.0.mjs /tmp/pi-web-patch.mjs
@@ -134,7 +140,7 @@ RUN chmod 0755 \
 
 LABEL io.agent-runtime.phase="18" \
       io.agent-runtime.playwright.version="1.63.0" \
-      io.agent-runtime.runtime.version="phase-18" \
+      io.agent-runtime.runtime.version="phase-18-r2" \
       io.agent-runtime.pi-web.version="0.12.0" \
       io.agent-runtime.pi.version="1.1.0"
 

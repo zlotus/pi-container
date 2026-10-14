@@ -12,7 +12,7 @@ Phase 18（`specs.md` 第 64 节 Phase 18）的运维说明：Runtime 镜像的�
 - 每台 Worker 用 `RUNTIME_IMAGES` 列出它提供的镜像（1～4 个），每项按 digest pin：
 
   ```bash
-  RUNTIME_IMAGES=agent-runtime:phase7-toolchain@sha256:<digest>,agent-runtime:phase18-pi1.1@sha256:<digest>
+  RUNTIME_IMAGES=agent-runtime:phase7-toolchain@sha256:<digest>,agent-runtime:phase18-pi1.1-r2@sha256:<digest>
   ```
 
   digest 取 `docker image inspect <tag> --format '{{.Id}}'`（containerd 镜像存储下与 `RepoDigests` 相同）。本地构建的镜像在
@@ -32,6 +32,24 @@ docker image inspect agent-runtime:<新 tag> --format '{{.Id}} {{json .Config.La
 pnpm test:e2e:runtime                      # 真实 Docker：生命周期、Session、Files、持久化、新旧镜像切换
 TEST_DOCKER_RUNTIME=1 pnpm --filter @agent-runtime/worker exec vitest run src/model-relay/catalog.docker.test.ts
 ```
+
+Node 包（pi-web、Pi、Playwright、pnpm 及全部传递依赖）由 `runtime/packages/package-lock.json` 固定、`npm ci` 安装；
+改动 pi-web / Pi 版本时先改 `package.json`，再在镜像所用的 node 镜像中重新生成 lockfile 并审阅差异：
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD/runtime/packages:/work" -w /work \
+  node:22.20.0-bookworm-slim@sha256:b21fe589dfbe5cc39365d0544b9be3f1f33f55f3c86c87a76ff65a02f8f5848e \
+  npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+```
+
+**同一镜像分发到各 Worker**：Debian 系统包仍按构建当天解析，各 Worker 分别构建得到的镜像不保证完全相同。开发环境在一台
+Worker 上构建，再分发到其他 Worker（digest 相同，`RUNTIME_IMAGES` 各处一致）：
+
+```bash
+docker save agent-runtime:<tag> | ssh <其他 Worker> docker load
+```
+
+生产环境由 CI 构建一次、推送到内部镜像仓库（Phase 19）。
 
 最后一条在本机的每个 Runtime 镜像中加载平台模型目录：新旧镜像共用一个目录，任一 Pi 版本拒绝都不能上线。pi-web 版本变化时
 必须重写 `runtime/patches/pi-web-<版本>.mjs`（只接受 pin 的版本，片段对不上即构建失败），并按 `specs.md` 18.1 的检查表核对
