@@ -20,10 +20,14 @@ services:
       LITELLM_LOG: "WARNING"
     volumes:
       - ./config.yaml:/etc/litellm/config.yaml:ro
-    # Only the Control Plane and Workers on this host reach the gateway; Workspaces never do
-    # (host addresses are dropped by the Phase 14 egress table).
+    # Only the Control Plane and Workers reach the gateway; Workspaces never do (host addresses
+    # are dropped by the Phase 14 egress table, and each Worker adds its gateway address to its
+    # protected set). The second binding serves Workers on other hosts: set LITELLM_REMOTE_BIND
+    # to an address on the protected Worker network (e.g. this host's Tailscale IPv4); by default
+    # it is loopback only. See docs/model-gateway-runbook.md, "Workers on other hosts".
     ports:
       - "127.0.0.1:${LITELLM_PORT:-4400}:4000"
+      - "${LITELLM_REMOTE_BIND:-127.0.0.1}:${LITELLM_REMOTE_PORT:-4401}:4000"
     networks:
       - platform
 

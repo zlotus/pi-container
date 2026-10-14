@@ -58,6 +58,23 @@ WORKER_MODEL_RELAY_PORT=3101                         # 不能与 WORKER_GATEWAY_
 中继端口的出口例外需要 Worker 具备 `CAP_NET_ADMIN`（与 Phase 14 相同，开发用
 `tools/dev/run-worker-privileged.sh`）。Admin“Worker”页面的“模型网关”面板与 Worker 详情中的“模型中继”显示状态。
 
+### 2.1 其他主机上的 Worker（开发环境）
+
+开发网关默认只发布在网关主机的 `127.0.0.1:4400`，其他主机上的 Worker 连不到，它们的 Workspace 显示“该 Worker 未启用
+模型中继”。让它们接入：
+
+1. 网关主机：在 compose 环境中设置 `LITELLM_REMOTE_BIND=<本机在受保护 Worker 网络上的地址>`（开发环境为 Tailscale IPv4，
+   `tailscale ip -4`），从主 checkout 执行 `docker compose -f deploy/model-gateway/compose.yml up -d --force-recreate`。网关
+   随后同时监听 `<该地址>:4401`（`LITELLM_REMOTE_PORT`）。
+2. 远端 Worker：`curl -s http://<该地址>:4401/health/liveliness` 应返回 200；在其环境中设置
+   `WORKER_MODEL_GATEWAY_URL=http://<该地址>:4401` 与 `WORKER_MODEL_RELAY_PORT=3101`，以 `CAP_NET_ADMIN` 重启 Worker。
+3. 隔离不变：Worker 把 `WORKER_MODEL_GATEWAY_URL` 的地址加入本机出口保护集合，它的 Workspace 连不到网关；网关主机上的
+   Workspace 本来就连不到本机任何地址。代价是网关的推理与管理接口对该网络上的其他设备可达（仍需 master key 或虚拟 key），
+   只在受保护网络上这样做；生产部署见 Phase 19。
+
+**修改配置或切换分支后必须 force-recreate**：`config.yaml` 是单文件 bind mount，运行中的容器看到的是挂载时的那个文件，
+`git switch` 或编辑器“另存为”换掉文件后，不重建容器就仍是旧配置（Admin 面板会显示“网关中缺少”）。
+
 ## 3. 新增或调整模型
 
 1. 在 `config.yaml` 增加条目，统一使用 `litellm_proxy/<上游模型>` + `api_base` + `api_key: os.environ/...`，
