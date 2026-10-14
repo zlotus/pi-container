@@ -38,7 +38,15 @@ export type ModelGatewayOperation =
   | "list_models"
   | "user_info";
 export type ModelGatewayResult = "ok" | "error" | "unreachable";
-export type BackgroundTask = "worker_offline_sweep" | "auth_throttle_cleanup" | "model_key_loop";
+export type BackgroundTask =
+  | "worker_offline_sweep"
+  | "auth_throttle_cleanup"
+  | "model_key_loop"
+  | "access_flush"
+  | "idle_stop_sweep";
+export type RuntimeChangeDirection = "upgrade" | "rollback" | "retry" | "admin";
+/** ok: switched; reverted: the Worker refused without changes; incomplete: outcome unknown. */
+export type RuntimeChangeResult = "ok" | "reverted" | "incomplete";
 
 export interface PlatformMetricsOptions {
   /** Node.js process metrics (`nodejs_*`, `process_*`); off in unit tests. */
@@ -171,6 +179,26 @@ export class PlatformMetrics {
     registers: [this.registry],
   });
 
+  readonly idlePolicyEnabled = new Gauge({
+    name: "agent_runtime_idle_policy_enabled",
+    help: "1 when idle stop is enabled (Phase 18.5).",
+    registers: [this.registry],
+  });
+
+  readonly idleStops = new Counter({
+    name: "agent_runtime_idle_stops_total",
+    help: "Idle stop attempts by result (Phase 18.5).",
+    labelNames: ["result"] as const,
+    registers: [this.registry],
+  });
+
+  readonly runtimeChanges = new Counter({
+    name: "agent_runtime_runtime_changes_total",
+    help: "Workspace Runtime image changes by direction and result (Phase 18.4).",
+    labelNames: ["direction", "result"] as const,
+    registers: [this.registry],
+  });
+
   constructor(options: PlatformMetricsOptions = {}) {
     new Gauge({
       name: "agent_runtime_build_info",
@@ -247,5 +275,13 @@ export class PlatformMetrics {
 
   recordBackgroundFailure(task: BackgroundTask): void {
     this.backgroundFailures.labels(task).inc();
+  }
+
+  recordIdleStop(result: "stopped" | "skipped_race" | "failed"): void {
+    this.idleStops.labels(result).inc();
+  }
+
+  recordRuntimeChange(direction: RuntimeChangeDirection, result: RuntimeChangeResult): void {
+    this.runtimeChanges.labels(direction, result).inc();
   }
 }

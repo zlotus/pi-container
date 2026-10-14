@@ -3,7 +3,7 @@ import type { FastifyInstance } from "fastify";
 
 import type { RouteContext } from "../context.js";
 import { errorBody } from "../http.js";
-import { publicWorker, publicWorkspace } from "../presenters.js";
+import { publicWorker, publicWorkspace, workspaceRuntime } from "../presenters.js";
 import type { RuntimeCommands } from "../runtime-commands.js";
 
 const AdminWorkerParamsSchema = z
@@ -43,14 +43,31 @@ export function registerAdminWorkerRoutes(
     const workers = await dependencies.workerStore.listWorkersWithAssignments();
     reply.header("cache-control", "no-store");
     return {
+      defaultRuntimeImage: dependencies.defaultRuntimeImage,
       workers: workers.map((worker) =>
         publicWorker(
           worker,
           currentTime,
           dependencies.workerOfflineAfterMs,
           context.usage.worker(worker.id),
+          dependencies.defaultRuntimeImage,
         ),
       ),
+    };
+  });
+
+  /** The lifecycle policies an operator configured (specs.md Phase 18.8); read-only. */
+  app.get("/api/admin/lifecycle", async (request, reply) => {
+    const auth = await authenticateAdmin(request, reply);
+    if (auth === null) return reply;
+    reply.header("cache-control", "no-store");
+    const idle = dependencies.idle?.policy;
+    return {
+      idle:
+        idle === undefined
+          ? { enabled: false, stopAfterHours: null, cpuThresholdCores: null }
+          : { enabled: true, stopAfterHours: idle.stopAfterHours, cpuThresholdCores: idle.cpuThresholdCores },
+      defaultRuntimeImage: dependencies.defaultRuntimeImage,
     };
   });
 
@@ -100,7 +117,10 @@ export function registerAdminWorkerRoutes(
   app.get("/api/admin/workspaces", async (request, reply) => {
     const auth = await authenticateAdmin(request, reply);
     if (auth === null) return reply;
-    const workspaces = await dependencies.store.listAllWorkspaces();
+    const [workspaces, images] = await Promise.all([
+      dependencies.store.listAllWorkspaces(),
+      dependencies.workerStore.listWorkerRuntimeImages(),
+    ]);
     reply.header("cache-control", "no-store");
     // Metadata only: admin role grants no Workspace content access or open/exchange.
     return {
@@ -109,6 +129,15 @@ export function registerAdminWorkerRoutes(
           workspace,
           undefined,
           context.usage.workspace(workspace.id, workspace.workerId),
+          workspaceRuntime(
+            workspace,
+            workspace.workerId === null ? [] : (images.get(workspace.workerId) ?? []),
+            dependencies.defaultRuntimeImage,
+          ),
+        ),
+        /** Every image the Workspace's Worker offers, for the admin Runtime change. */
+        offeredImages: (workspace.workerId === null ? [] : (images.get(workspace.workerId) ?? [])).map(
+          (image) => ({ image: image.image, runtimeVersion: image.runtimeVersion }),
         ),
         owner: {
           id: workspace.userId,

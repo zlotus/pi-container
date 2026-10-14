@@ -262,8 +262,73 @@ tests:
           - exp_labels: { severity: warning }
             exp_annotations:
               summary: "Workspace 长时间处于过渡状态"
-              description: "持续 15 分钟有 Workspace 处于 SCHEDULING/STARTING/STOPPING/DELETING。"
+              description: "持续 15 分钟有 Workspace 处于 SCHEDULING/STARTING/STOPPING/DELETING/UPGRADING。"
               runbook: "docs/observability-runbook.md#agentruntimeworkspacesstucktransitional"
+
+  # A Runtime change that does not settle counts as stuck (Phase 18.8).
+  - interval: 1m
+    input_series:
+      - series: 'agent_runtime_workspaces{state="UPGRADING",worker_id="worker-a"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: AgentRuntimeWorkspacesStuckTransitional
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AgentRuntimeWorkspacesStuckTransitional
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Workspace 长时间处于过渡状态"
+              description: "持续 15 分钟有 Workspace 处于 SCHEDULING/STARTING/STOPPING/DELETING/UPGRADING。"
+              runbook: "docs/observability-runbook.md#agentruntimeworkspacesstucktransitional"
+
+  # Default Runtime image missing on a schedulable online Worker (Phase 18.8).
+  - interval: 1m
+    input_series:
+      - series: 'agent_runtime_worker_default_runtime_image_available{worker_id="worker-a"}'
+        values: "0x30"
+      - series: 'agent_runtime_worker_default_runtime_image_available{worker_id="worker-b"}'
+        values: "0x30"
+      - series: 'agent_runtime_worker_default_runtime_image_available{worker_id="worker-c"}'
+        values: "0x16 1x14"
+      - series: 'agent_runtime_worker_up{worker_id="worker-a"}'
+        values: "1x30"
+      - series: 'agent_runtime_worker_up{worker_id="worker-b"}'
+        values: "1x30"
+      - series: 'agent_runtime_worker_up{worker_id="worker-c"}'
+        values: "1x30"
+      - series: 'agent_runtime_worker_schedulable{worker_id="worker-a"}'
+        values: "1x30"
+      - series: 'agent_runtime_worker_schedulable{worker_id="worker-b"}'
+        values: "0x30"
+      - series: 'agent_runtime_worker_schedulable{worker_id="worker-c"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: AgentRuntimeDefaultRuntimeImageMissing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AgentRuntimeDefaultRuntimeImageMissing
+        exp_alerts:
+          - exp_labels: { severity: warning, worker_id: worker-a }
+            exp_annotations:
+              summary: "Worker worker-a 未提供默认 Runtime"
+              description: "可调度的在线 Worker 没有平台默认 Runtime 镜像（未构建、digest 不符或已移除）；新 Workspace 不会分配到它。"
+              runbook: "docs/observability-runbook.md#agentruntimedefaultruntimeimagemissing"
+          - exp_labels: { severity: warning, worker_id: worker-c }
+            exp_annotations:
+              summary: "Worker worker-c 未提供默认 Runtime"
+              description: "可调度的在线 Worker 没有平台默认 Runtime 镜像（未构建、digest 不符或已移除）；新 Workspace 不会分配到它。"
+              runbook: "docs/observability-runbook.md#agentruntimedefaultruntimeimagemissing"
+      - eval_time: 20m
+        alertname: AgentRuntimeDefaultRuntimeImageMissing
+        exp_alerts:
+          - exp_labels: { severity: warning, worker_id: worker-a }
+            exp_annotations:
+              summary: "Worker worker-a 未提供默认 Runtime"
+              description: "可调度的在线 Worker 没有平台默认 Runtime 镜像（未构建、digest 不符或已移除）；新 Workspace 不会分配到它。"
+              runbook: "docs/observability-runbook.md#agentruntimedefaultruntimeimagemissing"
 
   # Gateway platform 5xx ratio, only with enough traffic.
   - interval: 1m

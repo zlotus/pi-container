@@ -22,6 +22,20 @@ const HOP_BY_HOP_HEADERS = new Set([
   "upgrade",
 ]);
 
+/**
+ * Next.js-internal request headers that browsers never send. pi-web is a Next.js app; a
+ * preview id or middleware marker could otherwise skip its own Host/Origin checks
+ * (specs.md Phase 18.10). App Router headers (rsc, next-router-*, next-action, next-url)
+ * are kept.
+ */
+const NEXT_INTERNAL_HEADERS = new Set([
+  "x-prerender-revalidate",
+  "x-prerender-revalidate-if-generated",
+  "x-middleware-subrequest",
+  "x-middleware-invoke",
+]);
+const NEXT_INTERNAL_PREFIXES = ["x-invoke-"];
+
 const PLATFORM_COOKIE_NAMES = new Set([
   "platform-session",
   "__Host-platform-session",
@@ -69,11 +83,14 @@ export function sanitizeRequestHeaders(
 ): IncomingHttpHeaders {
   const blocked = connectionHeaderTokens(headers);
   for (const name of HOP_BY_HOP_HEADERS) blocked.add(name);
+  for (const name of NEXT_INTERNAL_HEADERS) blocked.add(name);
   for (const name of Object.keys(replacements)) blocked.add(name.toLowerCase());
 
   const result: IncomingHttpHeaders = {};
   for (const [name, value] of Object.entries(headers)) {
-    if (value !== undefined && !blocked.has(name.toLowerCase())) {
+    const lower = name.toLowerCase();
+    if (NEXT_INTERNAL_PREFIXES.some((prefix) => lower.startsWith(prefix))) continue;
+    if (value !== undefined && !blocked.has(lower)) {
       result[name] = value;
     }
   }

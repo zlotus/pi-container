@@ -63,6 +63,30 @@ describe("proxy header boundaries", () => {
     });
   });
 
+  it("removes Next.js-internal headers but keeps App Router headers (Phase 18.10)", () => {
+    expect(
+      sanitizeRequestHeaders({
+        "x-prerender-revalidate": "published-preview-id",
+        "X-Prerender-Revalidate-If-Generated": "1",
+        "x-middleware-subrequest": "middleware:middleware",
+        "x-middleware-invoke": "1",
+        "x-invoke-path": "/api/files",
+        "x-invoke-status": "200",
+        rsc: "1",
+        "next-router-state-tree": "%5B%5D",
+        "next-action": "abc",
+        "next-url": "/",
+        accept: "text/x-component",
+      }),
+    ).toEqual({
+      rsc: "1",
+      "next-router-state-tree": "%5B%5D",
+      "next-action": "abc",
+      "next-url": "/",
+      accept: "text/x-component",
+    });
+  });
+
   it("removes only platform-owned cookies", () => {
     expect(
       stripPlatformCookies(

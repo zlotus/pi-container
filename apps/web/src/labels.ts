@@ -1,3 +1,5 @@
+import type { WorkspaceRuntime } from "./types.js";
+
 // Display labels for platform enums. API values stay unchanged; only the Portal
 // presentation is localized here so pages and tests share one mapping.
 
@@ -11,6 +13,7 @@ const WORKSPACE_STATE_LABELS: Record<string, string> = {
   DELETING: "删除中",
   ERROR: "异常",
   WORKER_OFFLINE: "Worker 离线",
+  UPGRADING: "Runtime 切换中",
 };
 
 const WORKER_STATUS_LABELS: Record<string, string> = {
@@ -41,6 +44,7 @@ export const TRANSITIONAL_WORKSPACE_STATES: readonly string[] = [
   "STARTING",
   "STOPPING",
   "DELETING",
+  "UPGRADING",
 ];
 
 /** Mirrors the Control Plane start precondition; other states are rejected with WORKSPACE_CHANGED. */
@@ -207,4 +211,16 @@ export function parseUsdInput(text: string): number | "default" | null {
   if (!/^\d{1,7}(?:\.\d{1,2})?$/.test(trimmed)) return null;
   const value = Number(trimmed);
   return value <= 1_000_000 ? value : null;
+}
+
+/** “phase-18（pi-web 0.12.0 · Pi 1.1.0）”; the image reference when the version is unknown. */
+export function runtimeLabel(
+  runtime: Pick<WorkspaceRuntime, "image" | "runtimeVersion" | "piWebVersion" | "piVersion">,
+): string {
+  const parts = [
+    runtime.piWebVersion === null ? null : `pi-web ${runtime.piWebVersion}`,
+    runtime.piVersion === null ? null : `Pi ${runtime.piVersion}`,
+  ].filter((part) => part !== null);
+  const name = runtime.runtimeVersion ?? runtime.image;
+  return parts.length === 0 ? name : `${name}（${parts.join(" · ")}）`;
 }

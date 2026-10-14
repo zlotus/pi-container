@@ -4,6 +4,7 @@ import type {
   UserIdentityRecord,
   UserRecord,
   WorkerPlacementRecord,
+  WorkerRuntimeImage,
   WorkspaceRecord,
 } from "@agent-runtime/database";
 
@@ -59,11 +60,64 @@ export type PublicModelAccess =
 
 const MODEL_ACCESS_DISABLED: PublicModelAccess = { status: "disabled", reason: null };
 
+/** A Workspace's Runtime version and the changes it allows (specs.md Phase 18.4, 18.8). */
+export interface PublicRuntime {
+  image: string;
+  runtimeVersion: string | null;
+  piWebVersion: string | null;
+  piVersion: string | null;
+  previousImage: string | null;
+  /** Stopped, on another image than the platform default, which its Worker offers. */
+  upgradeAvailable: boolean;
+  rollbackAvailable: boolean;
+  /** A Runtime change was interrupted; retry or roll back. */
+  changeIncomplete: boolean;
+}
+
+/** Whether a Workspace is left in the middle of a Runtime change. */
+export function runtimeChangeIncomplete(workspace: WorkspaceRecord): boolean {
+  return (
+    workspace.state === "ERROR" &&
+    workspace.previousRuntimeImage !== null &&
+    workspace.runtimeChangedAt === null
+  );
+}
+
+export function workspaceRuntime(
+  workspace: WorkspaceRecord,
+  /** The images its Worker offers; empty when it has none or no Worker yet. */
+  offered: readonly WorkerRuntimeImage[],
+  defaultRuntimeImage: string,
+): PublicRuntime {
+  const current = offered.find((image) => image.image === workspace.runtimeImage);
+  const offers = (image: string | null) =>
+    image !== null && offered.some((entry) => entry.image === image);
+  const incomplete = runtimeChangeIncomplete(workspace);
+  const changeable = workspace.state === "STOPPED" || incomplete;
+  return {
+    image: workspace.runtimeImage,
+    runtimeVersion: current?.runtimeVersion ?? null,
+    piWebVersion: current?.piWebVersion ?? null,
+    piVersion: current?.piVersion ?? null,
+    previousImage: workspace.previousRuntimeImage,
+    upgradeAvailable:
+      changeable &&
+      offers(defaultRuntimeImage) &&
+      (workspace.runtimeImage !== defaultRuntimeImage || incomplete),
+    rollbackAvailable:
+      changeable &&
+      workspace.previousRuntimeImage !== workspace.runtimeImage &&
+      offers(workspace.previousRuntimeImage),
+    changeIncomplete: incomplete,
+  };
+}
+
 export function publicWorkspace(
   workspace: WorkspaceRecord,
   modelAccess: PublicModelAccess = MODEL_ACCESS_DISABLED,
   /** Observed container usage (specs.md Phase 17.7); shown only while RUNNING. */
   usage: WorkspaceUsageView | null = null,
+  runtime: PublicRuntime | null = null,
 ) {
   return {
     id: workspace.id,
@@ -83,6 +137,9 @@ export function publicWorkspace(
     },
     modelAccess,
     usage: workspace.state === "RUNNING" ? usage : null,
+    runtime,
+    lastAccessAt: workspace.lastAccessAt?.toISOString() ?? null,
+    lastStopReason: workspace.lastStopReason,
   };
 }
 
@@ -104,6 +161,7 @@ export function publicWorker(
   currentTime: Date,
   offlineAfterMs: number,
   usage: WorkerUsageView | null = null,
+  defaultRuntimeImage: string | null = null,
 ) {
   const status = !worker.enabled
     ? "DISABLED"
@@ -121,6 +179,22 @@ export function publicWorker(
     runtimeImage: worker.runtimeImage,
     runtimeVersion: worker.runtimeVersion,
     capabilities: worker.capabilities,
+    runtimeImages: worker.runtimeImages.map((image) => ({
+      image: image.image,
+      runtimeVersion: image.runtimeVersion,
+      piWebVersion: image.piWebVersion,
+      piVersion: image.piVersion,
+      capabilities: image.capabilities,
+      workspaces: worker.workspacesByImage[image.image] ?? 0,
+    })),
+    /** Workspaces on images the Worker no longer offers (they cannot start). */
+    unofferedWorkspaces: Object.entries(worker.workspacesByImage)
+      .filter(([image]) => !worker.runtimeImages.some((entry) => entry.image === image))
+      .reduce((sum, [, count]) => sum + count, 0),
+    defaultImageAvailable:
+      defaultRuntimeImage === null
+        ? null
+        : worker.runtimeImages.some((image) => image.image === defaultRuntimeImage),
     maxWorkspaces: worker.maxWorkspaces,
     assignedWorkspaces: worker.assignedWorkspaces,
     allocatedWorkspaces: worker.allocatedWorkspaces,

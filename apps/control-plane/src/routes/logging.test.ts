@@ -45,6 +45,10 @@ describe("Control Plane request logging", () => {
         createdAt: NOW,
         updatedAt: NOW,
         lastActivityAt: NOW,
+        previousRuntimeImage: null,
+        runtimeChangedAt: null,
+        lastAccessAt: null,
+        lastStopReason: null,
         disk: TEST_WORKSPACE_DISK,
       },
     ]);

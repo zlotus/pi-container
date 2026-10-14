@@ -9,7 +9,10 @@ function isCompatible(
   connectedWorkerIds: ReadonlySet<string>,
 ): boolean {
   const { workspace, heartbeatCutoff } = input;
+  // The Workspace's image must be offered, and that image must have the capabilities.
+  const image = candidate.runtimeImages.find((entry) => entry.image === workspace.runtimeImage);
   if (
+    image === undefined ||
     !connectedWorkerIds.has(candidate.id) ||
     !candidate.enabled ||
     !candidate.schedulable ||
@@ -18,7 +21,6 @@ function isCompatible(
     candidate.lastHeartbeatAt <= heartbeatCutoff ||
     candidate.maxWorkspaces === null ||
     candidate.assignedWorkspaces >= candidate.maxWorkspaces ||
-    candidate.runtimeImage !== workspace.runtimeImage ||
     // Only Workers that verifiably enforce the current egress policy (Phase 14).
     !candidate.egressEnforced ||
     candidate.egressRevision !== input.egressRevision ||
@@ -32,9 +34,7 @@ function isCompatible(
 
   return Object.entries(workspace.requiredCapabilities).every(
     ([capability, required]) =>
-      candidate.capabilities[
-        capability as keyof typeof candidate.capabilities
-      ] === required,
+      image.capabilities[capability as keyof typeof image.capabilities] === required,
   );
 }
 

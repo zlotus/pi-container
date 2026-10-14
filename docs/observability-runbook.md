@@ -161,6 +161,12 @@ PostgreSQL；长事务或锁会导致超时。
 
 XFS project quota 无法确认。见 `docs/storage-runbook.md`（挂载、`prjquota`、`CAP_SYS_ADMIN`）。
 
+### AgentRuntimeDefaultRuntimeImageMissing
+
+可调度的在线 Worker 没有提供平台默认 Runtime 镜像（`DEFAULT_RUNTIME_IMAGE`）：镜像未构建、`RUNTIME_IMAGES` 中漏写，或 tag
+被重新指向其他内容而与 pin 的 digest 不符。新 Workspace 不会分配到该 Worker，已有 Workspace 不受影响。Admin Workers 的
+“详情”列出该 Worker 提供的镜像；Worker 日志中有 “not offered” 的原因。处理见 `docs/lifecycle-runbook.md`。
+
 ### AgentRuntimeWorkerModelRelayDown
 
 启用了模型网关的 Worker 中继没有监听（端口被占用等），其 Workspace 无法使用平台模型。见
@@ -191,7 +197,9 @@ Worker 日志后由用户重新启动。
 
 ### AgentRuntimeWorkspacesStuckTransitional
 
-有 Workspace 持续 15 分钟处于过渡状态。检查对应 Worker 是否在线、命令是否超时（下一条）。
+有 Workspace 持续 15 分钟处于过渡状态（含 Runtime 切换中的 `UPGRADING`）。检查对应 Worker 是否在线、命令是否超时（下一条）。
+`UPGRADING` 长时间不结束通常意味着 Control Plane 在命令期间重启：Worker 重连后的 reconcile 会把它收敛为 `STOPPED` 或
+“切换未完成”的 `ERROR`。
 
 ### AgentRuntimeGatewayErrorRate
 

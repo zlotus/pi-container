@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { loadWorkerConfig } from "./config.js";
 import { DockerWorkspaceRuntime, type EgressGate, type StorageGate } from "./runtime.js";
 import type { WorkspaceRuntimeError } from "./runtime.js";
+import type { RuntimeImageSet } from "./runtime-images.js";
 import {
   type ProjectUsage,
   StorageQuotaError,
@@ -28,6 +29,8 @@ const STORAGE = { diskLimitBytes: 20 * GIB };
 
 interface FakeContainerInspection {
   Name: string;
+  /** The image ID the container was created from. */
+  Image?: string;
   State: { Running: boolean };
   Config: {
     Image: string;
@@ -59,6 +62,9 @@ class FakeDocker {
   helperExitCode = 0;
   omitDefaultCwdOnCreate = false;
   hostPort = "1";
+  /** Image reference -> image ID, as the local image store resolves it. */
+  readonly imageIds = new Map<string, string>();
+  removeFailures = 0;
   networkSequence = 0;
   containerSequence = 0;
 
@@ -73,6 +79,9 @@ class FakeDocker {
       `container-${this.containerSequence}`,
       {
         Name: `/${name}`,
+        ...(this.imageIds.has(options.Image ?? "")
+          ? { Image: this.imageIds.get(options.Image ?? "") ?? "" }
+          : {}),
         State: { Running: false },
         Config: {
           Image: options.Image ?? "",
@@ -222,6 +231,10 @@ class FakeContainer {
   }
 
   async remove() {
+    if (this.docker.removeFailures > 0) {
+      this.docker.removeFailures -= 1;
+      throw Object.assign(new Error("engine unavailable"), { statusCode: 500 });
+    }
     const entry = [...this.docker.containers.entries()].find(
       ([, candidate]) => candidate === this,
     );
@@ -634,12 +647,13 @@ describe("Docker Workspace Runtime", () => {
       .rejects.toMatchObject<Partial<WorkspaceRuntimeError>>({
         code: "RUNTIME_CONFIGURATION_MISMATCH",
       });
+    // An image this Worker no longer offers cannot be started (specs.md Phase 18.4).
     await expect(runtime.start(WORKSPACE_ID)).rejects.toMatchObject<
       Partial<WorkspaceRuntimeError>
-    >({ code: "RUNTIME_CONFIGURATION_MISMATCH" });
+    >({ code: "RUNTIME_IMAGE_UNAVAILABLE" });
     await expect(runtime.gatewayTarget(WORKSPACE_ID)).rejects.toMatchObject<
       Partial<WorkspaceRuntimeError>
-    >({ code: "RUNTIME_CONFIGURATION_MISMATCH" });
+    >({ code: "RUNTIME_NOT_READY" });
     await expect(runtime.reconcile([{
       workspaceId: WORKSPACE_ID,
       runtimeImage: config.RUNTIME_IMAGE,
@@ -1358,5 +1372,217 @@ describe("Docker Workspace Runtime model access (Phase 16.4, 16.5)", () => {
     await expect(runtime.modelKeyDirectory(WORKSPACE_ID)).resolves.toBe(
       join(root, "workspaces", WORKSPACE_ID, "metadata"),
     );
+  });
+});
+
+describe("Docker Workspace Runtime image changes (Phase 18.4)", () => {
+  const IMAGE_A = "agent-runtime:phase7-toolchain";
+  const IMAGE_B = "agent-runtime:phase18-pi1.1";
+  const ID_A = `sha256:${"a".repeat(64)}`;
+  const ID_B = `sha256:${"b".repeat(64)}`;
+
+  async function imageFixture(offered: string[] = [IMAGE_A, IMAGE_B]) {
+    const base = await fixture();
+    base.docker.imageIds.set(IMAGE_A, ID_A);
+    base.docker.imageIds.set(IMAGE_B, ID_B);
+    const catalog = new Map(
+      [
+        { image: IMAGE_A, imageId: ID_A, runtimeVersion: "phase-7" },
+        { image: IMAGE_B, imageId: ID_B, runtimeVersion: "phase-18" },
+      ].map((entry) => [entry.image, { ...entry, piWebVersion: null, piVersion: null }]),
+    );
+    const allowed = new Set(offered);
+    const images: RuntimeImageSet = {
+      find: (image) => (allowed.has(image) ? (catalog.get(image) ?? null) : null),
+    };
+    const runtime = new DockerWorkspaceRuntime(
+      base.config,
+      base.docker as unknown as Docker,
+      async () => true,
+      base.egress,
+      base.storage,
+      images,
+    );
+    const metadataPath = join(base.root, "workspaces", WORKSPACE_ID, "metadata", "managed.json");
+    const metadata = async () => JSON.parse(await readFile(metadataPath, "utf8")) as Record<string, unknown>;
+    return { ...base, runtime, allowed, metadataPath, metadata };
+  }
+
+  function container(docker: FakeDocker) {
+    const found = docker.containers.get(`agent-runtime-${WORKSPACE_ID}`);
+    if (found === undefined) throw new Error("Workspace container missing");
+    return found;
+  }
+
+  /** Everything about a created container except the image it runs. */
+  function configuration(options: Docker.ContainerCreateOptions | null) {
+    const rest = { ...options };
+    delete rest.Image;
+    return rest;
+  }
+
+  it("recreates a stopped Workspace from another offered image and keeps its data", async () => {
+    const { root, docker, runtime, metadata } = await imageFixture();
+    await runtime.ensure(WORKSPACE_ID, IMAGE_A, RESOURCES, STORAGE);
+    expect(container(docker).inspection.Image).toBe(ID_A);
+    expect(await metadata()).toMatchObject({ runtimeImage: IMAGE_A, runtimeImageId: ID_A });
+    const before = configuration(docker.createdOptions);
+    await runtime.start(WORKSPACE_ID);
+    const file = join(root, "workspaces", WORKSPACE_ID, "workspace", "kept.txt");
+    await writeFile(file, "kept", "utf8");
+    await runtime.stop(WORKSPACE_ID);
+    const previousId = container(docker).id;
+
+    await expect(runtime.setRuntime(WORKSPACE_ID, IMAGE_A, IMAGE_B)).resolves.toMatchObject({
+      state: "STOPPED",
+      runtimeImage: IMAGE_B,
+    });
+
+    const current = container(docker);
+    expect(current.id).not.toBe(previousId);
+    expect(current.inspection.Config.Image).toBe(IMAGE_B);
+    expect(current.inspection.Image).toBe(ID_B);
+    expect(current.inspection.State.Running).toBe(false);
+    expect(configuration(docker.createdOptions)).toEqual(before);
+    expect(await metadata()).toMatchObject({
+      runtimeImage: IMAGE_B,
+      runtimeImageId: ID_B,
+      previousRuntimeImage: IMAGE_A,
+    });
+    expect(await readFile(file, "utf8")).toBe("kept");
+    await expect(runtime.start(WORKSPACE_ID)).resolves.toMatchObject({ state: "RUNNING", runtimeImage: IMAGE_B });
+    await runtime.stop(WORKSPACE_ID);
+
+    // A rollback is the same operation in the other direction.
+    await expect(runtime.setRuntime(WORKSPACE_ID, IMAGE_B, IMAGE_A)).resolves.toMatchObject({
+      runtimeImage: IMAGE_A,
+    });
+    expect(await metadata()).toMatchObject({ runtimeImage: IMAGE_A, previousRuntimeImage: IMAGE_B });
+    expect(await readFile(file, "utf8")).toBe("kept");
+  });
+
+  it("refuses without changing anything while running, for unknown or foreign images", async () => {
+    const { docker, runtime, metadataPath, allowed } = await imageFixture();
+    await runtime.ensure(WORKSPACE_ID, IMAGE_A, RESOURCES, STORAGE);
+    await runtime.start(WORKSPACE_ID);
+    const original = await readFile(metadataPath, "utf8");
+    const originalId = container(docker).id;
+
+    await expect(runtime.setRuntime(WORKSPACE_ID, IMAGE_A, IMAGE_B)).rejects.toMatchObject({
+      code: "WORKSPACE_RUNNING",
+    });
+    await runtime.stop(WORKSPACE_ID);
+    await expect(runtime.setRuntime(WORKSPACE_ID, "agent-runtime:other", IMAGE_B)).rejects.toMatchObject({
+      code: "WORKSPACE_METADATA_MISMATCH",
+    });
+    allowed.delete(IMAGE_B);
+    await expect(runtime.setRuntime(WORKSPACE_ID, IMAGE_A, IMAGE_B)).rejects.toMatchObject({
+      code: "RUNTIME_IMAGE_UNAVAILABLE",
+    });
+    // A container that is not this Workspace's managed container is never replaced.
+    container(docker).inspection.Config.Labels = { ...container(docker).inspection.Config.Labels, worker_id: "other" };
+    allowed.add(IMAGE_B);
+    await expect(runtime.setRuntime(WORKSPACE_ID, IMAGE_A, IMAGE_B)).rejects.toMatchObject({
+      code: "UNMANAGED_CONTAINER_CONFLICT",
+    });
+
+    expect(await readFile(metadataPath, "utf8")).toBe(original);
+    expect(container(docker).id).toBe(originalId);
+  });
+
+  it("never replaces a managed container that left the security baseline", async () => {
+    const { docker, runtime, metadataPath } = await imageFixture();
+    await runtime.ensure(WORKSPACE_ID, IMAGE_A, RESOURCES, STORAGE);
+    const original = await readFile(metadataPath, "utf8");
+    const tampered = container(docker);
+    tampered.inspection.HostConfig = { ...tampered.inspection.HostConfig, Privileged: true };
+
+    await expect(runtime.setRuntime(WORKSPACE_ID, IMAGE_A, IMAGE_B)).rejects.toMatchObject({
+      code: "RUNTIME_CONFIGURATION_MISMATCH",
+    });
+    expect(await readFile(metadataPath, "utf8")).toBe(original);
+    expect(container(docker)).toBe(tampered);
+  });
+
+  it("completes an interrupted change on retry and is idempotent afterwards", async () => {
+    const { docker, runtime, metadata } = await imageFixture();
+    await runtime.ensure(WORKSPACE_ID, IMAGE_A, RESOURCES, STORAGE);
+    docker.removeFailures = 1;
+
+    await expect(runtime.setRuntime(WORKSPACE_ID, IMAGE_A, IMAGE_B)).rejects.toMatchObject({
+      code: "RUNTIME_ENGINE_ERROR",
+      retryable: true,
+    });
+    // Interrupted between the metadata switch and the new container.
+    expect(await metadata()).toMatchObject({ runtimeImage: IMAGE_B, previousRuntimeImage: IMAGE_A });
+    expect(container(docker).inspection.Config.Image).toBe(IMAGE_A);
+    await expect(runtime.start(WORKSPACE_ID)).rejects.toMatchObject({ code: "RUNTIME_CONFIGURATION_MISMATCH" });
+
+    await expect(runtime.setRuntime(WORKSPACE_ID, IMAGE_A, IMAGE_B)).resolves.toMatchObject({
+      runtimeImage: IMAGE_B,
+    });
+    const created = docker.containerSequence;
+    await expect(runtime.setRuntime(WORKSPACE_ID, IMAGE_A, IMAGE_B)).resolves.toMatchObject({
+      runtimeImage: IMAGE_B,
+    });
+    expect(docker.containerSequence).toBe(created);
+    expect(container(docker).inspection.Image).toBe(ID_B);
+  });
+
+  it("rolls an interrupted change back to the image the container still runs", async () => {
+    const { docker, runtime, metadata } = await imageFixture();
+    await runtime.ensure(WORKSPACE_ID, IMAGE_A, RESOURCES, STORAGE);
+    docker.removeFailures = 1;
+    await expect(runtime.setRuntime(WORKSPACE_ID, IMAGE_A, IMAGE_B)).rejects.toMatchObject({
+      code: "RUNTIME_ENGINE_ERROR",
+    });
+
+    await expect(runtime.setRuntime(WORKSPACE_ID, IMAGE_B, IMAGE_A)).resolves.toMatchObject({
+      runtimeImage: IMAGE_A,
+    });
+    expect(await metadata()).toMatchObject({ runtimeImage: IMAGE_A, runtimeImageId: ID_A });
+    expect(container(docker).inspection.Image).toBe(ID_A);
+    await expect(runtime.start(WORKSPACE_ID)).resolves.toMatchObject({ runtimeImage: IMAGE_A });
+  });
+
+  it("creates the missing container when only the metadata switch completed", async () => {
+    const { docker, runtime, metadata } = await imageFixture();
+    await runtime.ensure(WORKSPACE_ID, IMAGE_A, RESOURCES, STORAGE);
+    await container(docker).remove();
+
+    await expect(runtime.setRuntime(WORKSPACE_ID, IMAGE_A, IMAGE_B)).resolves.toMatchObject({
+      runtimeImage: IMAGE_B,
+    });
+    expect(container(docker).inspection.Image).toBe(ID_B);
+    expect(await metadata()).toMatchObject({ runtimeImageId: ID_B });
+  });
+
+  it("pins the image ID: a swapped image or a moved reference is refused", async () => {
+    const { docker, runtime, metadata } = await imageFixture();
+    await runtime.ensure(WORKSPACE_ID, IMAGE_A, RESOURCES, STORAGE);
+    container(docker).inspection.Image = ID_B;
+    await expect(runtime.start(WORKSPACE_ID)).rejects.toMatchObject({ code: "RUNTIME_CONFIGURATION_MISMATCH" });
+    container(docker).inspection.Image = ID_A;
+
+    // The reference resolves to other content while the container is created.
+    docker.imageIds.set(IMAGE_B, `sha256:${"c".repeat(64)}`);
+    await expect(runtime.setRuntime(WORKSPACE_ID, IMAGE_A, IMAGE_B)).rejects.toMatchObject({
+      code: "RUNTIME_IMAGE_UNAVAILABLE",
+    });
+    expect(docker.containers.has(`agent-runtime-${WORKSPACE_ID}`)).toBe(false);
+    expect(await metadata()).not.toHaveProperty("runtimeImageId");
+  });
+
+  it("records the image ID of a container created before Phase 18 on its next ensure", async () => {
+    const { docker, runtime, metadata, metadataPath } = await imageFixture();
+    await runtime.ensure(WORKSPACE_ID, IMAGE_A, RESOURCES, STORAGE);
+    const legacy = await metadata();
+    delete legacy.runtimeImageId;
+    await writeFile(metadataPath, `${JSON.stringify(legacy)}\n`, "utf8");
+
+    await runtime.ensure(WORKSPACE_ID, IMAGE_A, RESOURCES, STORAGE);
+
+    expect(await metadata()).toMatchObject({ runtimeImageId: ID_A });
+    expect(container(docker).inspection.Image).toBe(ID_A);
   });
 });

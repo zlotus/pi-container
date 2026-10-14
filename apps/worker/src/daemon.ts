@@ -11,7 +11,7 @@ import {
   type ModelConfigResult,
   type ModelGatewayConfig,
   type ModelRelayStatus,
-  type WorkerCapabilities,
+  type RuntimeImageReport,
   type WorkerEgressStatus,
   type WorkerReconcileAssignment,
   type WorkerReconciliationReport,
@@ -57,6 +57,11 @@ export interface WorkspaceRuntime {
   diskUsage(): Promise<WorkspaceDiskUsage[]>;
   start(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
   stop(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
+  setRuntime(
+    workspaceId: string,
+    fromImage: string,
+    toImage: string,
+  ): Promise<WorkspaceRuntimeObservation>;
   delete(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
   inspect(workspaceId: string): Promise<WorkspaceRuntimeObservation>;
   reconcile(
@@ -101,7 +106,7 @@ export function buildWorkerHello(
     logicalCpuCount: number;
     memoryBytes: number;
   },
-  capabilities: WorkerCapabilities,
+  runtimeImages: RuntimeImageReport[],
   egress: WorkerEgressStatus,
   storage: WorkerStorageStatus,
   allocatedWorkspaces = 0,
@@ -115,9 +120,7 @@ export function buildWorkerHello(
       workerId: config.WORKER_ID,
       hostname: system.hostname,
       architecture: system.architecture,
-      runtimeImage: config.RUNTIME_IMAGE,
-      runtimeVersion: config.RUNTIME_VERSION,
-      capabilities,
+      runtimeImages,
       maxWorkspaces: config.WORKER_MAX_WORKSPACES,
       allocatedWorkspaces,
       systemResources: {
@@ -324,7 +327,7 @@ export class WorkerDaemon {
   async #beginReporting(socket: WebSocket): Promise<void> {
     try {
       const architecture = currentArchitecture(process.arch);
-      const [allocatedWorkspaces, capabilities] = await Promise.all([
+      const [allocatedWorkspaces, runtimeImages] = await Promise.all([
         this.runtime.allocatedWorkspaces(),
         this.capabilityProbe.probe(architecture),
       ]);
@@ -338,7 +341,7 @@ export class WorkerDaemon {
             logicalCpuCount: cpus().length,
             memoryBytes: totalmem(),
           },
-          capabilities,
+          runtimeImages,
           this.egress.status(),
           this.storage.status(),
           allocatedWorkspaces,
@@ -476,6 +479,13 @@ export class WorkerDaemon {
           break;
         case "workspace.inspect":
           workspace = await this.runtime.inspect(message.payload.workspaceId);
+          break;
+        case "workspace.runtime.set":
+          workspace = await this.runtime.setRuntime(
+            message.payload.workspaceId,
+            message.payload.fromImage,
+            message.payload.toImage,
+          );
           break;
       }
       this.#send({

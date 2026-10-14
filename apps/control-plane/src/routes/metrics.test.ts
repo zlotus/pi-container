@@ -39,6 +39,10 @@ function workspace(id: string, userId: string, workerId: string, state: "RUNNING
     createdAt: NOW,
     updatedAt: NOW,
     lastActivityAt: NOW,
+    previousRuntimeImage: null,
+    runtimeChangedAt: null,
+    lastAccessAt: null,
+    lastStopReason: null,
     disk: TEST_WORKSPACE_DISK,
   };
 }
@@ -136,7 +140,7 @@ describe("observed usage in the API (Phase 17.7)", () => {
     }
     worker.send(
       JSON.stringify({
-        version: 5,
+        version: 6,
         type: "worker.heartbeat",
         requestId: crypto.randomUUID(),
         payload: {

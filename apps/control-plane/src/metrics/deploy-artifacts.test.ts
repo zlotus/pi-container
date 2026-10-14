@@ -102,7 +102,7 @@ describe("observability deployment artifacts (Phase 17.9)", () => {
       [...runbook.matchAll(/^#{2,4} (AgentRuntime[A-Za-z]+)/gm)].map((match) => (match[1] ?? "").toLowerCase()),
     );
     const alerts = [...rules.matchAll(/- alert: (\w+)/g)].map((match) => match[1] ?? "");
-    expect(alerts).toHaveLength(19);
+    expect(alerts).toHaveLength(20);
     for (const anchor of [...rules.matchAll(/runbook: "docs\/observability-runbook\.md#([a-z]+)"/g)]) {
       expect(anchors.has(anchor[1] ?? ""), anchor[1]).toBe(true);
     }

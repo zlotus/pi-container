@@ -7,7 +7,15 @@ import type { FastifyInstance } from "fastify";
 import type { RouteContext } from "../context.js";
 import type { DispatchResult, RuntimeCommands } from "../runtime-commands.js";
 import { errorBody, isUniqueViolation } from "../http.js";
-import { type PublicModelAccess, publicWorkspace } from "../presenters.js";
+import type { WorkspaceRecord } from "@agent-runtime/database";
+
+import { idleView } from "../idle/idle-status.js";
+import {
+  type PublicModelAccess,
+  publicWorkspace,
+  runtimeChangeIncomplete,
+  workspaceRuntime,
+} from "../presenters.js";
 
 const CreateWorkspaceBodySchema = z
   .object({
@@ -51,12 +59,46 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
     }
   }
 
-  async function present<T extends Parameters<typeof publicWorkspace>[0]>(workspace: T) {
-    return publicWorkspace(
-      workspace,
-      (await modelAccessOf([workspace])).get(workspace.id),
-      context.usage.workspace(workspace.id, workspace.workerId),
+  /** Each Workspace's Runtime version and allowed changes (specs.md Phase 18.8). */
+  async function runtimeOf(workspaces: readonly WorkspaceRecord[]) {
+    const images = await dependencies.workerStore.listWorkerRuntimeImages();
+    return new Map(
+      workspaces.map((workspace) => [
+        workspace.id,
+        workspaceRuntime(
+          workspace,
+          workspace.workerId === null ? [] : (images.get(workspace.workerId) ?? []),
+          dependencies.defaultRuntimeImage,
+        ),
+      ]),
     );
+  }
+
+  /** How long a running Workspace has been idle, under the idle policy (Phase 18.5). */
+  function idleOf(workspace: WorkspaceRecord) {
+    const idle = dependencies.idle;
+    if (idle === undefined) return null;
+    return idleView({
+      workspace,
+      policy: idle.policy,
+      access: idle.access,
+      compute: idle.compute,
+      startedAt: idle.startedAt,
+      activeConnections: dependencies.sessionConnections?.activeCount(workspace.id) ?? 0,
+      now: now(),
+    });
+  }
+
+  async function present<T extends Parameters<typeof publicWorkspace>[0]>(workspace: T) {
+    return {
+      ...publicWorkspace(
+        workspace,
+        (await modelAccessOf([workspace])).get(workspace.id),
+        context.usage.workspace(workspace.id, workspace.workerId),
+        (await runtimeOf([workspace])).get(workspace.id) ?? null,
+      ),
+      idle: idleOf(workspace),
+    };
   }
 
   app.get("/api/workspaces", async (request, reply) => {
@@ -67,15 +109,19 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
     const workspaces = await dependencies.store.listWorkspaces(
       auth.session.user.id,
     );
-    const access = await modelAccessOf(workspaces);
+    const [access, runtimes] = await Promise.all([modelAccessOf(workspaces), runtimeOf(workspaces)]);
     return {
-      workspaces: workspaces.map((workspace) =>
-        publicWorkspace(
+      /** Hours of idleness after which the platform stops a Workspace; null when off (18.5). */
+      idleStopAfterHours: dependencies.idle?.policy.stopAfterHours ?? null,
+      workspaces: workspaces.map((workspace) => ({
+        ...publicWorkspace(
           workspace,
           access.get(workspace.id),
           context.usage.workspace(workspace.id, workspace.workerId),
+          runtimes.get(workspace.id) ?? null,
         ),
-      ),
+        idle: idleOf(workspace),
+      })),
     };
   });
 
@@ -162,6 +208,12 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
       return reply
         .code(404)
         .send(errorBody("WORKSPACE_NOT_FOUND", "Workspace was not found"));
+    }
+    if (runtimeChangeIncomplete(workspace)) {
+      // An interrupted Runtime change is retried or rolled back first (Phase 18.4).
+      return reply
+        .code(409)
+        .send(errorBody("RUNTIME_CHANGE_INCOMPLETE", "Retry or roll back the Runtime change first"));
     }
     if (workspace.state === "RUNNING") {
       return { workspace: await present(workspace) };

@@ -30,6 +30,10 @@ async function setup() {
       createdAt: NOW,
       updatedAt: NOW,
       lastActivityAt: NOW,
+      previousRuntimeImage: null,
+      runtimeChangedAt: null,
+      lastAccessAt: null,
+      lastStopReason: null,
       disk: { ...TEST_WORKSPACE_DISK, usedBytes: 3 * GIB, sampledAt: NOW },
     },
   ]);
@@ -148,7 +152,7 @@ describe("Workspace disk limits", () => {
       } else if (command.type === "workspace.storage.set") {
         worker.send(
           JSON.stringify({
-            version: 5,
+            version: 6,
             type: "response.ok",
             requestId: command.requestId,
             payload: {
@@ -173,7 +177,7 @@ describe("Workspace disk limits", () => {
         type: "workspace.storage.set",
         payload: { workspaceId: WORKSPACE_ID, diskLimitBytes: 50 * GIB },
         requestId: expect.any(String),
-        version: 5,
+        version: 6,
       },
     ]);
     worker.terminate();

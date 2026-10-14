@@ -20,6 +20,7 @@ import {
 import { PlatformMetrics } from "./metrics/platform-metrics.js";
 import { TEST_WORKSPACE_DISK } from "./routes/test-fixtures.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
+import { WorkspaceAccessTracker } from "./idle/access-tracker.js";
 import { SessionConnectionRegistry } from "./session-connections.js";
 
 const NOW = new Date("2026-09-12T08:00:00.000Z");
@@ -80,6 +81,10 @@ function workspace(state: WorkspaceRecord["state"] = "RUNNING"): WorkspaceRecord
     createdAt: NOW,
     updatedAt: NOW,
     lastActivityAt: NOW,
+    previousRuntimeImage: null,
+    runtimeChangedAt: null,
+    lastAccessAt: null,
+    lastStopReason: null,
     disk: TEST_WORKSPACE_DISK,
   };
 }
@@ -569,6 +574,8 @@ describe("authenticated Workspace Gateway", () => {
       },
     };
     const sessionConnections = new SessionConnectionRegistry();
+    let clock = NOW.getTime();
+    const access = new WorkspaceAccessTracker(() => new Date(clock));
     const gateway = buildWorkspaceGateway({
       store,
       exchanges: new WorkspaceSessionExchange(60_000),
@@ -579,6 +586,7 @@ describe("authenticated Workspace Gateway", () => {
       workerOfflineAfterMs: 35_000,
       workerGatewayTokens: { [WORKER_ID]: GATEWAY_TOKEN },
       sessionConnections,
+      access,
       now: () => NOW,
     });
     const gatewayPort = await listen(gateway);
@@ -622,10 +630,17 @@ describe("authenticated Workspace Gateway", () => {
     const streamAClosed = new Promise<void>((resolve) =>
       streamA.response.once("close", resolve),
     );
+    // Idle stop sees the open stream and its access (specs.md Phase 18.5).
+    expect(sessionConnections.activeCount(WORKSPACE_ID)).toBe(1);
+    expect(access.latest(WORKSPACE_ID)).toEqual(NOW);
 
+    clock += 5_000;
     active.delete(hashOpaqueToken(SESSION_A));
     sessionConnections.closeUser(USER_A_ID);
     await streamAClosed;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sessionConnections.activeCount(WORKSPACE_ID)).toBe(0);
+    expect(access.latest(WORKSPACE_ID)).toEqual(new Date(NOW.getTime() + 5_000));
 
     expect(streamA.response.destroyed).toBe(true);
     expect(streamB.response.destroyed).toBe(false);

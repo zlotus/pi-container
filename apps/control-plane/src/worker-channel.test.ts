@@ -34,7 +34,7 @@ class FakeSocket {
 
 function inspectCommand(): ControlToWorkerMessage {
   return {
-    version: 5,
+    version: 6,
     type: "workspace.inspect",
     requestId: REQUEST_ID,
     payload: { workspaceId: WORKSPACE_ID },
@@ -52,7 +52,7 @@ describe("worker command correlation", () => {
     channel.register("worker-01", socket);
     const result = channel.dispatch("worker-01", inspectCommand());
     const response = {
-      version: 5 as const,
+      version: 6 as const,
       type: "response.ok" as const,
       requestId: REQUEST_ID,
       payload: {
@@ -89,7 +89,7 @@ describe("worker command correlation", () => {
     channel.register("worker-01", socket);
     const result = channel.dispatch("worker-01", inspectCommand());
     const response = {
-      version: 5 as const,
+      version: 6 as const,
       type: "response.ok" as const,
       requestId: REQUEST_ID,
       payload: {
@@ -111,7 +111,7 @@ describe("worker command correlation", () => {
 
     expect(
       channel.acceptResponse("worker-01", {
-        version: 5,
+        version: 6,
         type: "response.ok",
         requestId: REQUEST_ID,
         payload: {
@@ -146,6 +146,24 @@ describe("worker command correlation", () => {
   });
 });
 
+describe("worker channel disconnect (Phase 18.6)", () => {
+  it("closes only the named Worker's connection", () => {
+    const channel = new WorkerChannel(1_000);
+    const revoked = new FakeSocket();
+    const other = new FakeSocket();
+    channel.register("worker-a", revoked);
+    channel.register("worker-b", other);
+
+    expect(channel.disconnect("worker-a", 1008, "Worker revoked")).toBe(true);
+    expect(channel.disconnect("worker-missing", 1008, "Worker revoked")).toBe(false);
+
+    expect(revoked.closes).toEqual([{ code: 1008, reason: "Worker revoked" }]);
+    expect(other.closes).toEqual([]);
+    expect(channel.isConnected("worker-a")).toBe(false);
+    expect(channel.isConnected("worker-b")).toBe(true);
+  });
+});
+
 describe("worker command metrics (Phase 17.4)", () => {
   function command(requestId: string): ControlToWorkerMessage {
     return { ...inspectCommand(), requestId };
@@ -172,7 +190,7 @@ describe("worker command metrics (Phase 17.4)", () => {
     const okId = crypto.randomUUID();
     const ok = channel.dispatch("worker-01", command(okId));
     channel.acceptResponse("worker-01", {
-      version: 5,
+      version: 6,
       type: "response.ok",
       requestId: okId,
       payload: { requestType: "workspace.inspect", workspace: WORKSPACE_OBSERVATION },
@@ -182,7 +200,7 @@ describe("worker command metrics (Phase 17.4)", () => {
     const errorId = crypto.randomUUID();
     const failed = channel.dispatch("worker-01", command(errorId));
     channel.acceptResponse("worker-01", {
-      version: 5,
+      version: 6,
       type: "response.error",
       requestId: errorId,
       payload: { requestType: "workspace.inspect", code: "EGRESS_UNENFORCED", message: "x", retryable: false },
@@ -192,7 +210,7 @@ describe("worker command metrics (Phase 17.4)", () => {
     const mismatchId = crypto.randomUUID();
     const mismatched = channel.dispatch("worker-01", command(mismatchId));
     channel.acceptResponse("worker-01", {
-      version: 5,
+      version: 6,
       type: "response.ok",
       requestId: mismatchId,
       payload: { requestType: "workspace.start", workspace: WORKSPACE_OBSERVATION },

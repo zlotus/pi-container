@@ -220,6 +220,21 @@ export const ServerConfigSchema = z
     PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
     GATEWAY_HOST: z.string().min(1).default("127.0.0.1"),
     GATEWAY_PORT: z.coerce.number().int().min(1).max(65_535).default(3001),
+    /** Idle stop (specs.md Phase 18.5): unset = off; whole hours, 1 to 720. */
+    IDLE_STOP_AFTER_HOURS: z
+      .string()
+      .default("")
+      .transform((value, context) => {
+        if (value === "") return null;
+        const hours = Number(value);
+        if (!Number.isInteger(hours) || hours < 1 || hours > 720) {
+          context.addIssue({ code: "custom", message: "IDLE_STOP_AFTER_HOURS must be a whole number from 1 to 720" });
+          return z.NEVER;
+        }
+        return hours;
+      }),
+    /** Average CPU (cores) over a 5-minute window that still counts as activity. */
+    IDLE_CPU_THRESHOLD_CORES: z.coerce.number().min(0.01).max(1).default(0.05),
     /** Prometheus metrics listener (specs.md Phase 17.7); unset port = no listener. */
     METRICS_HOST: z.string().min(1).default("127.0.0.1"),
     METRICS_PORT: z

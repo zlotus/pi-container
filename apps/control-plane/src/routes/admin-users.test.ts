@@ -131,7 +131,7 @@ describe("Phase 9 Admin Users", () => {
     expect(metadata.json()).toMatchObject({
       workspaces: [{ name: "phase9-owned" }],
     });
-    expect(adminOwnWorkspaces.json()).toEqual({ workspaces: [] });
+    expect(adminOwnWorkspaces.json()).toEqual({ idleStopAfterHours: null, workspaces: [] });
     expect(ownershipRewrite.statusCode).toBe(400);
     expect(
       dependencies.testState.workspaces.find(
@@ -147,7 +147,7 @@ describe("Phase 9 Admin Users", () => {
     dependencies.sessionConnections = sessionConnections;
     const disabledConnection = vi.fn();
     sessionConnections.register(
-      { userId: USER_A_ID, sessionId: "workspace-disabled" },
+      { userId: USER_A_ID, sessionId: "workspace-disabled", workspaceId: "workspace-a" },
       disabledConnection,
     );
     const app = buildControlPlane(dependencies);
@@ -260,7 +260,7 @@ describe("Phase 9 Admin Users", () => {
     expect(demotedAccess.statusCode).toBe(403);
     const revokedConnection = vi.fn();
     sessionConnections.register(
-      { userId: USER_A_ID, sessionId: "workspace-revoked" },
+      { userId: USER_A_ID, sessionId: "workspace-revoked", workspaceId: "workspace-a" },
       revokedConnection,
     );
     await app.inject({

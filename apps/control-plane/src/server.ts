@@ -17,6 +17,10 @@ import { buildWorkspaceGateway } from "./gateway.js";
 import { WorkspaceSessionExchange } from "./session-exchange.js";
 import { SessionConnectionRegistry } from "./session-connections.js";
 import { selectWorker } from "./scheduler.js";
+import { WorkspaceAccessTracker } from "./idle/access-tracker.js";
+import { ComputeActivityTracker } from "./idle/compute-activity.js";
+import { IDLE_SWEEP_INTERVAL_MS } from "./idle/idle-stopper.js";
+import { enforceWorkerRevocations } from "./worker-revocation.js";
 import { GenericOidcClient, OidcTransactionStore } from "./oidc.js";
 import { LiteLlmAdminClient, meteredModelGatewayAdmin } from "./model-gateway/admin-client.js";
 import { loadModelCatalog, ModelKeyManager } from "./model-gateway/key-manager.js";
@@ -156,6 +160,15 @@ const modelGateway =
         log: log.child({ component: "model-gateway" }),
         onMaintenanceFailure: () => metrics.recordBackgroundFailure("model_key_loop"),
       });
+// Gateway access is recorded always (Admin “最近访问”); idle stop uses it when enabled (18.5).
+const startedAt = new Date();
+const workspaceAccess = new WorkspaceAccessTracker();
+const idlePolicy =
+  config.IDLE_STOP_AFTER_HOURS === null
+    ? null
+    : { stopAfterHours: config.IDLE_STOP_AFTER_HOURS, cpuThresholdCores: config.IDLE_CPU_THRESHOLD_CORES };
+metrics.idlePolicyEnabled.set(idlePolicy === null ? 0 : 1);
+
 const app = buildControlPlane({
   checkDatabase: async () => checkDatabase(database),
   store: repository,
@@ -198,6 +211,16 @@ const app = buildControlPlane({
   ...(modelGateway === undefined ? {} : { modelGateway }),
   metrics,
   usage,
+  ...(idlePolicy === null
+    ? {}
+    : {
+        idle: {
+          policy: idlePolicy,
+          access: workspaceAccess,
+          compute: new ComputeActivityTracker(idlePolicy.cpuThresholdCores),
+          startedAt,
+        },
+      }),
   reportRecoveryIssue: (issue) => {
     log.warn({ issue }, "worker recovery issue");
   },
@@ -214,6 +237,7 @@ const gateway = buildWorkspaceGateway({
   workerOfflineAfterMs: config.WORKER_OFFLINE_AFTER_MS,
   workerGatewayTokens: config.WORKER_GATEWAY_TOKENS_JSON,
   sessionConnections,
+  access: workspaceAccess,
   log: log.child({ component: "workspace-gateway" }),
   metrics,
 });
@@ -223,6 +247,7 @@ const metricsCollector = new MetricsCollector({
   usage,
   connectedWorkerIds: () => workerChannel.connectedWorkerIds(),
   modelGatewayEnabled: modelGateway !== undefined,
+  defaultRuntimeImage: config.DEFAULT_RUNTIME_IMAGE,
 });
 const metricsServer =
   metricsToken === null
@@ -236,14 +261,47 @@ const metricsServer =
 
 const workerStatusTimer = setInterval(() => {
   const cutoff = new Date(Date.now() - config.WORKER_OFFLINE_AFTER_MS);
-  void repository.markWorkersOffline(cutoff).catch((error: unknown) => {
-    // Readiness and the Admin API expose database failure without terminating
-    // healthy Worker sockets because of a transient sweep failure.
-    metrics.recordBackgroundFailure("worker_offline_sweep");
-    log.error({ err: error }, "worker offline sweep failed");
-  });
+  void repository
+    .markWorkersOffline(cutoff)
+    .then(() =>
+      enforceWorkerRevocations({
+        store: repository,
+        channel: workerChannel,
+        sessionConnections,
+        log,
+      }),
+    )
+    .catch((error: unknown) => {
+      // Readiness and the Admin API expose database failure without terminating
+      // healthy Worker sockets because of a transient sweep failure.
+      metrics.recordBackgroundFailure("worker_offline_sweep");
+      log.error({ err: error }, "worker offline sweep failed");
+    });
 }, config.WORKER_STATUS_SWEEP_MS);
 workerStatusTimer.unref();
+
+const accessFlushTimer = setInterval(() => {
+  void workspaceAccess
+    .flush((entries) => repository.recordWorkspaceAccess(entries))
+    .catch((error: unknown) => {
+      metrics.recordBackgroundFailure("access_flush");
+      log.warn({ err: error }, "workspace access flush failed");
+    });
+}, 15_000);
+accessFlushTimer.unref();
+
+const idleSweep = app.idleSweep;
+const idleTimer =
+  idleSweep === null
+    ? null
+    : setInterval(() => {
+        void idleSweep().catch((error: unknown) => {
+          metrics.recordBackgroundFailure("idle_stop_sweep");
+          log.error({ err: error }, "idle stop sweep failed");
+        });
+      }, IDLE_SWEEP_INTERVAL_MS);
+idleTimer?.unref();
+if (idlePolicy !== null) log.info(idlePolicy, "idle stop enabled");
 
 const authThrottleCleanupTimer = setInterval(() => {
   void repository
@@ -266,6 +324,9 @@ if (modelGateway !== undefined) {
 const shutdown = async (): Promise<void> => {
   modelGateway?.stop();
   clearInterval(workerStatusTimer);
+  clearInterval(accessFlushTimer);
+  if (idleTimer !== null) clearInterval(idleTimer);
+  await workspaceAccess.flush((entries) => repository.recordWorkspaceAccess(entries)).catch(() => undefined);
   clearInterval(authThrottleCleanupTimer);
   await new Promise<void>((resolve, reject) => {
     gateway.close((error) => (error === undefined ? resolve() : reject(error)));

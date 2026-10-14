@@ -1,0 +1,11 @@
+{
+  "name": "agent-runtime-packages",
+  "private": true,
+  "description": "Node packages of the Runtime image, installed with npm ci from package-lock.json (specs.md Phase 18.3).",
+  "dependencies": {
+    "@agegr/pi-web": "0.12.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "playwright": "1.63.0",
+    "pnpm": "11.24.0"
+  }
+}

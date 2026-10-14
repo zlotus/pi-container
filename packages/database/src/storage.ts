@@ -119,7 +119,8 @@ export function createStorageRepository(database: DatabaseClient) {
             created_at, updated_at, last_activity_at,
             disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
             disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
-            pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
+            pi_limit_bytes::text as pi_limit_bytes, disk_usage_at,
+          previous_runtime_image, runtime_changed_at, last_access_at, last_stop_reason
         `;
         const row = rows[0];
         if (row === undefined) return { outcome: "NOT_FOUND" as const };

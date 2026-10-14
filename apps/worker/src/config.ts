@@ -6,6 +6,8 @@ import {
 import { parseWorkspaceBaseUrl } from "@agent-runtime/gateway";
 import { z } from "zod";
 
+import { parseRuntimeImages } from "./runtime-images.js";
+
 const AbsolutePathSchema = z
   .string()
   .min(1)
@@ -68,6 +70,8 @@ export const WorkerConfigSchema = z
       .max(255)
       .default("agent-runtime:phase7-toolchain"),
     RUNTIME_VERSION: z.string().min(1).max(128).default("phase-7"),
+    /** `<reference>@sha256:<digest>`, comma separated (specs.md Phase 18.4). */
+    RUNTIME_IMAGES: z.string().min(1).max(2_048).optional(),
     RUNTIME_CAPABILITY_PROBE_TIMEOUT_MS: z.coerce
       .number()
       .int()
@@ -147,6 +151,18 @@ export const WorkerConfigSchema = z
     "WORKER_MODEL_RELAY_PORT must differ from WORKER_GATEWAY_PORT",
   )
   .refine(
+    (value) => {
+      if (value.RUNTIME_IMAGES === undefined) return true;
+      try {
+        parseRuntimeImages(value.RUNTIME_IMAGES);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    "RUNTIME_IMAGES must list 1 to 4 unique <reference>@sha256:<digest> entries",
+  )
+  .refine(
     (value) => value.WORKER_GATEWAY_TOKEN !== value.WORKER_TOKEN,
     "Worker control and Gateway credentials must be different",
   )
@@ -157,5 +173,8 @@ export type WorkerConfig = z.infer<typeof WorkerConfigSchema>;
 export function loadWorkerConfig(
   environment: NodeJS.ProcessEnv,
 ): WorkerConfig {
+  if (environment.RUNTIME_IMAGES !== undefined && environment.RUNTIME_IMAGE !== undefined) {
+    throw new Error("Set RUNTIME_IMAGES or the transitional RUNTIME_IMAGE, not both");
+  }
   return WorkerConfigSchema.parse(environment);
 }

@@ -1,8 +1,12 @@
 *
 !Dockerfile
 !patches/
-!patches/pi-web-0.9.0-default-cwd.mjs
+!patches/pi-web-0.12.0.mjs
+!packages/
+!packages/package.json
+!packages/package-lock.json
 !scripts/
 !scripts/browser-smoke.mjs
 !scripts/runtime-capability-probe.mjs
 !scripts/runtime-smoke.sh
+!scripts/pi-web-launch.sh

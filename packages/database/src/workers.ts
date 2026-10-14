@@ -1,6 +1,7 @@
 import type {
   Architecture,
   ModelRelayStatus,
+  RuntimeImageReport,
   WorkerCapabilities,
   WorkerEgressStatus,
   WorkerStorageStatus,
@@ -14,6 +15,17 @@ import { createStorageRepository } from "./storage.js";
 
 export type WorkerStatus = "REGISTERED" | "ONLINE" | "OFFLINE" | "DISABLED";
 
+/** One Runtime image a Worker offers, as its last hello reported it (Phase 18.4). */
+export interface WorkerRuntimeImage {
+  image: string;
+  /** Null only for rows migrated from before Phase 18. */
+  imageId: string | null;
+  runtimeVersion: string;
+  piWebVersion: string | null;
+  piVersion: string | null;
+  capabilities: WorkerCapabilities;
+}
+
 export interface WorkerRecord {
   id: string;
   hostname: string | null;
@@ -25,6 +37,8 @@ export interface WorkerRecord {
   runtimeImage: string | null;
   runtimeVersion: string | null;
   capabilities: Partial<WorkerCapabilities>;
+  /** Every image the Worker offers; the three fields above repeat the first one. */
+  runtimeImages: WorkerRuntimeImage[];
   maxWorkspaces: number | null;
   allocatedWorkspaces: number;
   systemResources: {
@@ -61,6 +75,7 @@ interface WorkerRow {
   runtime_image: string | null;
   runtime_version: string | null;
   capabilities: Partial<WorkerCapabilities>;
+  runtime_images: WorkerRuntimeImage[];
   max_workspaces: number | null;
   allocated_workspaces: number;
   cpu_capacity: { logicalCpuCount?: number };
@@ -92,6 +107,7 @@ function mapWorker(row: WorkerRow): WorkerRecord {
     runtimeImage: row.runtime_image,
     runtimeVersion: row.runtime_version,
     capabilities: row.capabilities,
+    runtimeImages: row.runtime_images,
     maxWorkspaces: row.max_workspaces,
     allocatedWorkspaces: row.allocated_workspaces,
     systemResources: {
@@ -122,6 +138,22 @@ function mapWorker(row: WorkerRow): WorkerRecord {
   };
 }
 
+export type WorkerDisableResult =
+  | { outcome: "DISABLED"; workspaces: number; modelKeys: number }
+  | { outcome: "NOT_FOUND" }
+  | { outcome: "ALREADY_DISABLED" };
+
+export type WorkerDeleteResult =
+  | { outcome: "DELETED" }
+  | { outcome: "NOT_FOUND" }
+  | { outcome: "ENABLED" }
+  | { outcome: "HAS_WORKSPACES"; workspaces: number };
+
+export interface RevokedWorkerAssignment {
+  workerId: string;
+  workspaceIds: string[];
+}
+
 export interface WorkerGatewayRoute {
   workerId: string;
   gatewayBaseUrl: string;
@@ -135,17 +167,126 @@ export function createWorkerRepository(database: DatabaseClient) {
       workerId: string;
       credentialHash: string;
     }): Promise<boolean> {
-      const rows = await database<{ id: string }[]>`
-        update workers
-        set
-          credential_hash = ${input.credentialHash},
-          status = case when enabled then 'OFFLINE' else 'DISABLED' end,
-          last_heartbeat_at = null,
-          updated_at = now()
-        where id = ${input.workerId}
-        returning id
+      return database.begin(async (transaction) => {
+        const rows = await transaction<{ id: string }[]>`
+          update workers
+          set
+            credential_hash = ${input.credentialHash},
+            status = case when enabled then 'OFFLINE' else 'DISABLED' end,
+            last_heartbeat_at = null,
+            updated_at = now()
+          where id = ${input.workerId}
+          returning id
+        `;
+        if (rows.length !== 1) return false;
+        // The old credential no longer reaches this Worker; nothing it reported holds.
+        await transaction`
+          update workspaces
+          set state = 'WORKER_OFFLINE', updated_at = now()
+          where worker_id = ${input.workerId}
+            and state in ('STARTING', 'RUNNING', 'STOPPING', 'STOPPED', 'ERROR', 'UPGRADING')
+        `;
+        return true;
+      });
+    },
+
+    /**
+     * Revokes a Worker (specs.md Phase 18.6). Migration 0013's triggers do the rest in the
+     * same transaction: DISABLED, Workspaces WORKER_OFFLINE, model keys revoking, Audit.
+     */
+    async disableWorker(workerId: string): Promise<WorkerDisableResult> {
+      return database.begin(async (transaction) => {
+        await transaction`select set_config('agent_runtime.audit_source', 'cli', true)`;
+        const current = await transaction<Array<{ enabled: boolean }>>`
+          select enabled from workers where id = ${workerId} for update
+        `;
+        if (current[0] === undefined) return { outcome: "NOT_FOUND" };
+        if (!current[0].enabled) return { outcome: "ALREADY_DISABLED" };
+        await transaction`
+          update workers set enabled = false, updated_at = now() where id = ${workerId}
+        `;
+        const audit = await transaction<Array<{ details: { workspaces: number; modelKeys: number } }>>`
+          select details from platform_audit_events
+          where worker_id = ${workerId} and event_type = 'worker.disabled'
+          order by id desc
+          limit 1
+        `;
+        return {
+          outcome: "DISABLED",
+          workspaces: audit[0]?.details.workspaces ?? 0,
+          modelKeys: audit[0]?.details.modelKeys ?? 0,
+        };
+      });
+    },
+
+    /** Re-enables a revoked Worker under a new credential only (Phase 18.6, Q7). */
+    async enableWorker(input: {
+      workerId: string;
+      credentialHash: string;
+    }): Promise<"ENABLED" | "NOT_FOUND" | "ALREADY_ENABLED"> {
+      return database.begin(async (transaction) => {
+        await transaction`select set_config('agent_runtime.audit_source', 'cli', true)`;
+        const current = await transaction<Array<{ enabled: boolean }>>`
+          select enabled from workers where id = ${input.workerId} for update
+        `;
+        if (current[0] === undefined) return "NOT_FOUND";
+        if (current[0].enabled) return "ALREADY_ENABLED";
+        await transaction`
+          update workers
+          set
+            enabled = true,
+            credential_hash = ${input.credentialHash},
+            last_heartbeat_at = null,
+            updated_at = now()
+          where id = ${input.workerId}
+        `;
+        return "ENABLED";
+      });
+    },
+
+    /** Deletes a revoked Worker that no Workspace is assigned to (Phase 18.6, Q8). */
+    async deleteWorker(workerId: string): Promise<WorkerDeleteResult> {
+      return database.begin(async (transaction) => {
+        await transaction`select set_config('agent_runtime.audit_source', 'cli', true)`;
+        const current = await transaction<Array<{ enabled: boolean }>>`
+          select enabled from workers where id = ${workerId} for update
+        `;
+        if (current[0] === undefined) return { outcome: "NOT_FOUND" };
+        if (current[0].enabled) return { outcome: "ENABLED" };
+        const assigned = await transaction<Array<{ count: string }>>`
+          select count(*)::text as count from workspaces where worker_id = ${workerId}
+        `;
+        const workspaces = Number(assigned[0]?.count ?? 0);
+        if (workspaces > 0) return { outcome: "HAS_WORKSPACES", workspaces };
+        await transaction`delete from workers where id = ${workerId}`;
+        return { outcome: "DELETED" };
+      });
+    },
+
+    /** The Runtime images each Worker last reported, for Workspace Runtime info (18.4). */
+    async listWorkerRuntimeImages(): Promise<Map<string, WorkerRuntimeImage[]>> {
+      const rows = await database<Array<{ id: string; runtime_images: WorkerRuntimeImage[] }>>`
+        select id, runtime_images from workers
       `;
-      return rows.length === 1;
+      return new Map(rows.map((row) => [row.id, row.runtime_images]));
+    },
+
+    /** Revoked Workers and their Workspaces, for closing what is still connected. */
+    async listRevokedWorkerAssignments(): Promise<RevokedWorkerAssignment[]> {
+      const rows = await database<Array<{ id: string; workspace_ids: string[] }>>`
+        select
+          workers.id,
+          coalesce(
+            array_agg(workspaces.id) filter (where workspaces.id is not null),
+            '{}'
+          ) as workspace_ids
+        from workers
+        left join workspaces on workspaces.worker_id = workers.id
+        where not workers.enabled
+        group by workers.id
+        order by workers.id
+      `;
+      return rows.map((row) => ({ workerId: row.id, workspaceIds: row.workspace_ids }));
     },
 
     async findWorkerByCredentialHash(
@@ -168,9 +309,7 @@ export function createWorkerRepository(database: DatabaseClient) {
       workerId: string;
       hostname: string;
       architecture: Architecture;
-      runtimeImage: string;
-      runtimeVersion: string;
-      capabilities: WorkerCapabilities;
+      runtimeImages: RuntimeImageReport[];
       maxWorkspaces: number;
       allocatedWorkspaces: number;
       systemResources: WorkerSystemResources;
@@ -179,7 +318,10 @@ export function createWorkerRepository(database: DatabaseClient) {
       modelRelay: ModelRelayStatus;
       receivedAt: Date;
     }): Promise<boolean> {
-      const capabilities = database.json(input.capabilities);
+      const [first] = input.runtimeImages;
+      if (first === undefined) throw new Error("A Worker hello reports at least one Runtime image");
+      const capabilities = database.json(first.capabilities);
+      const runtimeImages = database.json(input.runtimeImages);
       const cpuCapacity = database.json({
         logicalCpuCount: input.systemResources.logicalCpuCount,
       });
@@ -190,9 +332,10 @@ export function createWorkerRepository(database: DatabaseClient) {
             hostname = ${input.hostname},
             architecture = ${input.architecture},
             status = 'ONLINE',
-            runtime_image = ${input.runtimeImage},
-            runtime_version = ${input.runtimeVersion},
+            runtime_image = ${first.image},
+            runtime_version = ${first.runtimeVersion},
             capabilities = ${capabilities},
+            runtime_images = ${runtimeImages},
             max_workspaces = ${input.maxWorkspaces},
             allocated_workspaces = ${input.allocatedWorkspaces},
             cpu_capacity = ${cpuCapacity},
@@ -259,7 +402,7 @@ export function createWorkerRepository(database: DatabaseClient) {
       const rows = await database<WorkerRow[]>`
         select
           id, hostname, architecture, status, enabled, schedulable, runtime_image,
-          runtime_version, capabilities, max_workspaces,
+          runtime_version, capabilities, runtime_images, max_workspaces,
           allocated_workspaces, cpu_capacity, memory_bytes,
           last_heartbeat_at, egress_enforced, egress_revision::text,
           egress_checked_at, storage_enforced, storage_fs_type,
@@ -288,7 +431,7 @@ export function createWorkerRepository(database: DatabaseClient) {
               update workspaces
               set state = 'WORKER_OFFLINE', updated_at = now()
               where worker_id = ${worker.id}
-                and state in ('STARTING', 'RUNNING', 'STOPPING', 'STOPPED', 'ERROR')
+                and state in ('STARTING', 'RUNNING', 'STOPPING', 'STOPPED', 'ERROR', 'UPGRADING')
             `;
           }
           return offlineWorkers.length;

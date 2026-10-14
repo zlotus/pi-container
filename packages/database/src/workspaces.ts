@@ -16,7 +16,8 @@ export function createWorkspaceRepository(database: DatabaseClient) {
           created_at, updated_at, last_activity_at,
           disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
           disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
-          pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
+          pi_limit_bytes::text as pi_limit_bytes, disk_usage_at,
+          previous_runtime_image, runtime_changed_at, last_access_at, last_stop_reason
         from workspaces
         where user_id = ${userId}
         order by created_at asc, id asc
@@ -42,7 +43,8 @@ export function createWorkspaceRepository(database: DatabaseClient) {
           created_at, updated_at, last_activity_at,
           disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
           disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
-          pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
+          pi_limit_bytes::text as pi_limit_bytes, disk_usage_at,
+          previous_runtime_image, runtime_changed_at, last_access_at, last_stop_reason
       `;
       const row = rows[0];
       if (row === undefined) {
@@ -61,9 +63,28 @@ export function createWorkspaceRepository(database: DatabaseClient) {
           created_at, updated_at, last_activity_at,
           disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
           disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
-          pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
+          pi_limit_bytes::text as pi_limit_bytes, disk_usage_at,
+          previous_runtime_image, runtime_changed_at, last_access_at, last_stop_reason
         from workspaces
         where id = ${workspaceId} and user_id = ${userId}
+        limit 1
+      `;
+      const row = rows[0];
+      return row === undefined ? null : mapWorkspace(row);
+    },
+
+    /** Any user's Workspace, for admin actions that grant no content access (Phase 18.4). */
+    async findWorkspaceById(workspaceId: string): Promise<WorkspaceRecord | null> {
+      const rows = await database<WorkspaceRow[]>`
+        select
+          id, user_id, name, worker_id, state, runtime_image,
+          created_at, updated_at, last_activity_at,
+          disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
+          disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
+          pi_limit_bytes::text as pi_limit_bytes, disk_usage_at,
+          previous_runtime_image, runtime_changed_at, last_access_at, last_stop_reason
+        from workspaces
+        where id = ${workspaceId}
         limit 1
       `;
       const row = rows[0];
@@ -96,6 +117,8 @@ export function createWorkspaceRepository(database: DatabaseClient) {
           workspaces.disk_limit_bytes::text as disk_limit_bytes, workspaces.disk_used_bytes::text as disk_used_bytes,
           workspaces.disk_used_inodes::text as disk_used_inodes, workspaces.pi_used_bytes::text as pi_used_bytes,
           workspaces.pi_limit_bytes::text as pi_limit_bytes, workspaces.disk_usage_at,
+          workspaces.previous_runtime_image, workspaces.runtime_changed_at,
+          workspaces.last_access_at, workspaces.last_stop_reason,
           users.username as owner_username, users.email as owner_email
         from workspaces
         join users on users.id = workspaces.user_id
@@ -122,7 +145,8 @@ export function createWorkspaceRepository(database: DatabaseClient) {
             created_at, updated_at, last_activity_at,
             disk_limit_bytes::text as disk_limit_bytes, disk_used_bytes::text as disk_used_bytes,
             disk_used_inodes::text as disk_used_inodes, pi_used_bytes::text as pi_used_bytes,
-            pi_limit_bytes::text as pi_limit_bytes, disk_usage_at
+            pi_limit_bytes::text as pi_limit_bytes, disk_usage_at,
+          previous_runtime_image, runtime_changed_at, last_access_at, last_stop_reason
           from workspaces
           where user_id = ${userId}
           order by created_at asc, id asc

@@ -1,6 +1,6 @@
 # Project Progress
 
-Last reviewed: 2026-10-10
+Last reviewed: 2026-10-14
 
 ## Current Milestone
 
@@ -16,6 +16,19 @@ API error code 中文化。
 Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立可用。
 
 ## Current Baseline
+
+- Phase 18（已验收，`v1.0.0-alpha.6`，2026-10-14 负责人人工验收通过）：生命周期运维。**Worker 吊销**：`enabled=false`
+  由数据库触发器与约束在同一事务中置 `DISABLED`、把其 Workspace 置 `WORKER_OFFLINE` 并吊销其模型 key，Control Plane 5 秒内
+  断开其控制连接与浏览器连接；`worker:disable` / `worker:enable`（同时轮换凭据）/ `worker:delete`（仅已禁用且无 Workspace），
+  均有 Audit。**Runtime 镜像升级与回滚**：Worker 以 `RUNTIME_IMAGES` 同时提供 1～4 个按 digest pin 的镜像（每个都跑 capability
+  探针），Workspace 元数据 pin 容器的镜像 ID；已停止的 Workspace 经 `workspace.runtime.set` 用另一个镜像重建容器（与 ensure
+  同一创建函数，持久目录不变，幂等，先持久化 intent），失败可重试或回滚；Owner 可升级到默认 / 回滚 / 重试，admin 可切换到
+  Worker 提供的任一镜像。协议 v6，migration `0013_lifecycle`，Portal 显示版本与操作，指标与告警
+  `AgentRuntimeDefaultRuntimeImageMissing`。**新镜像** `agent-runtime:phase18-pi1.1-r2`：pi-web 0.12.0 + Pi 1.1.0（全部 Node 依赖由 lockfile 固定），重写
+  default-cwd patch，preview 密钥在 tmpfs 中每次启动轮换（`pi-web-launch`），关闭 Pi telemetry；Gateway 剥离 Next.js 内部
+  请求头。**MiMo** v2.6 flash / pro 接入平台目录。**空闲回收**：默认关闭，无连接、无访问且 CPU 5 分钟平均低于阈值持续 N 小时
+  才停止，未知即活动，只停不删。验证：单元/路由/PostgreSQL 集成、真实 Docker（含新旧镜像切换、Session 跨 Pi 版本、目录在两个
+  Pi 版本中加载）、43 项变异检查。运维见 `docs/lifecycle-runbook.md`。
 
 - Phase 17（已验收，`v1.0.0-alpha.5`，2026-10-12 负责人人工验收通过）：可观测性。Control Plane 在独立端口以 Bearer token
   暴露 Prometheus 指标（不在 Portal API 与 Workspace Gateway 上，配置不完整即拒绝启动，禁止通配地址）：scrape 时一次
@@ -243,8 +256,8 @@ v0.x 已以 `v0.13.0` 封版：Portal UI 两轮调整（中文化、交互与审
 
 ## Risks And Blockers
 
-- Runtime 仍 pin 在 pi-web 0.9.0 / Pi 0.85.1，内置模型目录不含较新的模型（例如 MiMo-V2.6）。升级放在
-  Phase 18（决策 D7）；在此之前可在 Workspace 的 `/agent/pi/models.json` 中自行追加模型定义。
+- Phase 18 的新 Runtime 镜像（pi-web 0.12.0 / Pi 1.1.0）待人工验收；验收前存量 Workspace 仍在 pi-web 0.9.0 / Pi 0.85.1。
+  MiMo v2.5 已于 2026-10-21 下线，Workspace 中自配 xiaomi key 使用 v2.5 的需改用平台 MiMo v2.6。
 
 - Phase 5 的两台真实 Worker placement、浏览器 data path、Prompt/Terminal、sticky/offline/reconnect
   与 bind-mount persistence 已由人工验收确认；自动测试仍不能替代目标生产网络、安全和运维验收。

@@ -1,4 +1,5 @@
 import type {
+  WorkerRuntimeImage,
   WorkerScheduleCandidate,
   WorkerSelectionInput,
 } from "@agent-runtime/database";
@@ -7,6 +8,28 @@ import { describe, expect, it } from "vitest";
 import { selectWorker } from "./scheduler.js";
 
 const NOW = new Date("2026-09-13T08:00:00.000Z");
+
+function image(
+  name: string,
+  capabilities: Partial<WorkerRuntimeImage["capabilities"]> = {},
+): WorkerRuntimeImage {
+  return {
+    image: name,
+    imageId: null,
+    runtimeVersion: name,
+    piWebVersion: null,
+    piVersion: null,
+    capabilities: {
+      browser: false,
+      office: false,
+      ffmpeg: false,
+      python: true,
+      node: true,
+      rust: false,
+      ...capabilities,
+    },
+  };
+}
 
 function candidate(
   overrides: Partial<WorkerScheduleCandidate> = {},
@@ -17,16 +40,7 @@ function candidate(
     status: "ONLINE",
     enabled: true,
     schedulable: true,
-    runtimeImage: "agent-runtime:phase3-minimal",
-    runtimeVersion: "phase-3",
-    capabilities: {
-      browser: false,
-      office: false,
-      ffmpeg: false,
-      python: true,
-      node: true,
-      rust: false,
-    },
+    runtimeImages: [image("agent-runtime:phase3-minimal")],
     maxWorkspaces: 4,
     assignedWorkspaces: 0,
     lastHeartbeatAt: NOW,
@@ -90,7 +104,7 @@ describe("Phase 5 Worker selection", () => {
 
   it("requires exact Runtime image and requested architecture", () => {
     const candidates = [
-      candidate({ id: "wrong-runtime", runtimeImage: "agent-runtime:other" }),
+      candidate({ id: "wrong-runtime", runtimeImages: [image("agent-runtime:other")] }),
       candidate({ id: "wrong-architecture", architecture: "amd64" }),
       candidate({ id: "compatible" }),
     ];
@@ -108,19 +122,43 @@ describe("Phase 5 Worker selection", () => {
     ).toBe("compatible");
   });
 
+  it("takes capabilities from the Workspace's own image on a multi-image Worker (Phase 18.4)", () => {
+    const candidates = [
+      candidate({
+        id: "browser-only-on-other-image",
+        runtimeImages: [
+          image("agent-runtime:phase3-minimal"),
+          image("agent-runtime:phase18", { browser: true }),
+        ],
+      }),
+      candidate({
+        id: "browser-on-this-image",
+        runtimeImages: [
+          image("agent-runtime:phase18"),
+          image("agent-runtime:phase3-minimal", { browser: true }),
+        ],
+      }),
+    ];
+
+    expect(
+      selectWorker(
+        selectionInput(candidates, {
+          workspace: {
+            runtimeImage: "agent-runtime:phase3-minimal",
+            requiredArchitecture: null,
+            requiredCapabilities: { browser: true },
+          },
+        }),
+      )?.id,
+    ).toBe("browser-on-this-image");
+  });
+
   it("requires every declared capability value", () => {
     const candidates = [
       candidate({ id: "without-browser" }),
       candidate({
         id: "with-browser",
-        capabilities: {
-          browser: true,
-          office: false,
-          ffmpeg: false,
-          python: true,
-          node: true,
-          rust: false,
-        },
+        runtimeImages: [image("agent-runtime:phase3-minimal", { browser: true })],
       }),
     ];
 

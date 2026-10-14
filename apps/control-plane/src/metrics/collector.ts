@@ -59,6 +59,7 @@ export class MetricsCollector {
   readonly #usage: UsageRegistry;
   readonly #connected: () => readonly string[];
   readonly #modelGatewayEnabled: boolean;
+  readonly #defaultRuntimeImage: string | null;
 
   constructor(options: {
     metrics: PlatformMetrics;
@@ -66,12 +67,15 @@ export class MetricsCollector {
     usage: UsageRegistry;
     connectedWorkerIds: () => readonly string[];
     modelGatewayEnabled: boolean;
+    /** The platform default Runtime image (Phase 18.8); omitted in older tests. */
+    defaultRuntimeImage?: string;
   }) {
     this.#metrics = options.metrics;
     this.#store = options.store;
     this.#usage = options.usage;
     this.#connected = options.connectedWorkerIds;
     this.#modelGatewayEnabled = options.modelGatewayEnabled;
+    this.#defaultRuntimeImage = options.defaultRuntimeImage ?? null;
   }
 
   /** The complete exposition text: process instruments plus this scrape's series. */
@@ -101,9 +105,33 @@ export class MetricsCollector {
         row.count,
       );
     }
+    for (const row of snapshot.workspacesByRuntime) {
+      series.gauge(
+        "agent_runtime_workspaces_by_runtime",
+        "Workspaces by Runtime image (Phase 18.8).",
+        { runtime_image: row.runtimeImage },
+        row.count,
+      );
+    }
     const connected = new Set(this.#connected());
     for (const worker of snapshot.workers) {
       const id = { worker_id: worker.workerId };
+      for (const image of worker.runtimeImages) {
+        series.gauge(
+          "agent_runtime_worker_runtime_image_info",
+          "A Runtime image the Worker offers (value 1).",
+          { ...id, runtime_image: image.image, runtime_version: image.runtimeVersion },
+          1,
+        );
+      }
+      if (this.#defaultRuntimeImage !== null && worker.enabled) {
+        series.gauge(
+          "agent_runtime_worker_default_runtime_image_available",
+          "1 when the Worker offers the platform default Runtime image.",
+          id,
+          worker.runtimeImages.some((image) => image.image === this.#defaultRuntimeImage) ? 1 : 0,
+        );
+      }
       series.gauge("agent_runtime_worker_up", "1 when the Worker is ONLINE.", id, worker.status === "ONLINE" ? 1 : 0);
       series.gauge("agent_runtime_worker_status", "The Worker's current status (one-hot).", { ...id, status: worker.status }, 1);
       series.gauge("agent_runtime_worker_enabled", "1 unless the Worker credential is revoked.", id, worker.enabled ? 1 : 0);

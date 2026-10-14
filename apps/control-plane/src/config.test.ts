@@ -282,3 +282,26 @@ describe("metrics configuration (Phase 17.7)", () => {
     expect(() => parseServerConfig({ ...REQUIRED_ENV, ...override })).toThrow();
   });
 });
+
+describe("idle stop configuration (Phase 18.5)", () => {
+  it("is off by default with a 0.05-core threshold", () => {
+    expect(parseServerConfig(REQUIRED_ENV)).toMatchObject({
+      IDLE_STOP_AFTER_HOURS: null,
+      IDLE_CPU_THRESHOLD_CORES: 0.05,
+    });
+    expect(
+      parseServerConfig({ ...REQUIRED_ENV, IDLE_STOP_AFTER_HOURS: "24", IDLE_CPU_THRESHOLD_CORES: "0.1" }),
+    ).toMatchObject({ IDLE_STOP_AFTER_HOURS: 24, IDLE_CPU_THRESHOLD_CORES: 0.1 });
+  });
+
+  it.each([
+    { IDLE_STOP_AFTER_HOURS: "0" },
+    { IDLE_STOP_AFTER_HOURS: "721" },
+    { IDLE_STOP_AFTER_HOURS: "1.5" },
+    { IDLE_STOP_AFTER_HOURS: "a day" },
+    { IDLE_CPU_THRESHOLD_CORES: "0" },
+    { IDLE_CPU_THRESHOLD_CORES: "2" },
+  ])("refuses %o", (override) => {
+    expect(() => parseServerConfig({ ...REQUIRED_ENV, ...override })).toThrow();
+  });
+});

@@ -63,6 +63,64 @@
         "high": "high",
         "max": "max"
       }
+    },
+    {
+      "id": "mimo-v2.6-flash",
+      "name": "Xiaomi MiMo V2.6 Flash",
+      "api": "openai-completions",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 131072,
+      "cost": {
+        "input": 0.14,
+        "output": 0.28,
+        "cacheRead": 0.0028,
+        "cacheWrite": 0
+      },
+      "compat": {
+        "requiresReasoningContentOnAssistantMessages": true,
+        "thinkingFormat": "deepseek"
+      },
+      "thinkingLevelMap": {
+        "minimal": null,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": null,
+        "max": null
+      }
+    },
+    {
+      "id": "mimo-v2.6-pro",
+      "name": "Xiaomi MiMo V2.6 Pro",
+      "api": "openai-completions",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "contextWindow": 1048576,
+      "maxTokens": 131072,
+      "cost": {
+        "input": 0.435,
+        "output": 0.87,
+        "cacheRead": 0.0036,
+        "cacheWrite": 0
+      },
+      "compat": {
+        "requiresReasoningContentOnAssistantMessages": true,
+        "thinkingFormat": "deepseek"
+      },
+      "thinkingLevelMap": {
+        "minimal": null,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": null,
+        "max": null
+      }
     }
   ]
 }

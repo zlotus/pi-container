@@ -23,6 +23,8 @@ const AUDIT_LABELS: Record<string, string> = {
   "worker.online": "Worker 已上线",
   "worker.offline": "Worker 已离线",
   "worker.disabled": "Worker 已禁用",
+  "worker.enabled": "Worker 已重新启用",
+  "worker.deleted": "Worker 已删除",
   "worker.scheduling_paused": "Worker 已暂停调度",
   "worker.scheduling_resumed": "Worker 已恢复调度",
   "worker.runtime_reported": "Worker 运行环境已更新",
@@ -76,6 +78,8 @@ const AUDIT_SEVERITY: Record<string, AuditSeverity> = {
   "identity.unbound": "warning",
   "workspace.deleted": "warning",
   "worker.disabled": "warning",
+  "worker.enabled": "success",
+  "worker.deleted": "warning",
   "worker.scheduling_paused": "warning",
 };
 
@@ -112,6 +116,10 @@ function auditDetail(details: Record<string, unknown>): string | null {
     return [lockScopeLabel(scope), typeof ipAddress === "string" ? ipAddress : null]
       .filter((part) => part !== null)
       .join(" · ");
+  }
+  const { workspaces, modelKeys } = details;
+  if (typeof workspaces === "number" && typeof modelKeys === "number") {
+    return `${workspaces} 个 Workspace 已离线 · ${modelKeys} 个模型凭据吊销中`;
   }
   const fromState = details.fromState;
   const toState = details.toState;

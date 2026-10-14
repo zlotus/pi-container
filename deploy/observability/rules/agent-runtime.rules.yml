@@ -57,6 +57,19 @@ groups:
           description: "在线 Worker 无法确认 XFS project quota；它不会启动 Workspace（fail-closed）。"
           runbook: "docs/observability-runbook.md#agentruntimeworkerstorageunenforced"
 
+      - alert: AgentRuntimeDefaultRuntimeImageMissing
+        expr: >-
+          agent_runtime_worker_default_runtime_image_available == 0
+          and on (worker_id) agent_runtime_worker_up == 1
+          and on (worker_id) agent_runtime_worker_schedulable == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker {{ $labels.worker_id }} 未提供默认 Runtime"
+          description: "可调度的在线 Worker 没有平台默认 Runtime 镜像（未构建、digest 不符或已移除）；新 Workspace 不会分配到它。"
+          runbook: "docs/observability-runbook.md#agentruntimedefaultruntimeimagemissing"
+
       - alert: AgentRuntimeWorkerModelRelayDown
         expr: agent_runtime_worker_model_relay_listening == 0 and on (worker_id) agent_runtime_worker_up == 1
         for: 5m
@@ -147,13 +160,13 @@ groups:
           runbook: "docs/observability-runbook.md#agentruntimeworkspacesinerror"
 
       - alert: AgentRuntimeWorkspacesStuckTransitional
-        expr: sum(agent_runtime_workspaces{state=~"SCHEDULING|STARTING|STOPPING|DELETING"}) > 0
+        expr: sum(agent_runtime_workspaces{state=~"SCHEDULING|STARTING|STOPPING|DELETING|UPGRADING"}) > 0
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: "Workspace 长时间处于过渡状态"
-          description: "持续 15 分钟有 Workspace 处于 SCHEDULING/STARTING/STOPPING/DELETING。"
+          description: "持续 15 分钟有 Workspace 处于 SCHEDULING/STARTING/STOPPING/DELETING/UPGRADING。"
           runbook: "docs/observability-runbook.md#agentruntimeworkspacesstucktransitional"
 
   - name: agent-runtime-traffic

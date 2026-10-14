@@ -575,7 +575,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
     expect(listA.json()).toMatchObject({
       workspaces: [{ name: "persisted-workspace", state: "CREATED" }],
     });
-    expect(listB.json()).toEqual({ workspaces: [] });
+    expect(listB.json()).toEqual({ idleStopAfterHours: null, workspaces: [] });
 
     const auditA = await app.inject({
       method: "GET",
@@ -626,16 +626,23 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         workerId,
         hostname: "integration-worker.internal",
         architecture: "arm64",
-        runtimeImage: "unavailable",
-        runtimeVersion: "phase-2",
-        capabilities: {
-          browser: false,
-          office: false,
-          ffmpeg: false,
-          python: false,
-          node: false,
-          rust: false,
-        },
+        runtimeImages: [
+          {
+            image: "unavailable",
+            imageId: `sha256:${"d".repeat(64)}`,
+            runtimeVersion: "phase-2",
+            piWebVersion: null,
+            piVersion: null,
+            capabilities: {
+              browser: false,
+              office: false,
+              ffmpeg: false,
+              python: false,
+              node: false,
+              rust: false,
+            },
+          },
+        ],
         maxWorkspaces: 4,
         allocatedWorkspaces: 0,
         systemResources: {
@@ -686,16 +693,23 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         workerId: phase3WorkerId,
         hostname: "runtime-worker.internal",
         architecture: "arm64",
-        runtimeImage: phase3RuntimeImage,
-        runtimeVersion: "phase-3",
-        capabilities: {
-          browser: false,
-          office: false,
-          ffmpeg: false,
-          python: true,
-          node: true,
-          rust: false,
-        },
+        runtimeImages: [
+          {
+            image: phase3RuntimeImage,
+            imageId: `sha256:${"d".repeat(64)}`,
+            runtimeVersion: "phase-3",
+            piWebVersion: null,
+            piVersion: null,
+            capabilities: {
+              browser: false,
+              office: false,
+              ffmpeg: false,
+              python: true,
+              node: true,
+              rust: false,
+            },
+          },
+        ],
         maxWorkspaces: 2,
         allocatedWorkspaces: 0,
         systemResources: {
@@ -935,16 +949,23 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       workerId: phase6WorkerId,
       hostname: "recovery-worker.internal",
       architecture: "arm64",
-      runtimeImage,
-      runtimeVersion: "phase-6",
-      capabilities: {
-        browser: false,
-        office: false,
-        ffmpeg: false,
-        python: true,
-        node: true,
-        rust: false,
-      },
+      runtimeImages: [
+        {
+          image: runtimeImage,
+          imageId: `sha256:${"d".repeat(64)}`,
+          runtimeVersion: "phase-6",
+          piWebVersion: null,
+          piVersion: null,
+          capabilities: {
+            browser: false,
+            office: false,
+            ffmpeg: false,
+            python: true,
+            node: true,
+            rust: false,
+          },
+        },
+      ],
       maxWorkspaces: 2,
       allocatedWorkspaces: 1,
       systemResources: {
@@ -1074,16 +1095,23 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         workerId: input.workerId,
         hostname: `${input.workerId}.internal`,
         architecture: input.architecture,
-        runtimeImage: input.image,
-        runtimeVersion: "phase-3",
-        capabilities: {
-          browser: input.browser,
-          office: false,
-          ffmpeg: false,
-          python: true,
-          node: true,
-          rust: false,
-        },
+        runtimeImages: [
+          {
+            image: input.image,
+            imageId: `sha256:${"d".repeat(64)}`,
+            runtimeVersion: "phase-3",
+            piWebVersion: null,
+            piVersion: null,
+            capabilities: {
+              browser: input.browser,
+              office: false,
+              ffmpeg: false,
+              python: true,
+              node: true,
+              rust: false,
+            },
+          },
+        ],
         maxWorkspaces: input.maxWorkspaces,
         // Deliberately stale-low: scheduler capacity and score must use
         // Control Plane assignments, not this Worker observation.
@@ -1259,16 +1287,23 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
         workerId: id,
         hostname: `${id}.internal`,
         architecture: "arm64",
-        runtimeImage,
-        runtimeVersion: "phase-3",
-        capabilities: {
-          browser: false,
-          office: false,
-          ffmpeg: false,
-          python: true,
-          node: true,
-          rust: false,
-        },
+        runtimeImages: [
+          {
+            image: runtimeImage,
+            imageId: `sha256:${"d".repeat(64)}`,
+            runtimeVersion: "phase-3",
+            piWebVersion: null,
+            piVersion: null,
+            capabilities: {
+              browser: false,
+              office: false,
+              ffmpeg: false,
+              python: true,
+              node: true,
+              rust: false,
+            },
+          },
+        ],
         maxWorkspaces: 4,
         allocatedWorkspaces: 0,
         systemResources: { logicalCpuCount: 8, memoryBytes: 16 * 1024 ** 3 },

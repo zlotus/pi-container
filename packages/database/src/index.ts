@@ -66,7 +66,9 @@ export {
   type UserStatus,
   type WorkspaceRecord,
 } from "./records.js";
+export { type IdleStopCandidate } from "./idle.js";
 export { type WorkspaceRecoveryRecord } from "./recovery.js";
+export { type RuntimeChangeDirection, type RuntimeChangeRestore } from "./runtime-changes.js";
 export {
   type ScheduleWorkspaceStartResult,
   type SetWorkerSchedulableResult,
@@ -86,9 +88,13 @@ export {
   type UpdateManagedUserResult,
 } from "./users.js";
 export {
+  type RevokedWorkerAssignment,
+  type WorkerDeleteResult,
+  type WorkerDisableResult,
   type WorkerGatewayRoute,
   type WorkerIdentity,
   type WorkerRecord,
+  type WorkerRuntimeImage,
   type WorkerStatus,
 } from "./workers.js";
 export { type MetricsSnapshot } from "./metrics.js";

@@ -14,7 +14,7 @@ const InputSchema = z.object({
   DATABASE_URL: z.string().min(1),
   WORKER_ID: WorkerIdSchema,
   WORKER_GATEWAY_BASE_URL: z.string().optional(),
-  action: z.enum(["create", "rotate", "configure-gateway"]),
+  action: z.enum(["create", "rotate", "configure-gateway", "disable", "enable", "delete"]),
 });
 
 const input = InputSchema.parse({
@@ -51,6 +51,58 @@ try {
     });
     if (!rotated) throw new Error(`Worker ${input.WORKER_ID} was not found`);
     process.stdout.write(`WORKER_ID=${input.WORKER_ID}\nWORKER_TOKEN=${token}\n`);
+  } else if (input.action === "disable") {
+    // specs.md Phase 18.6: the database triggers take the Worker's Workspaces offline and
+    // revoke their model keys in the same transaction.
+    const result = await repository.disableWorker(input.WORKER_ID);
+    if (result.outcome === "NOT_FOUND") throw new Error(`Worker ${input.WORKER_ID} was not found`);
+    if (result.outcome === "ALREADY_DISABLED") {
+      process.stdout.write(`WORKER_ID=${input.WORKER_ID}\nSTATUS=already disabled\n`);
+    } else {
+      process.stdout.write(
+        [
+          `WORKER_ID=${input.WORKER_ID}`,
+          "STATUS=disabled",
+          `WORKSPACES_OFFLINE=${result.workspaces}`,
+          `MODEL_KEYS_REVOKING=${result.modelKeys}`,
+          "",
+        ].join("\n"),
+      );
+      process.stderr.write(
+        [
+          "The Control Plane closes this Worker's connections within seconds. Its containers",
+          "keep running on its host; to stop them, on that host run:",
+          `  docker stop $(docker ps -q --filter label=managed_by=worker --filter label=worker_id=${input.WORKER_ID})`,
+          "",
+        ].join("\n"),
+      );
+    }
+  } else if (input.action === "enable") {
+    const token = generateOpaqueToken();
+    const result = await repository.enableWorker({
+      workerId: input.WORKER_ID,
+      credentialHash: hashOpaqueToken(token),
+    });
+    if (result === "NOT_FOUND") throw new Error(`Worker ${input.WORKER_ID} was not found`);
+    if (result === "ALREADY_ENABLED") {
+      throw new Error(`Worker ${input.WORKER_ID} is enabled; use worker:rotate to change its credential`);
+    }
+    process.stdout.write(`WORKER_ID=${input.WORKER_ID}\nWORKER_TOKEN=${token}\n`);
+  } else if (input.action === "delete") {
+    const result = await repository.deleteWorker(input.WORKER_ID);
+    if (result.outcome === "NOT_FOUND") throw new Error(`Worker ${input.WORKER_ID} was not found`);
+    if (result.outcome === "ENABLED") {
+      throw new Error(`Worker ${input.WORKER_ID} is enabled; run worker:disable first`);
+    }
+    if (result.outcome === "HAS_WORKSPACES") {
+      throw new Error(
+        `Worker ${input.WORKER_ID} still has ${result.workspaces} Workspace(s) assigned; it cannot be deleted`,
+      );
+    }
+    process.stdout.write(`WORKER_ID=${input.WORKER_ID}\nSTATUS=deleted\n`);
+    process.stderr.write(
+      `Remove ${input.WORKER_ID} from WORKER_GATEWAY_TOKENS_JSON. Nothing on its host was changed.\n`,
+    );
   } else {
     if (input.WORKER_GATEWAY_BASE_URL === undefined) {
       throw new Error("WORKER_GATEWAY_BASE_URL is required");

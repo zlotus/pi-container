@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { createLogger, LoggingConfigSchema } from "@agent-runtime/logging";
+import Docker from "dockerode";
 
 import { loadWorkerConfig } from "./config.js";
 import { DockerRuntimeCapabilityProbe } from "./capabilities.js";
@@ -12,6 +13,7 @@ import { ExecNftClient } from "./egress/nft.js";
 import { buildWorkerGateway } from "./gateway.js";
 import { DISABLED_MODEL_ACCESS, RelayModelAccess } from "./model-relay/access.js";
 import { DockerWorkspaceRuntime } from "./runtime.js";
+import { configuredRuntimeImages, DockerRuntimeImageCatalog } from "./runtime-images.js";
 import { StorageController } from "./storage/controller.js";
 import { ExecXfsQuotaTool } from "./storage/quota.js";
 import { OomEventCounter } from "./usage/oom.js";
@@ -45,8 +47,11 @@ const storage = new StorageController({
   },
   log,
 });
-const runtime = new DockerWorkspaceRuntime(config, undefined, undefined, egress, storage);
-const capabilityProbe = new DockerRuntimeCapabilityProbe(config);
+const docker = new Docker({ socketPath: config.DOCKER_SOCKET_PATH });
+// The images this Worker offers, verified against their pins before every hello (18.4).
+const runtimeImages = new DockerRuntimeImageCatalog(configuredRuntimeImages(config), docker, log);
+const runtime = new DockerWorkspaceRuntime(config, docker, undefined, egress, storage, runtimeImages);
+const capabilityProbe = new DockerRuntimeCapabilityProbe(config, runtimeImages, log, docker);
 const modelAccess = modelGatewayUrl !== undefined
   ? new RelayModelAccess({
       runtime,
@@ -121,6 +126,8 @@ await new Promise<void>((resolve, reject) => {
   });
 });
 await logEgressEnvironment(log);
+const leftoverProbes = await capabilityProbe.removeLeftovers().catch(() => 0);
+if (leftoverProbes > 0) log.info({ removed: leftoverProbes }, "removed leftover capability probe containers");
 await egress.initialize();
 // Running Workspaces must not outlive unverifiable egress rules or quotas (fail closed).
 await daemon.checkEgress();
