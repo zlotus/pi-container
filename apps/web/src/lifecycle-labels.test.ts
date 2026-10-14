@@ -104,6 +104,24 @@ describe("idle stop notes (Phase 18.5)", () => {
     expect(idleNote({ state: "RUNNING", lastStopReason: null }, null)).toBeNull();
   });
 
+  it("shows how long a running Workspace has been idle and when it stops", () => {
+    const now = new Date(2026, 9, 14, 15, 30);
+    const running = (idle: { connected: boolean; idleSince: Date; stopAt: Date }) => ({
+      state: "RUNNING",
+      lastStopReason: null,
+      idle: { connected: idle.connected, idleSince: idle.idleSince.toISOString(), stopAt: idle.stopAt.toISOString() },
+    });
+    expect(
+      idleNote(running({ connected: true, idleSince: now, stopAt: new Date(2026, 9, 14, 16, 30) }), 1, now),
+    ).toContain("当前有连接，不会被回收");
+    expect(
+      idleNote(running({ connected: false, idleSince: new Date(2026, 9, 14, 15, 7), stopAt: new Date(2026, 9, 14, 16, 7) }), 1, now),
+    ).toBe("已空闲 23 分钟，约 16:07 自动停止；任何访问或计算活动都会重新计时");
+    expect(
+      idleNote(running({ connected: false, idleSince: new Date(2026, 9, 13, 13, 0), stopAt: new Date(2026, 9, 14, 13, 0) }), 24, now),
+    ).toBe("已空闲 26 小时 30 分钟，将在下一次检查（5 分钟内）自动停止");
+  });
+
   it("states the admin policy", () => {
     expect(idlePolicyText({ idle: { enabled: false, stopAfterHours: null, cpuThresholdCores: null }, defaultRuntimeImage: "a" }))
       .toBe("空闲回收：未启用。");

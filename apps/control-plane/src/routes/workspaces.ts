@@ -9,6 +9,7 @@ import type { DispatchResult, RuntimeCommands } from "../runtime-commands.js";
 import { errorBody, isUniqueViolation } from "../http.js";
 import type { WorkspaceRecord } from "@agent-runtime/database";
 
+import { idleView } from "../idle/idle-status.js";
 import {
   type PublicModelAccess,
   publicWorkspace,
@@ -73,13 +74,31 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
     );
   }
 
-  async function present<T extends Parameters<typeof publicWorkspace>[0]>(workspace: T) {
-    return publicWorkspace(
+  /** How long a running Workspace has been idle, under the idle policy (Phase 18.5). */
+  function idleOf(workspace: WorkspaceRecord) {
+    const idle = dependencies.idle;
+    if (idle === undefined) return null;
+    return idleView({
       workspace,
-      (await modelAccessOf([workspace])).get(workspace.id),
-      context.usage.workspace(workspace.id, workspace.workerId),
-      (await runtimeOf([workspace])).get(workspace.id) ?? null,
-    );
+      policy: idle.policy,
+      access: idle.access,
+      compute: idle.compute,
+      startedAt: idle.startedAt,
+      activeConnections: dependencies.sessionConnections?.activeCount(workspace.id) ?? 0,
+      now: now(),
+    });
+  }
+
+  async function present<T extends Parameters<typeof publicWorkspace>[0]>(workspace: T) {
+    return {
+      ...publicWorkspace(
+        workspace,
+        (await modelAccessOf([workspace])).get(workspace.id),
+        context.usage.workspace(workspace.id, workspace.workerId),
+        (await runtimeOf([workspace])).get(workspace.id) ?? null,
+      ),
+      idle: idleOf(workspace),
+    };
   }
 
   app.get("/api/workspaces", async (request, reply) => {
@@ -94,14 +113,15 @@ export function registerWorkspaceRoutes(app: FastifyInstance, context: RouteCont
     return {
       /** Hours of idleness after which the platform stops a Workspace; null when off (18.5). */
       idleStopAfterHours: dependencies.idle?.policy.stopAfterHours ?? null,
-      workspaces: workspaces.map((workspace) =>
-        publicWorkspace(
+      workspaces: workspaces.map((workspace) => ({
+        ...publicWorkspace(
           workspace,
           access.get(workspace.id),
           context.usage.workspace(workspace.id, workspace.workerId),
           runtimes.get(workspace.id) ?? null,
         ),
-      ),
+        idle: idleOf(workspace),
+      })),
     };
   });
 

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ACCESS_PERSIST_INTERVAL_MS, WorkspaceAccessTracker } from "./access-tracker.js";
 import { ComputeActivityTracker } from "./compute-activity.js";
 import { IdleStopper, type IdleStopperDependencies } from "./idle-stopper.js";
+import { idleView } from "./idle-status.js";
 
 const WS = "90b38efc-aa9a-4bc6-8eee-528b4e0c7c60";
 const T0 = Date.parse("2026-10-12T00:00:00.000Z");
@@ -214,5 +215,59 @@ describe("IdleStopper (Phase 18.5)", () => {
     });
     await expect(stopper.sweep()).resolves.toEqual({ stopped: 10, skipped: 0 });
     expect(stop).toHaveBeenCalledTimes(10);
+  });
+});
+
+describe("idleView (Phase 18.5)", () => {
+  const policy = { stopAfterHours: 1, cpuThresholdCores: 0.05 };
+  const base = (overrides: { state?: string; lastAccessAt?: Date | null } = {}) => ({
+    id: WS,
+    state: overrides.state ?? "RUNNING",
+    lastActivityAt: new Date(T0),
+    lastAccessAt: overrides.lastAccessAt ?? null,
+  });
+
+  function computeIdleSince(from: number, to: number): ComputeActivityTracker {
+    const compute = new ComputeActivityTracker(0.05);
+    for (let at = from; at <= to; at += 10_000) {
+      compute.record("worker-a", [{ workspaceId: WS, sampledAt: new Date(at).toISOString(), cpuUsageNanos: 0 }]);
+    }
+    return compute;
+  }
+
+  it("is the latest of run start, Control Plane start, access and CPU activity", () => {
+    const now = new Date(T0 + 50 * MINUTE);
+    const access = new WorkspaceAccessTracker(() => new Date(T0 + 20 * MINUTE));
+    access.touch(WS);
+    const view = idleView({
+      workspace: base({ lastAccessAt: new Date(T0 + 10 * MINUTE) }),
+      policy,
+      access,
+      compute: computeIdleSince(T0 + 5 * MINUTE, now.getTime()),
+      startedAt: new Date(T0 - HOUR),
+      activeConnections: 0,
+      now,
+    });
+    expect(view).toEqual({
+      connected: false,
+      idleSince: new Date(T0 + 20 * MINUTE).toISOString(),
+      stopAt: new Date(T0 + 80 * MINUTE).toISOString(),
+    });
+  });
+
+  it("restarts at now while connected and is absent unless running", () => {
+    const now = new Date(T0 + 50 * MINUTE);
+    const common = {
+      policy,
+      access: new WorkspaceAccessTracker(() => now),
+      compute: computeIdleSince(T0, now.getTime()),
+      startedAt: new Date(T0 - HOUR),
+      now,
+    };
+    expect(idleView({ ...common, workspace: base(), activeConnections: 2 })).toMatchObject({
+      connected: true,
+      idleSince: now.toISOString(),
+    });
+    expect(idleView({ ...common, workspace: base({ state: "STOPPED" }), activeConnections: 0 })).toBeNull();
   });
 });

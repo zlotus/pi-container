@@ -6102,8 +6102,10 @@ Admin 页面截图、`workspaces` 与 `model_keys` 相关行、Prometheus Alerts
   并在同一事务写 `workspace.idle_stopped`；不经过 `routes/workspaces.ts` 的用户 stop 路由（它要求 Owner 身份）。
 - **候选只来自在线、启用的 Worker**（SQL 联表），连接与 CPU 条件在内存中检查，检查与开始之间没有异步间隙。
 - **CPU**：5 分钟桶之外，查询时也计算“正在填充的桶”（满 1 分钟后）的平均值，使刚开始的持续工作立即算作活动。
-- **API**：`GET /api/workspaces` 顶层增加 `idleStopAfterHours`（卡片说明使用），Workspace 对象增加 `lastAccessAt`、
-  `lastStopReason`（代替 18.8 中嵌套的 `idle` 字段）。
+- **API**：`GET /api/workspaces` 顶层增加 `idleStopAfterHours`；Workspace 对象增加 `lastAccessAt`、`lastStopReason`，以及
+  运行中时的 `idle: { connected, idleSince, stopAt }`——与回收任务同一口径（本次运行开始、Control Plane 启动、最后访问、
+  最后计算活动中的最晚者；有连接时为当前时间）。卡片据此显示“当前有连接，不会被回收”或“已空闲 X 分钟，约 HH:MM 自动停止”，
+  随 15 秒轮询更新（验收中负责人提出，2026-10-14）。
 - **变异检查（已执行，11 项全部被测试发现）**：去掉连接 / 访问 / CPU / Worker 连接条件；未知历史视为空闲；样本间断不算活动；
   去掉 Control Plane 重启窗口；SQL 开始函数不检查最后访问；候选包含离线 Worker；Gateway 在连接结束时不记录访问；不计算正在
   填充的桶。

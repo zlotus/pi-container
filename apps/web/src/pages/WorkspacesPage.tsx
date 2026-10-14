@@ -80,16 +80,28 @@ function RuntimeSummary({ workspace }: { workspace: Workspace }) {
 
 /** The idle-stop line of a card (specs.md Phase 18.5); null when there is nothing to say. */
 export function idleNote(
-  workspace: Pick<Workspace, "state" | "lastStopReason">,
+  workspace: Pick<Workspace, "state" | "lastStopReason" | "idle">,
   idleStopAfterHours: number | null,
+  now: Date = new Date(),
 ): string | null {
   if (workspace.state === "STOPPED" && workspace.lastStopReason === "idle") {
     return "因长时间空闲已自动停止，数据完整保留，可随时启动";
   }
-  if (workspace.state === "RUNNING" && idleStopAfterHours !== null) {
+  if (workspace.state !== "RUNNING" || idleStopAfterHours === null) return null;
+  const idle = workspace.idle;
+  if (idle === undefined || idle === null) {
     return `无连接、无访问且无计算活动 ${idleStopAfterHours} 小时后将自动停止`;
   }
-  return null;
+  if (idle.connected) {
+    return `当前有连接，不会被回收（无连接、无访问且无计算活动 ${idleStopAfterHours} 小时后自动停止）`;
+  }
+  const minutes = Math.max(0, Math.floor((now.getTime() - Date.parse(idle.idleSince)) / 60_000));
+  const stopAt = new Date(idle.stopAt);
+  const clock = `${String(stopAt.getHours()).padStart(2, "0")}:${String(stopAt.getMinutes()).padStart(2, "0")}`;
+  const elapsed = minutes < 60 ? `${minutes} 分钟` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`;
+  return stopAt.getTime() <= now.getTime()
+    ? `已空闲 ${elapsed}，将在下一次检查（5 分钟内）自动停止`
+    : `已空闲 ${elapsed}，约 ${clock} 自动停止；任何访问或计算活动都会重新计时`;
 }
 
 export const WORKSPACE_POLL_INTERVAL_MS = 3_000;

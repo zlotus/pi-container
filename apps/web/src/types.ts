@@ -79,6 +79,8 @@ export interface Workspace {
   runtime?: WorkspaceRuntime | null;
   lastAccessAt?: string | null;
   lastStopReason?: "idle" | null;
+  /** Under an idle policy, while running (Phase 18.5). */
+  idle?: { connected: boolean; idleSince: string; stopAt: string } | null;
 }
 
 export interface ModelUsage {
