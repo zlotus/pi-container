@@ -5434,7 +5434,7 @@ Prometheus/Grafana 容器。
 
 ## Phase 18：生命周期运维
 
-状态：**已实现，待人工验收（2026-10-12）**；设计已确认（18.14），实现中的调整见 18.16，分支 `phase-18-lifecycle`。方向见 `docs/v1-roadmap.md` Phase 18（G7、G8、G11）、
+状态：**已验收（2026-10-14）**，经 PR #6 合入 master，tag `v1.0.0-alpha.6`；运维见 `docs/lifecycle-runbook.md`。设计已确认（18.14），实现中的调整与验收记录见 18.16，分支 `phase-18-lifecycle`。方向见 `docs/v1-roadmap.md` Phase 18（G7、G8、G11）、
 决策 D6、D7，第 41 节与 16.17。
 
 目标：管理员能把 Runtime 镜像升级到新版本并在出问题时回滚，升级不丢失 Workspace 文件、Pi Session 与配置；以
@@ -5931,6 +5931,8 @@ key；吊销在网关失败时标记 `revoked`；Gateway 不剥离 `x-prerender-
 
 人工验收（详细步骤随交付说明给出），要点与预期结果：
 
+（验收时的修正：镜像为 `agent-runtime:phase18-pi1.1-r2`，在 worker-a 构建后经 `docker save | docker load` 分发到 worker-c；worker-c 需先按
+   `docs/model-gateway-runbook.md` 2.1 接入模型中继，涉及平台模型的步骤才适用于它。）
 0. **准备**（负责人，主 checkout 切到 `phase-18-lifecycle`）：worker-a、worker-c 构建新镜像；两台 Worker 的 `.env` 设置
    `RUNTIME_IMAGES`（旧镜像 + 新镜像，按各自 digest）；先不改 `DEFAULT_RUNTIME_IMAGE`；按 runbook 在网关配置中加入 MiMo 并
    `up -d --force-recreate`；重启 Control Plane 与两台 Worker（协议 v6）。预期：Admin Workers 显示两台 Worker 各两个镜像及
@@ -6124,6 +6126,14 @@ Admin 页面截图、`workspaces` 与 `model_keys` 相关行、Prometheus Alerts
   （树与 lockfile 不符即失败）。按“同一 tag 不重建”的规则改用新 tag `agent-runtime:phase18-pi1.1-r2`（版本 `phase-18-r2`）。
 - 仍存在的差异来源：Debian 系统包按构建当天解析。开发环境改为一台构建、`docker save | docker load` 分发（各 Worker digest
   相同）；生产由 CI 构建并推送镜像仓库（Phase 19）。runbook 已写明。
+
+**人工验收记录（2026-10-14，负责人）**
+
+18.13 第 0–10 项在 worker-a 与 worker-c 上完成：默认镜像切换与 MiMo v2.6、存量 Workspace 升级（含 phase-18 → phase-18-r2 的
+真实升级）、回滚、切换中断、MCP（本地 stdio server、信任对话框、`trust.json` 持久化、不信任时不加载、HTTP MCP 指向内网被拦截）、
+Admin 切换、镜像 pin、空闲回收（1 小时策略下空闲 Workspace 被停止；有连接 / 访问的不被停止）、Worker 吊销与重新启用。验收中
+发现并修复：网关单文件 bind mount 需 `--force-recreate`（runbook）；worker-c 从未启用模型中继，新增 `LITELLM_REMOTE_BIND`
+（`docs/model-gateway-runbook.md` 2.1）；镜像 Node 依赖漂移（lockfile，见上文）；空闲状态卡片改为显示已空闲时长与预计停止时间。
 
 ## Phase 19：生产部署与 v1.0 发布
 

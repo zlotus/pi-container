@@ -1,6 +1,6 @@
 # Project Progress
 
-Last reviewed: 2026-10-12
+Last reviewed: 2026-10-14
 
 ## Current Milestone
 
@@ -17,7 +17,7 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
 
 ## Current Baseline
 
-- Phase 18（已实现，待人工验收，分支 `phase-18-lifecycle`，PR #6）：生命周期运维。**Worker 吊销**：`enabled=false`
+- Phase 18（已验收，`v1.0.0-alpha.6`，2026-10-14 负责人人工验收通过）：生命周期运维。**Worker 吊销**：`enabled=false`
   由数据库触发器与约束在同一事务中置 `DISABLED`、把其 Workspace 置 `WORKER_OFFLINE` 并吊销其模型 key，Control Plane 5 秒内
   断开其控制连接与浏览器连接；`worker:disable` / `worker:enable`（同时轮换凭据）/ `worker:delete`（仅已禁用且无 Workspace），
   均有 Audit。**Runtime 镜像升级与回滚**：Worker 以 `RUNTIME_IMAGES` 同时提供 1～4 个按 digest pin 的镜像（每个都跑 capability
