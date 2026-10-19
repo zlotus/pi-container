@@ -29,7 +29,8 @@
     "test:egress": "pnpm --filter @agent-runtime/worker test:egress",
     "test:quota": "pnpm --filter @agent-runtime/worker test:quota",
     "test:model-gateway": "pnpm --filter @agent-runtime/control-plane test:model-gateway",
-    "release:build": "node tools/release/build.mjs"
+    "release:build": "node tools/release/build.mjs",
+    "test:deploy": "TEST_DEPLOY=1 vitest run tools/release"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

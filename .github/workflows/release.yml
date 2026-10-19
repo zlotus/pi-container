@@ -1,0 +1,117 @@
+name: Release
+
+# Builds the platform release archive natively per architecture (specs.md Phase 19.4.1).
+# A v* tag creates a draft GitHub Release with the archives; v1.0.0 is promoted from the
+# verified rc artifacts, not rebuilt (19.15 Q13). Manual runs on a branch are acceptance
+# builds (version 0.0.0-<commit>) kept as short-lived workflow artifacts.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: linux/${{ matrix.architecture }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ARM64 is the primary v1.0 architecture; AMD64 has CI evidence only (D2).
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+          - architecture: amd64
+            runner: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+        env:
+          POSTGRES_DB: release_smoke
+          POSTGRES_USER: agent_runtime
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agent_runtime -d release_smoke"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.22.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build the release archive
+        run: pnpm release:build --out dist/release
+      - name: Smoke test the unpacked release with its own Node
+        run: |
+          set -euo pipefail
+          cd dist/release
+          sha256sum --check SHA256SUMS-*
+          mkdir smoke && tar -xzf agent-runtime-*.tar.gz -C smoke
+          release="$(echo smoke/agent-runtime-*)"
+          cat > smoke.env <<'EOF'
+          DATABASE_URL=postgres://agent_runtime:ci-only-password@127.0.0.1:5432/release_smoke
+          DATABASE_MIGRATE_ON_START=false
+          SESSION_SECRET=ci-release-smoke-only-0123456789abcdef
+          WORKSPACE_BASE_URL=https://agent.example.internal
+          PORTAL_ORIGIN=https://portal.example.internal
+          PORT=3300
+          GATEWAY_PORT=3301
+          EOF
+          sed -i 's/^ *//' smoke.env
+          node_bin="$release/bin/node"
+          "$node_bin" --version
+          # Pending migrations without permission to apply them: refuse to start.
+          if "$node_bin" --env-file=smoke.env "$release/app/control-plane/server.mjs"; then
+            echo "the Control Plane started on an unmigrated database" >&2; exit 1
+          fi
+          "$node_bin" --env-file=smoke.env "$release/app/control-plane/migrate.mjs" migrate
+          "$node_bin" --env-file=smoke.env "$release/app/control-plane/migrate.mjs" status
+          "$node_bin" --env-file=smoke.env "$release/app/control-plane/server.mjs" &
+          for _ in $(seq 1 40); do curl -fsS http://127.0.0.1:3300/ready && break; sleep 0.5; done
+          curl -fsS http://127.0.0.1:3300/ready
+          kill %1
+          cat > worker.env <<'EOF'
+          CONTROL_PLANE_URL=wss://cp.example.internal:8443/api/workers/connect
+          WORKER_ID=worker-smoke
+          WORKER_TOKEN=smoke0123456789abcdef0123456789abcdef
+          WORKER_GATEWAY_TOKEN=gatewaysmoke0123456789abcdef0123456789
+          WORKER_MAX_WORKSPACES=4
+          WORKSPACE_BASE_URL=https://agent.example.internal
+          RUNTIME_IMAGES=agent-runtime:2026.10-pi1.1@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          EOF
+          sed -i 's/^ *//' worker.env
+          "$node_bin" --env-file=worker.env "$release/app/worker/server.mjs" --check-config
+          "$release/bin/agent-runtime-ctl" version
+          rm -rf smoke smoke.env worker.env
+      - name: Keep the acceptance build
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-runtime-${{ matrix.architecture }}
+          path: dist/release/
+          retention-days: 7
+      - name: Attach to the draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          prerelease=""
+          [[ "$tag" == *-* ]] && prerelease="--prerelease"
+          gh release view "$tag" >/dev/null 2>&1 ||
+            gh release create "$tag" --draft $prerelease --title "$tag" --notes "See docs/upgrade-runbook.md." ||
+            gh release view "$tag" >/dev/null
+          gh release upload "$tag" dist/release/agent-runtime-*.tar.gz dist/release/SHA256SUMS-* --clobber

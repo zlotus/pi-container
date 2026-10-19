@@ -613,7 +613,7 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
     await legacy.stop({ t: 5 });
 
     const migrate = (env: Record<string, string>) =>
-      runScript(join(repositoryRoot, "tools/dev/migrate-legacy-workspace.sh"), [preQuotaWorkspaceId], {
+      runScript(join(repositoryRoot, "deploy/production/bin/migrate-legacy-workspace"), [preQuotaWorkspaceId], {
         WORKER_MANAGED_ROOT: managedRoot,
         ...env,
       });

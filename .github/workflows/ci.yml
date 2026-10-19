@@ -43,7 +43,7 @@ jobs:
           run_install: false
       - uses: actions/setup-node@v5
         with:
-          node-version: 22.20.0
+          node-version: 24.22.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
@@ -68,6 +68,19 @@ jobs:
           docker run --rm -v "$PWD/deploy/observability:/w:ro" -w /w/rules --entrypoint promtool \
             prom/prometheus:v3.13.4@sha256:87861b8cf91579109319ebc300f3f1060e6da9c05d6ae8ad15a20c879e84e32e \
             test rules agent-runtime.rules.test.yml
+      - name: Production nginx template against stub upstreams (pinned nginx image)
+        run: pnpm test:deploy
+      - name: Deployment files (systemd units, shell scripts, compose)
+        run: |
+          sudo apt-get install -y --no-install-recommends shellcheck
+          for unit in deploy/production/systemd/*.service deploy/egress/*.service; do
+            # Only the unit itself; missing users and paths are expected on a runner.
+            systemd-analyze verify "$unit" 2>&1 | { grep -F "$(basename "$unit")" || true; } | tee -a "$RUNNER_TEMP/units.log"
+          done
+          ! grep -E "Unknown (key|section)|Invalid|Failed to parse" "$RUNNER_TEMP/units.log"
+          shellcheck deploy/production/bin/* deploy/production/scripts/*.sh
+          # The env files exist only on a Control Plane host.
+          docker compose -f deploy/production/compose.yml config --quiet --no-env-resolution
       - name: Disk quotas on a real kernel (XFS project quotas on a loop device)
         # Runs last: it needs root, which may leave root-owned caches behind.
         run: |

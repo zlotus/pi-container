@@ -1,0 +1,73 @@
+# Control Plane host services: PostgreSQL, the model gateway (LiteLLM) and nginx
+# (specs.md Phase 19.3, 19.5, 19.7). The Control Plane itself runs from the release under
+# systemd (agent-runtime-control-plane.service); agent-runtime-platform.service starts this
+# file at boot. Installed as /etc/agent-runtime/compose.yml; see docs/deployment.md.
+#
+# Every port is published on loopback only, except nginx (host network), which listens on
+# AR_PUBLIC_LISTEN (users: 80, 443) and AR_INTERNAL_LISTEN (Workers: 8443, 8444).
+name: agent-runtime-prod
+
+services:
+  postgres:
+    image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    restart: unless-stopped
+    # POSTGRES_USER / POSTGRES_PASSWORD of the superuser (init-postgres.sh creates the
+    # agent_runtime and litellm roles and databases).
+    env_file: /etc/agent-runtime/postgres.env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "127.0.0.1:${AR_POSTGRES_PORT:-5432}:5432"
+    # The platform database: back up this directory or pg_dump (docs/backup-runbook.md).
+    volumes:
+      - /var/lib/agent-runtime-postgres:/var/lib/postgresql/data
+    shm_size: 256m
+
+  litellm:
+    # Pinned and verified in specs.md Phase 16.15; update only together with the spec.
+    image: ghcr.io/berriai/litellm-database:1.104.1@sha256:e187eea4b0bbc94c57b93d7dffcd3ce403f17375398a54539a4369cbf8a0e160
+    restart: unless-stopped
+    command: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
+    # Upstream keys, LITELLM_MASTER_KEY and DATABASE_URL (litellm role); mode 0600.
+    env_file: /etc/agent-runtime/litellm.env
+    environment:
+      DISABLE_ADMIN_UI: "True"
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+      LITELLM_LOG: "WARNING"
+    # A directory, not a single file: an edited config.yaml is seen after a restart.
+    volumes:
+      - /etc/agent-runtime/model-gateway:/etc/litellm:ro
+    # The Control Plane (admin API) and Prometheus use loopback; Workers reach only the
+    # inference paths through nginx on 8444. Workspaces never reach it (Phase 16.4).
+    ports:
+      - "127.0.0.1:${AR_LITELLM_PORT:-4400}:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.30.6-alpine@sha256:970364228b1e4f932abc22d321932816782cca8a20b85a77552a7cfe9acfb3b5
+    restart: unless-stopped
+    network_mode: host
+    # AR_PUBLIC_LISTEN, AR_INTERNAL_LISTEN, AR_PORTAL_HOST, AR_WORKSPACE_DOMAIN and the
+    # loopback ports of the Control Plane, the Workspace Gateway and LiteLLM.
+    env_file: /etc/agent-runtime/nginx.env
+    environment:
+      NGINX_ENVSUBST_FILTER: "^AR_"
+      # Templates of the active release: after a release switch, restart this container.
+      NGINX_ENVSUBST_TEMPLATE_DIR: /opt/agent-runtime/current/deploy/nginx/templates
+    volumes:
+      - /opt/agent-runtime:/opt/agent-runtime:ro
+      - /etc/agent-runtime/tls:/etc/agent-runtime/tls:ro
+      - /etc/agent-runtime/nginx:/etc/agent-runtime/nginx:ro
+    # Empty at start, so the image's default site (port 80 on every address) never loads.
+    tmpfs:
+      - /etc/nginx/conf.d
+    healthcheck:
+      test: ["CMD", "nginx", "-t", "-q"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

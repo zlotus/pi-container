@@ -51,24 +51,25 @@ jobs:
           run_install: false
       - uses: actions/setup-node@v5
         with:
-          node-version: 22.20.0
+          node-version: 24.22.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Build native Runtime image
         run: >-
           docker build
           --platform linux/${{ matrix.architecture }}
-          --tag agent-runtime:phase18-pi1.1-r2
+          --build-arg RUNTIME_VERSION=2026.10-pi1.1
+          --tag agent-runtime:2026.10-pi1.1
           runtime
       - name: Verify toolchain and real browser launch
         run: >-
           runtime/scripts/verify-image.sh
-          agent-runtime:phase18-pi1.1-r2
+          agent-runtime:2026.10-pi1.1
           ${{ matrix.architecture }}
       - name: Run Worker Runtime regressions
         env:
           TEST_DOCKER_RUNTIME: "1"
-          TEST_RUNTIME_IMAGE: agent-runtime:phase18-pi1.1-r2
+          TEST_RUNTIME_IMAGE: agent-runtime:2026.10-pi1.1
         # Like a production Worker, the real-Docker tests must chown managed directories
         # to the Runtime user (UID 1000), which the unprivileged runner user cannot do.
         run: sudo -E env "PATH=$PATH" pnpm --filter @agent-runtime/worker test

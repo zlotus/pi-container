@@ -106,7 +106,7 @@ Workspace 返回 `STORAGE_MIGRATION_REQUIRED`，Portal 提示需要管理员迁�
 对每个旧 Workspace（必须已停止），在 Worker 宿主机上以 Worker 用户执行：
 
 ```bash
-WORKER_ID=worker-a tools/dev/migrate-legacy-workspace.sh <workspace-id>
+WORKER_ID=worker-a deploy/production/bin/migrate-legacy-workspace <workspace-id>   # 生产：sudo -u agent-runtime migrate-legacy-workspace <id>
 ```
 
 脚本只处理带本 Worker managed label 的旧格式容器；把 `/home/agent` 复制到 `workspaces/<id>/home/`（目标
