@@ -6786,6 +6786,39 @@ PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compo
 首次启动时完成）；Worker 主机仍为发布包 + systemd。需要讨论的问题：Control Plane 容器的网络模式（host 网络以满足 loopback 约束，或放宽
 `MODEL_GATEWAY_ADMIN_URL` 对同一 compose 内部服务名的限制）、升级与回滚方式与 systemd 形态的一致性、两种形态之间的迁移、离线镜像包。
 
+### 19.19 实现中的调整
+
+**阶段 1：构建与代码（2026-10-19）**
+
+- **Runtime 版本改为构建参数**：Dockerfile 的 `io.agent-runtime.runtime.version` 取自必填的 `RUNTIME_VERSION` 构建参数（缺失或含非法
+  字符即构建失败）；`build-runtime-image.sh <tag>` 以 tag 作为版本。worker-a 构建 `agent-runtime:2026.10-pi1.1`
+  （`sha256:3bad0e0f…`，归档 1.4 GB zstd，构建清单 960 行），同主机 `agent-runtime-image load` 后镜像 ID 不变（S2 本机部分；跨主机待
+  worker-c）。
+- **CLI 同样遵守迁移规则**：`user:create`、`worker:*`、`auth:unlock` 原来各自无条件执行 migration，生产中会绕过“先备份再迁移”。
+  改为与 Control Plane 相同的 `prepareDatabase`（读 `DATABASE_MIGRATE_ON_START`），并补集成测试。
+- **管理接口**：`GET /api/admin/system`（版本、commit、协议版本、schema 版本、默认 Runtime 镜像）；`GET /api/admin/workers` 增加
+  `controlPlane: { version, protocolVersion }` 与每个 Worker 的 `workerVersion`；Audit `worker.version_reported`（`0014_release` 触发器）。
+- **协议不匹配的提示**：Control Plane 对版本号不同的 Worker 消息以 1008 关闭，reason 为 “Worker protocol version N unsupported;
+  Control Plane speaks 7”，并记 `warn`；Worker 记录非正常关闭的 code 与 reason（日志字段名避开脱敏规则中的 `code`）。
+- **发布包**：`pnpm release:build` 用 esbuild 打包，`pnpm deploy --legacy --prod --config.node-linker=hoisted` 生成扁平的生产依赖
+  （Control Plane 29 MB、Worker 27 MB），附 Node 24.22.0（118 MB，按官方 SHASUMS 校验）；解包 175 MB。`pnpm deploy` 会把自己的
+  安装设置写进 checkout 的 `node_modules/.pnpm-workspace-state-v1.json`，之后所有 pnpm 命令都要求重装；构建脚本在部署前后保存并还原该
+  文件。发布包内的 Control Plane 实测：未迁移时拒绝启动，`migrate` 后 `/ready` 为 200，日志带版本；Worker `--check-config` 正常，
+  带 `RUNTIME_IMAGE` 时拒绝。
+- **nginx**：模板改为从 `/opt/agent-runtime/current/deploy/nginx/` 读取（`NGINX_ENVSUBST_TEMPLATE_DIR`），切换版本后重启 nginx 容器即可；
+  `/etc/nginx/conf.d` 用 tmpfs，镜像自带的默认站点不加载。**测试发现**：镜像自带 `nginx.conf` 在 http 级别定义 `access_log ... main`
+  （记录完整请求行，含 query string），只在 conf.d 中再加一个 access_log 时两者同时生效——OAuth/OIDC callback 的 code 会进入日志。
+  改为每个 server 块自行声明 access_log（不再继承 http 级别），error log 只保留 `crit`（error log 同样记录请求行）。
+- **S4 结论**：pi-web 0.9.0 与 0.12.0 的 Agent 与 Terminal 事件流（SSE）每 30 秒发送一次注释行，因此 Workspace 入口的
+  `proxy_read_timeout` / `proxy_send_timeout` 取 600 s（只切断死连接），不需要 3600 s。Gateway 的 Node `requestTimeout` 设为 0（慢速上传）。
+- **Worker unit 的 capability**：暂定 `CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE`（`audit-host.sh` 以掩码
+  `0x20100b` 校验），由阶段 2 的 S1 在 worker-c 上收敛。
+- **测试与变异检查（已执行，25 项全部被测试发现）**：migration 忽略未知记录（两处）、`DATABASE_MIGRATE_ON_START=false` 仍迁移、CLI
+  始终迁移、0014 版本触发器失效、`RUNTIME_IMAGE` 被静默接受、v6 hello 被接受、`workerVersion` 可缺省、Control Plane 不说明协议不匹配、
+  两个 Gateway 未关闭 `requestTimeout`；nginx：公开入口代理 `/api/workers/`、日志用 `main` 格式、不转发 Host、去掉 Upgrade 头、打开
+  `proxy_buffering`、8444 放开全部路径、`X-Forwarded-For` 追加、8443 去掉地址白名单；`release.sh` 不校验校验和、`agent-runtime-image`
+  不校验校验和或版本标签、`build-runtime-image.sh` 覆盖已有 tag、`audit-host.sh` 不检查 Docker socket 或特权。
+
 ---
 
 # 65. Phase 开发流程

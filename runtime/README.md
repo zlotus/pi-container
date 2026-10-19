@@ -37,11 +37,15 @@ Pinned inputs:
 Build and verify on each native architecture:
 
 ```bash
+# Preferred: builds, verifies, refuses an existing tag and writes a distributable archive.
+deploy/production/scripts/build-runtime-image.sh 2026.10-pi1.1
+# By hand (the runtime version label comes from the build argument and must equal the tag):
 docker build \
   --platform linux/arm64 \
-  --tag agent-runtime:phase18-pi1.1-r2 \
+  --build-arg RUNTIME_VERSION=2026.10-pi1.1 \
+  --tag agent-runtime:2026.10-pi1.1 \
   runtime
-runtime/scripts/verify-image.sh agent-runtime:phase18-pi1.1-r2 arm64
+runtime/scripts/verify-image.sh agent-runtime:2026.10-pi1.1 arm64
 ```
 
 Use `linux/amd64` and `amd64` respectively on an AMD64 host. The verification
@@ -89,8 +93,9 @@ directories, and publishes pi-web only to an ephemeral host loopback port.
 `PI_CODING_AGENT_DIR=/agent/pi` keeps Pi credentials, sessions, MCP settings and
 project-trust decisions in the persistent Pi mount.
 
-The current image is `agent-runtime:phase18-pi1.1-r2` (runtime version `phase-18-r2`,
-pi-web 0.12.0, Pi 1.1.0). `patches/pi-web-0.12.0.mjs` makes the default-cwd
+The current image is `agent-runtime:2026.10-pi1.1` (runtime version `2026.10-pi1.1`,
+pi-web 0.12.0, Pi 1.1.0; the same Dockerfile as `phase18-pi1.1-r2`, built once and
+distributed as an archive, specs.md Phase 19.4.2). `patches/pi-web-0.12.0.mjs` makes the default-cwd
 route honor `PI_WEB_DEFAULT_CWD=/workspace` and lets pi-web rotate its
 preview-mode secrets in tmpfs; `pi-web-launch` (the image command) seeds that
 file on every start. Never rebuild an existing tag: every content change gets a

@@ -42,11 +42,12 @@ Worker does):
 ```bash
 docker build \
   --platform linux/amd64 \
-  --tag agent-runtime:phase7-toolchain \
+  --build-arg RUNTIME_VERSION=2026.10-pi1.1 \
+  --tag agent-runtime:2026.10-pi1.1 \
   runtime
-runtime/scripts/verify-image.sh agent-runtime:phase7-toolchain amd64
+runtime/scripts/verify-image.sh agent-runtime:2026.10-pi1.1 amd64
 sudo -E env "PATH=$PATH" TEST_DOCKER_RUNTIME=1 \
-  TEST_RUNTIME_IMAGE=agent-runtime:phase7-toolchain \
+  TEST_RUNTIME_IMAGE=agent-runtime:2026.10-pi1.1 \
   pnpm --filter @agent-runtime/worker test
 ```
 

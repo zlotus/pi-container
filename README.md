@@ -34,8 +34,7 @@ pnpm install
 cp deploy/.env.example .env
 # 将 SESSION_SECRET 替换为：openssl rand -hex 32
 docker compose --env-file .env -f deploy/compose.dev.yml up -d postgres
-docker build --tag agent-runtime:phase7-toolchain runtime
-runtime/scripts/verify-image.sh agent-runtime:phase7-toolchain
+deploy/production/scripts/build-runtime-image.sh 2026.10-pi1.1   # 构建并验证；已有该 tag 时跳过这一步
 set -a
 . ./.env
 set +a
@@ -279,11 +278,12 @@ capability 时 Worker 会拒绝启动任何 Workspace。宿主机还需安装开
 [Workspace Egress Runbook](docs/egress-runbook.md)；`WORKER_MANAGED_ROOT` 必须是以 `prjquota` 挂载的
 独立 XFS，见 [Workspace Storage Runbook](docs/storage-runbook.md)。
 
-Worker 每次建立 control channel 时，都会先对 `RUNTIME_IMAGE` 启动一次短时、无网络且受资源/
+Worker 每次建立 control channel 时，都会先对 `RUNTIME_IMAGES` 中的每个镜像启动一次短时、无网络且受资源/
 安全约束的 capability probe。只有镜像 OS/architecture 与宿主机匹配且 probe 返回严格 typed 结果，
 Worker 才发送 hello；各能力组的失败会如实上报 `false`。超时可通过
-`RUNTIME_CAPABILITY_PROBE_TIMEOUT_MS` 调整，默认 120 秒。新部署的 Control Plane 和 Worker 默认
-使用 `agent-runtime:phase7-toolchain` / `phase-7`；已有私有环境文件中的显式旧值不会被自动改写。
+`RUNTIME_CAPABILITY_PROBE_TIMEOUT_MS` 调整，默认 120 秒。Control Plane 的默认 Runtime 镜像为
+`agent-runtime:2026.10-pi1.1`；Worker 必须以 `RUNTIME_IMAGES=<tag>@sha256:<digest>` 列出它提供的镜像（v1.0 起没有默认值，
+旧的 `RUNTIME_IMAGE` / `RUNTIME_VERSION` 会使 Worker 拒绝启动）。
 
 ## Workspace network egress
 
