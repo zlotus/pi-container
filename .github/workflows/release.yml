@@ -2,11 +2,20 @@ name: Release
 
 # Builds the platform release archive natively per architecture (specs.md Phase 19.4.1).
 # A v* tag creates a draft GitHub Release with the archives; v1.0.0 is promoted from the
-# verified rc artifacts, not rebuilt (19.15 Q13). Manual runs on a branch are acceptance
-# builds (version 0.0.0-<commit>) kept as short-lived workflow artifacts.
+# verified rc artifacts, not rebuilt (19.15 Q13). Pull requests build and smoke-test the
+# archive on both architectures; manual runs keep it as a short-lived workflow artifact.
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "tools/release/**"
+      - "deploy/production/**"
+      - "apps/**"
+      - "packages/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
   workflow_dispatch:
 
 permissions:
