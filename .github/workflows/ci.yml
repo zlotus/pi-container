@@ -79,8 +79,11 @@ jobs:
           done
           ! grep -E "Unknown (key|section)|Invalid|Failed to parse" "$RUNNER_TEMP/units.log"
           shellcheck deploy/production/bin/* deploy/production/scripts/*.sh
-          # The env files exist only on a Control Plane host.
-          docker compose -f deploy/production/compose.yml config --quiet --no-env-resolution
+          # The env files exist only on a Control Plane host; older Compose versions require
+          # them even with --no-env-resolution, so validate against empty ones.
+          sudo mkdir -p /etc/agent-runtime
+          sudo touch /etc/agent-runtime/postgres.env /etc/agent-runtime/litellm.env /etc/agent-runtime/nginx.env
+          docker compose -f deploy/production/compose.yml config --quiet
       - name: Disk quotas on a real kernel (XFS project quotas on a loop device)
         # Runs last: it needs root, which may leave root-owned caches behind.
         run: |
