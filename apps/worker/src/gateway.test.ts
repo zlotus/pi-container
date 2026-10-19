@@ -111,6 +111,8 @@ describe("Worker Gateway", () => {
         return new URL(`http://127.0.0.1:${runtimePort}`);
       },
     });
+    // Slow uploads are not cut by Node's default 300 s whole-request limit (Phase 19.8).
+    expect(gateway.requestTimeout).toBe(0);
     const gatewayPort = await listen(gateway);
     const unauthorized = await request({
       port: gatewayPort,

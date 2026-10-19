@@ -174,6 +174,8 @@ describe("authenticated Workspace Gateway", () => {
       workerGatewayTokens: {},
       now: () => NOW,
     });
+    // Slow uploads are not cut by Node's default 300 s whole-request limit (Phase 19.8).
+    expect(gateway.requestTimeout).toBe(0);
     const port = await listen(gateway);
     const code = exchanges.issue({
       rawSessionToken: SESSION_A,
