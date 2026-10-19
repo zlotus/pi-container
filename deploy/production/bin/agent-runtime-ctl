@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Operator commands for the Control Plane host (specs.md Phase 19.5). Runs the release's
+# bundled CLIs as the Control Plane user with its env file, so secrets never appear on a
+# command line. Same commands and semantics as the development `pnpm` scripts.
+#
+#   agent-runtime-ctl [--release <version>] <command> [arguments]
+#
+#   version                         show the release (release.json)
+#   db:status | db:migrate          migration state / apply pending migrations (back up first)
+#   user:create                     LOCAL_USER_EMAIL, LOCAL_USER_PASSWORD, [LOCAL_USER_USERNAME,
+#                                   LOCAL_USER_ROLE] from the caller's environment
+#   worker:provision | worker:rotate | worker:configure-gateway | worker:disable |
+#   worker:enable | worker:delete   WORKER_ID, [WORKER_GATEWAY_BASE_URL] from the environment
+#   auth:unlock login <login> | ip <address> | all
+#
+# --release runs another installed release (e.g. migrate with the new release before
+# activating it). Environment: AGENT_RUNTIME_ROOT (/opt/agent-runtime),
+# AGENT_RUNTIME_CP_ENV (/etc/agent-runtime/control-plane.env), AGENT_RUNTIME_CP_USER
+# (agent-runtime-cp).
+set -euo pipefail
+
+root="${AGENT_RUNTIME_ROOT:-/opt/agent-runtime}"
+env_file="${AGENT_RUNTIME_CP_ENV:-/etc/agent-runtime/control-plane.env}"
+service_user="${AGENT_RUNTIME_CP_USER:-agent-runtime-cp}"
+
+fail() {
+  echo "agent-runtime-ctl: $*" >&2
+  exit 1
+}
+
+release_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+if [[ "${1:-}" == "--release" ]]; then
+  version="${2:?--release needs a version}"
+  [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]] || fail "invalid release version '$version'"
+  release_dir="${root}/releases/${version}"
+  [[ -f "${release_dir}/release.json" ]] || fail "release ${version} is not installed under ${root}/releases"
+  shift 2
+fi
+
+command="${1:-}"
+shift || true
+case "$command" in
+  version) exec cat "${release_dir}/release.json" ;;
+  db:status) script=migrate; args=(status) ;;
+  db:migrate) script=migrate; args=(migrate) ;;
+  user:create) script=create-user; args=() ;;
+  worker:provision) script=provision-worker; args=(create) ;;
+  worker:rotate | worker:configure-gateway | worker:disable | worker:enable | worker:delete)
+    script=provision-worker; args=("${command#worker:}") ;;
+  auth:unlock) script=unlock-auth; args=("$@") ;;
+  *)
+    sed -n '2,20p' "$(readlink -f "${BASH_SOURCE[0]}")" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+    ;;
+esac
+
+node="${release_dir}/bin/node"
+entry="${release_dir}/app/control-plane/${script}.mjs"
+[[ -x "$node" && -f "$entry" ]] || fail "release at ${release_dir} is incomplete"
+
+# The command's own inputs pass through; everything else comes from the env file.
+passthrough=()
+for name in LOCAL_USER_EMAIL LOCAL_USER_USERNAME LOCAL_USER_PASSWORD LOCAL_USER_ROLE \
+  WORKER_ID WORKER_GATEWAY_BASE_URL; do
+  if [[ -n "${!name+set}" ]]; then passthrough+=("${name}=${!name}"); fi
+done
+
+# Node reads the env file like systemd's EnvironmentFile for the documented format (one
+# KEY=value per line, values unquoted); variables passed through above take precedence.
+run=(env -i "PATH=/usr/sbin:/usr/bin:/sbin:/bin" "LANG=C.UTF-8" "${passthrough[@]}"
+  "$node" "--env-file=${env_file}" "$entry" "${args[@]}")
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  [[ -r "$env_file" ]] || fail "cannot read $env_file"
+  exec setpriv --reuid="$service_user" --regid="$service_user" --init-groups -- "${run[@]}"
+elif [[ "$(id -un)" == "$service_user" ]]; then
+  exec "${run[@]}"
+else
+  fail "run as root (sudo) or as ${service_user}"
+fi

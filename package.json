@@ -28,11 +28,13 @@
     "test:e2e:runtime": "TEST_DOCKER_RUNTIME=1 TEST_RUNTIME_IMAGE=agent-runtime:2026.10-pi1.1 pnpm --filter @agent-runtime/worker test:e2e:runtime",
     "test:egress": "pnpm --filter @agent-runtime/worker test:egress",
     "test:quota": "pnpm --filter @agent-runtime/worker test:quota",
-    "test:model-gateway": "pnpm --filter @agent-runtime/control-plane test:model-gateway"
+    "test:model-gateway": "pnpm --filter @agent-runtime/control-plane test:model-gateway",
+    "release:build": "node tools/release/build.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@types/node": "22.19.21",
+    "esbuild": "0.28.2",
     "eslint": "10.10.0",
     "tsx": "4.23.13",
     "typescript": "6.0.3",

@@ -2,7 +2,7 @@ import { generateOpaqueToken, hashOpaqueToken } from "@agent-runtime/auth";
 import {
   createDatabaseClient,
   createRepository,
-  migrateDatabase,
+  prepareDatabase,
 } from "@agent-runtime/database";
 import { parseHttpOrigin } from "@agent-runtime/gateway";
 import { WorkerIdSchema } from "@agent-runtime/protocol";
@@ -26,7 +26,8 @@ const input = InputSchema.parse({
 const database = createDatabaseClient(input.DATABASE_URL);
 
 try {
-  await migrateDatabase(database);
+  // Same rule as the Control Plane: production leaves migrations to the migrate command.
+  await prepareDatabase(database, { migrate: process.env.DATABASE_MIGRATE_ON_START !== "false" });
   const repository = createRepository(database, selectWorker);
   if (input.action === "create") {
     if (input.WORKER_GATEWAY_BASE_URL === undefined) {

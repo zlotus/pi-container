@@ -1,0 +1,19 @@
+# Starts the Control Plane host's third-party services (PostgreSQL, LiteLLM, nginx) from
+# /etc/agent-runtime/compose.yml before the Control Plane (specs.md Phase 19.5). The
+# containers keep Docker's restart policy; this unit only orders the first start at boot.
+[Unit]
+Description=Agent Runtime platform services (PostgreSQL, LiteLLM, nginx)
+Documentation=file:///opt/agent-runtime/current/deploy
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/docker compose --project-name agent-runtime-prod -f /etc/agent-runtime/compose.yml up -d --wait
+ExecStop=/usr/bin/docker compose --project-name agent-runtime-prod -f /etc/agent-runtime/compose.yml stop
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

@@ -6,11 +6,19 @@
 # home directory and then removes the old container; the next start recreates it with
 # the current configuration. /tmp and any other writable-layer content are NOT kept.
 #
-# Usage: WORKER_ID=<id> [WORKER_MANAGED_ROOT=/var/lib/agent-runtime] \
-#          tools/dev/migrate-legacy-workspace.sh <workspace-id>
+# Usage (production; reads WORKER_ID and WORKER_MANAGED_ROOT from the Worker's env file):
+#   sudo -u agent-runtime migrate-legacy-workspace <workspace-id>
+# Development: WORKER_ID=<id> [WORKER_MANAGED_ROOT=/var/lib/agent-runtime] \
+#   deploy/production/bin/migrate-legacy-workspace <workspace-id>
 set -euo pipefail
 
-workspace_id="${1:?usage: migrate-legacy-workspace.sh <workspace-id>}"
+workspace_id="${1:?usage: migrate-legacy-workspace <workspace-id>}"
+env_file="${AGENT_RUNTIME_WORKER_ENV:-/etc/agent-runtime/worker.env}"
+if [[ -z "${WORKER_ID:-}" && -r "$env_file" ]]; then
+  # Only the two non-secret settings this script needs.
+  WORKER_ID="$(sed -n 's/^WORKER_ID=//p' "$env_file" | tail -n 1)"
+  WORKER_MANAGED_ROOT="${WORKER_MANAGED_ROOT:-$(sed -n 's/^WORKER_MANAGED_ROOT=//p' "$env_file" | tail -n 1)}"
+fi
 worker_id="${WORKER_ID:?WORKER_ID must name this Worker}"
 managed_root="${WORKER_MANAGED_ROOT:-/var/lib/agent-runtime}"
 
