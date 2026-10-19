@@ -50,7 +50,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
             : "CREATED";
       worker.send(
         JSON.stringify({
-          version: 6,
+          version: 7,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -259,7 +259,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       worker1Commands.push(command.type);
       worker1.send(
         JSON.stringify({
-          version: 6,
+          version: 7,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -288,7 +288,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
       worker2Commands.push(command.type);
       worker2.send(
         JSON.stringify({
-          version: 6,
+          version: 7,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -469,7 +469,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
 
     worker.send(
       JSON.stringify({
-        version: 6,
+        version: 7,
         type: "worker.heartbeat",
         requestId: crypto.randomUUID(),
         payload: {
@@ -542,7 +542,7 @@ describe("Workspace Runtime lifecycle and Phase 5 placement", () => {
 
     worker.send(
       JSON.stringify({
-        version: 6,
+        version: 7,
         type: "worker.heartbeat",
         requestId: crypto.randomUUID(),
         payload: {

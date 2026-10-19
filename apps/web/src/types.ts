@@ -127,6 +127,8 @@ export interface WorkerRuntimeImage {
 export interface Worker {
   id: string;
   hostname: string | null;
+  /** Software version from the Worker's last connection (Phase 19.8); null before. */
+  workerVersion: string | null;
   architecture: "amd64" | "arm64" | null;
   status: "ONLINE" | "OFFLINE" | "DISABLED";
   /** false when an admin paused new placements on this Worker. */

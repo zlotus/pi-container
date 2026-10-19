@@ -39,7 +39,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
       }
       firstWorker.send(
         JSON.stringify({
-          version: 6,
+          version: 7,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -165,7 +165,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
     }
     reconnectedWorker.send(
       JSON.stringify({
-        version: 6,
+        version: 7,
         type: "response.ok",
         requestId: reconcileCommand.requestId,
         payload: {
@@ -251,7 +251,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
         };
         worker.send(
           JSON.stringify({
-            version: 6,
+            version: 7,
             type: "response.ok",
             requestId: command.requestId,
             payload: {
@@ -333,7 +333,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
         };
         worker.send(
           JSON.stringify({
-            version: 6,
+            version: 7,
             type: "response.ok",
             requestId: command.requestId,
             payload: {
@@ -437,7 +437,7 @@ describe("Phase 6 Worker recovery reconciliation", () => {
       const command = JSON.parse(data.toString()) as { requestId: string };
       worker.send(
         JSON.stringify({
-          version: 6,
+          version: 7,
           type: "response.ok",
           requestId: command.requestId,
           payload: {

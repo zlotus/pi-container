@@ -85,6 +85,7 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
     pidsLimit: 256,
   };
   let managedRoot = "";
+  let runtimeImageDigest = "";
   let docker!: Docker;
   let config!: WorkerConfig;
   let runtime!: DockerWorkspaceRuntime;
@@ -92,6 +93,8 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
 
   beforeAll(async () => {
     managedRoot = await mkdtemp(join(tmpdir(), "agent-runtime-integration-"));
+    // Pinned like a real Worker: containers are created from exactly this image ID.
+    runtimeImageDigest = (await new Docker().getImage(runtimeImage).inspect()).Id;
     config = loadWorkerConfig({
       CONTROL_PLANE_URL: "ws://127.0.0.1:3000/api/workers/connect",
       WORKER_ID: "integration-worker",
@@ -100,7 +103,7 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
       WORKSPACE_BASE_URL: "https://agent.example.internal",
       WORKER_MAX_WORKSPACES: "2",
       WORKER_MANAGED_ROOT: managedRoot,
-      RUNTIME_IMAGE: runtimeImage,
+      RUNTIME_IMAGES: `${runtimeImage}@${runtimeImageDigest}`,
       WORKSPACE_CPU_COUNT: String(resources.cpuCount),
       WORKSPACE_MEMORY_BYTES: String(resources.memoryBytes),
       WORKSPACE_PIDS_LIMIT: String(resources.pidsLimit),
@@ -718,7 +721,7 @@ describeWithDocker("Phase 3 through 7 Docker Runtime integration", () => {
     await writeFile(artifactPath, "historical image data", "utf8");
 
     const upgradedRuntime = new DockerWorkspaceRuntime(
-      { ...config, RUNTIME_IMAGE: "agent-runtime:future-toolchain" },
+      { ...config, RUNTIME_IMAGES: `agent-runtime:future-toolchain@${runtimeImageDigest}` },
       docker,
       undefined,
       ASSUMED_ENFORCED,

@@ -101,6 +101,7 @@ describeWithPostgres("Phase 18 Runtime change PostgreSQL integration", () => {
       await repository.recordWorkerHello({
         credentialHash,
         workerId,
+        workerVersion: "1.0.0-test",
         hostname: "runtime.internal",
         architecture: "arm64",
         runtimeImages: [image(OLD, "old"), image(NEW, "new")],

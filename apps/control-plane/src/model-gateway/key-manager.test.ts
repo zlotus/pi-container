@@ -226,7 +226,7 @@ class FakeWorker {
         return;
       }
       this.channel.acceptResponse(WORKER, {
-        version: 6,
+        version: 7,
         type: "response.ok",
         requestId: message.requestId,
         payload: {

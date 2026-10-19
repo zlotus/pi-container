@@ -216,6 +216,15 @@ function thresholdSchema(defaultValue: number) {
 export const ServerConfigSchema = z
   .object({
     DATABASE_URL: z.string().min(1),
+    /**
+     * Development applies pending migrations at startup; production sets false and runs
+     * the migrate command after a backup (specs.md Phase 19.8). Either way the Control
+     * Plane refuses a database that a newer release has migrated.
+     */
+    DATABASE_MIGRATE_ON_START: z
+      .enum(["true", "false"])
+      .default("true")
+      .transform((value) => value === "true"),
     HOST: z.string().min(1).default("127.0.0.1"),
     PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
     GATEWAY_HOST: z.string().min(1).default("127.0.0.1"),
@@ -326,7 +335,7 @@ export const ServerConfigSchema = z
     DEFAULT_RUNTIME_IMAGE: z
       .string()
       .min(1)
-      .default("agent-runtime:phase7-toolchain"),
+      .default("agent-runtime:2026.10-pi1.1"),
     WORKER_OFFLINE_AFTER_MS: z.coerce
       .number()
       .int()

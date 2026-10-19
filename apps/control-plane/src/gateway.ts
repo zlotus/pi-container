@@ -367,7 +367,9 @@ export function buildWorkspaceGateway(dependencies: WorkspaceGatewayDependencies
     WorkerIdSchema.parse(workerId);
     WorkerTokenSchema.parse(token);
   }
-  const server = createServer((request, response) => {
+  // Uploads through pi-web Files can take longer than Node's default 300 s for a whole
+  // request; headers still have to arrive within headersTimeout (specs.md Phase 19.8).
+  const server = createServer({ requestTimeout: 0 }, (request, response) => {
     // The Workspace Gateway is the entry point, so it never trusts an incoming request ID.
     const requestId = newRequestId();
     const workspaceId = workspaceIdFromHost(request.headers.host, base);

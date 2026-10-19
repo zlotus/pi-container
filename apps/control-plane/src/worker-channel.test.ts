@@ -34,7 +34,7 @@ class FakeSocket {
 
 function inspectCommand(): ControlToWorkerMessage {
   return {
-    version: 6,
+    version: 7,
     type: "workspace.inspect",
     requestId: REQUEST_ID,
     payload: { workspaceId: WORKSPACE_ID },
@@ -52,7 +52,7 @@ describe("worker command correlation", () => {
     channel.register("worker-01", socket);
     const result = channel.dispatch("worker-01", inspectCommand());
     const response = {
-      version: 6 as const,
+      version: 7 as const,
       type: "response.ok" as const,
       requestId: REQUEST_ID,
       payload: {
@@ -89,7 +89,7 @@ describe("worker command correlation", () => {
     channel.register("worker-01", socket);
     const result = channel.dispatch("worker-01", inspectCommand());
     const response = {
-      version: 6 as const,
+      version: 7 as const,
       type: "response.ok" as const,
       requestId: REQUEST_ID,
       payload: {
@@ -111,7 +111,7 @@ describe("worker command correlation", () => {
 
     expect(
       channel.acceptResponse("worker-01", {
-        version: 6,
+        version: 7,
         type: "response.ok",
         requestId: REQUEST_ID,
         payload: {
@@ -190,7 +190,7 @@ describe("worker command metrics (Phase 17.4)", () => {
     const okId = crypto.randomUUID();
     const ok = channel.dispatch("worker-01", command(okId));
     channel.acceptResponse("worker-01", {
-      version: 6,
+      version: 7,
       type: "response.ok",
       requestId: okId,
       payload: { requestType: "workspace.inspect", workspace: WORKSPACE_OBSERVATION },
@@ -200,7 +200,7 @@ describe("worker command metrics (Phase 17.4)", () => {
     const errorId = crypto.randomUUID();
     const failed = channel.dispatch("worker-01", command(errorId));
     channel.acceptResponse("worker-01", {
-      version: 6,
+      version: 7,
       type: "response.error",
       requestId: errorId,
       payload: { requestType: "workspace.inspect", code: "EGRESS_UNENFORCED", message: "x", retryable: false },
@@ -210,7 +210,7 @@ describe("worker command metrics (Phase 17.4)", () => {
     const mismatchId = crypto.randomUUID();
     const mismatched = channel.dispatch("worker-01", command(mismatchId));
     channel.acceptResponse("worker-01", {
-      version: 6,
+      version: 7,
       type: "response.ok",
       requestId: mismatchId,
       payload: { requestType: "workspace.start", workspace: WORKSPACE_OBSERVATION },

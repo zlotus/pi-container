@@ -17,7 +17,7 @@ const describeWithDocker = process.env.TEST_DOCKER_RUNTIME === "1" ? describe : 
  */
 const IMAGES = [
   process.env.TEST_PREVIOUS_RUNTIME_IMAGE ?? "agent-runtime:phase7-toolchain",
-  process.env.TEST_RUNTIME_IMAGE ?? "agent-runtime:phase18-pi1.1-r2",
+  process.env.TEST_RUNTIME_IMAGE ?? "agent-runtime:2026.10-pi1.1",
 ];
 
 describeWithDocker("platform model catalog in every Pi version (Phase 18.7)", () => {

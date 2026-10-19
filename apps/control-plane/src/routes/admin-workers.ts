@@ -1,3 +1,5 @@
+import { MIGRATION_NAMES } from "@agent-runtime/database";
+import { PLATFORM_COMMIT, PLATFORM_VERSION, WORKER_PROTOCOL_VERSION } from "@agent-runtime/protocol";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 
@@ -44,6 +46,7 @@ export function registerAdminWorkerRoutes(
     reply.header("cache-control", "no-store");
     return {
       defaultRuntimeImage: dependencies.defaultRuntimeImage,
+      controlPlane: { version: PLATFORM_VERSION, protocolVersion: WORKER_PROTOCOL_VERSION },
       workers: workers.map((worker) =>
         publicWorker(
           worker,
@@ -53,6 +56,21 @@ export function registerAdminWorkerRoutes(
           dependencies.defaultRuntimeImage,
         ),
       ),
+    };
+  });
+
+  /** What this Control Plane is (specs.md Phase 19.8); read-only, for upgrade checks. */
+  app.get("/api/admin/system", async (request, reply) => {
+    const auth = await authenticateAdmin(request, reply);
+    if (auth === null) return reply;
+    reply.header("cache-control", "no-store");
+    return {
+      version: PLATFORM_VERSION,
+      commit: PLATFORM_COMMIT,
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      // The startup check guarantees the database is at exactly this schema.
+      schemaVersion: MIGRATION_NAMES.at(-1) ?? null,
+      defaultRuntimeImage: dependencies.defaultRuntimeImage,
     };
   });
 

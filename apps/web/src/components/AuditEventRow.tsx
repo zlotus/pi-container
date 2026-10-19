@@ -28,6 +28,7 @@ const AUDIT_LABELS: Record<string, string> = {
   "worker.scheduling_paused": "Worker 已暂停调度",
   "worker.scheduling_resumed": "Worker 已恢复调度",
   "worker.runtime_reported": "Worker 运行环境已更新",
+  "worker.version_reported": "Worker 软件版本已更新",
   "worker.egress_enforced": "Worker 出口规则已生效",
   "worker.egress_unenforced": "Worker 出口规则未生效",
   "egress.rule_created": "出口规则已添加",

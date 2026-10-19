@@ -165,6 +165,7 @@ export async function createTestDependencies(
       runtimeVersion: null,
       capabilities: {},
       runtimeImages: [],
+      workerVersion: null,
       maxWorkspaces: null,
       allocatedWorkspaces: 0,
       systemResources: { logicalCpuCount: null, memoryBytes: null },
@@ -344,6 +345,7 @@ export async function createTestDependencies(
           runtimeVersion: input.runtimeImages[0]?.runtimeVersion ?? null,
           capabilities: input.runtimeImages[0]?.capabilities ?? {},
           runtimeImages: input.runtimeImages,
+          workerVersion: input.workerVersion,
           maxWorkspaces: input.maxWorkspaces,
           allocatedWorkspaces: input.allocatedWorkspaces,
           systemResources: input.systemResources,
@@ -1477,11 +1479,12 @@ export async function beginOAuth2Login(app: ReturnType<typeof buildControlPlane>
 
 export function workerHello(workerId: string) {
   return {
-    version: 6,
+    version: 7,
     type: "worker.hello",
     requestId: randomUUID(),
     payload: {
       workerId,
+      workerVersion: "1.0.0-test",
       hostname: `${workerId}.internal`,
       architecture: "arm64",
       runtimeImages: [
@@ -1531,7 +1534,7 @@ export function answerEgressApply(
   if (command.type !== "worker.egress.apply") return false;
   socket.send(
     JSON.stringify({
-      version: 6,
+      version: 7,
       type: "response.ok",
       requestId: command.requestId,
       payload: {
@@ -1557,7 +1560,7 @@ export type ReconcileOkResponse = Omit<WorkerOkResponse, "payload"> & {
 
 export function emptyReconciliation(requestId: string): ReconcileOkResponse {
   return {
-    version: 6,
+    version: 7,
     type: "response.ok",
     requestId,
     payload: {

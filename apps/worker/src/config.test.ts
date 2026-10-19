@@ -12,6 +12,7 @@ describe("worker configuration", () => {
         WORKER_GATEWAY_TOKEN: "gateway0123456789abcdef0123456789abcdef",
         WORKSPACE_BASE_URL: "https://agent.example.internal",
         WORKER_MAX_WORKSPACES: "4",
+        RUNTIME_IMAGES: `agent-runtime:test@sha256:${"9".repeat(64)}`,
       }),
     ).toThrow();
   });
@@ -24,12 +25,11 @@ describe("worker configuration", () => {
       WORKER_GATEWAY_TOKEN: "gateway0123456789abcdef0123456789abcdef",
       WORKSPACE_BASE_URL: "https://agent.example.internal",
       WORKER_MAX_WORKSPACES: "4",
+      RUNTIME_IMAGES: `agent-runtime:test@sha256:${"9".repeat(64)}`,
     });
 
     expect(config.WORKER_ID).toBe("worker-arm64-01");
     expect(config.WORKER_HEARTBEAT_INTERVAL_MS).toBe(10_000);
-    expect(config.RUNTIME_IMAGE).toBe("agent-runtime:phase7-toolchain");
-    expect(config.RUNTIME_VERSION).toBe("phase-7");
     expect(config.RUNTIME_CAPABILITY_PROBE_TIMEOUT_MS).toBe(120_000);
   });
 
@@ -42,6 +42,7 @@ describe("worker configuration", () => {
         WORKER_GATEWAY_TOKEN: "gateway0123456789abcdef0123456789abcdef",
         WORKSPACE_BASE_URL: "https://agent.example.internal",
         WORKER_MAX_WORKSPACES: "4",
+        RUNTIME_IMAGES: `agent-runtime:test@sha256:${"9".repeat(64)}`,
         WORKER_RECONNECT_INITIAL_MS: "5000",
         WORKER_RECONNECT_MAX_MS: "1000",
       }),
@@ -57,6 +58,7 @@ describe("worker configuration", () => {
         WORKER_TOKEN: shared,
         WORKER_GATEWAY_TOKEN: shared,
         WORKER_MAX_WORKSPACES: "4",
+        RUNTIME_IMAGES: `agent-runtime:test@sha256:${"9".repeat(64)}`,
         WORKSPACE_BASE_URL: "https://agent.example.internal",
       }),
     ).toThrow("must be different");
@@ -71,6 +73,7 @@ describe("model relay configuration (Phase 16.10)", () => {
     WORKER_GATEWAY_TOKEN: "gateway0123456789abcdef0123456789abcdef",
     WORKSPACE_BASE_URL: "https://agent.example.internal",
     WORKER_MAX_WORKSPACES: "4",
+    RUNTIME_IMAGES: `agent-runtime:test@sha256:${"9".repeat(64)}`,
   };
 
   it("is off without a gateway URL and defaults to port 3101 with 32 MiB bodies", () => {

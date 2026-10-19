@@ -2,7 +2,7 @@ import {
   checkDatabase,
   createDatabaseClient,
   createRepository,
-  migrateDatabase,
+  prepareDatabase,
 } from "@agent-runtime/database";
 import { createLogger, LoggingConfigSchema } from "@agent-runtime/logging";
 import { buildControlPlane } from "./app.js";
@@ -33,7 +33,7 @@ import {
 } from "./metrics/listener.js";
 import { PlatformMetrics } from "./metrics/platform-metrics.js";
 import { UsageRegistry } from "./metrics/usage-registry.js";
-import { WORKER_PROTOCOL_VERSION } from "@agent-runtime/protocol";
+import { PLATFORM_VERSION, WORKER_PROTOCOL_VERSION } from "@agent-runtime/protocol";
 import {
   GenericOAuth2UserInfoClient,
   OAuth2TransactionStore,
@@ -56,12 +56,21 @@ if (config.METRICS_PORT !== null) {
 }
 const metrics = new PlatformMetrics({
   defaultMetrics: true,
-  version: process.env.npm_package_version ?? "dev",
+  version: PLATFORM_VERSION,
   protocolVersion: WORKER_PROTOCOL_VERSION,
 });
 const database = createDatabaseClient(config.DATABASE_URL);
 
-await migrateDatabase(database);
+try {
+  await prepareDatabase(database, { migrate: config.DATABASE_MIGRATE_ON_START });
+} catch (error) {
+  // Pending migrations without permission to apply them, or a schema from a newer
+  // release: never run on a database this build does not match (specs.md Phase 19.8).
+  log.fatal({ err: error }, "database schema check failed");
+  await database.end({ timeout: 5 });
+  process.exit(1);
+}
+log.info({ version: PLATFORM_VERSION, protocolVersion: WORKER_PROTOCOL_VERSION }, "control plane starting");
 
 const repository = createRepository(database, selectWorker);
 await repository.markAllWorkersOfflineForRecovery(new Date());

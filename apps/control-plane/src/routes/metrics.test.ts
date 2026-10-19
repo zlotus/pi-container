@@ -140,7 +140,7 @@ describe("observed usage in the API (Phase 17.7)", () => {
     }
     worker.send(
       JSON.stringify({
-        version: 6,
+        version: 7,
         type: "worker.heartbeat",
         requestId: crypto.randomUUID(),
         payload: {

@@ -66,6 +66,51 @@ describe("Phase 2 worker control channel", () => {
     await app.close();
   });
 
+  it("records the Worker's software version and shows both versions to admins (Phase 19.8)", async () => {
+    const app = buildControlPlane(await createTestDependencies());
+    await app.ready();
+    const worker = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    worker.send(JSON.stringify(workerHello("worker-01")));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const admin = await login(app, "admin", "password-for-admin");
+    const workers = await app.inject({ method: "GET", url: "/api/admin/workers", headers: { cookie: admin.cookie } });
+    expect(workers.json()).toMatchObject({
+      controlPlane: { version: "dev", protocolVersion: 7 },
+      workers: [{ id: "worker-01", workerVersion: "1.0.0-test" }, { id: "worker-02", workerVersion: null }],
+    });
+    const system = await app.inject({ method: "GET", url: "/api/admin/system", headers: { cookie: admin.cookie } });
+    expect(system.statusCode).toBe(200);
+    expect(system.json()).toMatchObject({ version: "dev", commit: null, protocolVersion: 7, schemaVersion: "0014_release" });
+    const user = await login(app, "user-a", "password-for-user-a");
+    const forbidden = await app.inject({ method: "GET", url: "/api/admin/system", headers: { cookie: user.cookie } });
+    expect(forbidden.statusCode).toBe(403);
+
+    worker.close();
+    await app.close();
+  });
+
+  it("tells a Worker on another protocol version which one the Control Plane speaks", async () => {
+    const app = buildControlPlane(await createTestDependencies());
+    await app.ready();
+    const worker = await app.injectWS("/api/workers/connect", {
+      headers: { authorization: `Bearer ${WORKER_1_TOKEN}` },
+    });
+    const closed = once(worker, "close");
+    worker.send(JSON.stringify({ ...workerHello("worker-01"), version: 6 }));
+
+    const [code, reason] = (await closed) as [number, Buffer];
+    expect(code).toBe(1008);
+    expect(reason.toString()).toBe("Worker protocol version 6 unsupported; Control Plane speaks 7");
+    // Nothing from the rejected hello was recorded.
+    const admin = await login(app, "admin", "password-for-admin");
+    const workers = await app.inject({ method: "GET", url: "/api/admin/workers", headers: { cookie: admin.cookie } });
+    expect(workers.json()).toMatchObject({ workers: [{ id: "worker-01", workerVersion: null }, { id: "worker-02" }] });
+    await app.close();
+  });
+
   it("closes a credential that claims another pre-registered Worker ID", async () => {
     const app = buildControlPlane(await createTestDependencies());
     await app.ready();
@@ -99,7 +144,7 @@ describe("Phase 2 worker control channel", () => {
     const closed = once(worker, "close");
     worker.send(
       JSON.stringify({
-        version: 6,
+        version: 7,
         type: "worker.heartbeat",
         requestId: randomUUID(),
         payload: {
@@ -279,7 +324,7 @@ describe("Phase 2 worker control channel", () => {
         }
         commands[workerId]?.push(`${command.type}:${command.payload.workspaceId}`);
         socket.send(JSON.stringify({
-          version: 6,
+          version: 7,
           type: "response.ok",
           requestId: command.requestId,
           payload: {

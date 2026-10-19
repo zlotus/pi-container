@@ -3,6 +3,7 @@ import type { Repository } from "@agent-runtime/database";
 import {
   WorkerTokenSchema,
   WorkerToControlMessageSchema,
+  WORKER_PROTOCOL_VERSION,
 } from "@agent-runtime/protocol";
 import type { Logger } from "@agent-runtime/logging";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -111,6 +112,24 @@ export function registerWorkerControlChannel(
               closeForPolicy();
               return;
             }
+            // A Worker on another protocol version is told which one this Control Plane
+            // speaks (both are upgraded together, specs.md Phase 19.9.1).
+            const version =
+              typeof decoded === "object" && decoded !== null && "version" in decoded
+                ? (decoded as { version: unknown }).version
+                : undefined;
+            if (typeof version === "number" && version !== WORKER_PROTOCOL_VERSION) {
+              dependencies.log?.warn(
+                { workerId: identity.workerId, workerProtocolVersion: version, protocolVersion: WORKER_PROTOCOL_VERSION },
+                "worker protocol version mismatch",
+              );
+              rejected = true;
+              socket.close(
+                1008,
+                `Worker protocol version ${Number.isSafeInteger(version) ? version : "?"} unsupported; Control Plane speaks ${WORKER_PROTOCOL_VERSION}`,
+              );
+              return;
+            }
             const parsed = WorkerToControlMessageSchema.safeParse(decoded);
             if (!parsed.success) {
               closeForPolicy();
@@ -129,6 +148,7 @@ export function registerWorkerControlChannel(
               const recorded = await dependencies.store.recordWorkerHello({
                 credentialHash: identity.credentialHash,
                 workerId: identity.workerId,
+                workerVersion: message.payload.workerVersion,
                 hostname: message.payload.hostname,
                 architecture: message.payload.architecture,
                 runtimeImages: message.payload.runtimeImages,

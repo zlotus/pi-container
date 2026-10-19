@@ -624,6 +624,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       await repository.recordWorkerHello({
         credentialHash: originalHash,
         workerId,
+        workerVersion: "1.0.0-test",
         hostname: "integration-worker.internal",
         architecture: "arm64",
         runtimeImages: [
@@ -691,6 +692,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       await repository.recordWorkerHello({
         credentialHash,
         workerId: phase3WorkerId,
+        workerVersion: "1.0.0-test",
         hostname: "runtime-worker.internal",
         architecture: "arm64",
         runtimeImages: [
@@ -947,6 +949,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
     await repository.recordWorkerHello({
       credentialHash,
       workerId: phase6WorkerId,
+      workerVersion: "1.0.0-test",
       hostname: "recovery-worker.internal",
       architecture: "arm64",
       runtimeImages: [
@@ -1093,6 +1096,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       await repository.recordWorkerHello({
         credentialHash: token,
         workerId: input.workerId,
+        workerVersion: "1.0.0-test",
         hostname: `${input.workerId}.internal`,
         architecture: input.architecture,
         runtimeImages: [
@@ -1285,6 +1289,7 @@ describeWithPostgres("Phase 1 through 9 PostgreSQL integration", () => {
       await repository.recordWorkerHello({
         credentialHash: token,
         workerId: id,
+        workerVersion: "1.0.0-test",
         hostname: `${id}.internal`,
         architecture: "arm64",
         runtimeImages: [

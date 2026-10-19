@@ -12,11 +12,12 @@ const IMAGE_ID = `sha256:${"e".repeat(64)}`;
 describe("worker protocol", () => {
   it("accepts a versioned worker hello", () => {
     const parsed = WorkerToControlMessageSchema.parse({
-      version: 6,
+      version: 7,
       type: "worker.hello",
       requestId,
       payload: {
         workerId: "worker-arm64-01",
+        workerVersion: "1.0.0-test",
         hostname: "worker-arm64-01.internal",
         architecture: "arm64",
         runtimeImages: [
@@ -69,7 +70,7 @@ describe("worker protocol", () => {
   it("validates storage status, disk usage samples and disk limits", () => {
     const heartbeat = (payload: Record<string, unknown>) =>
       WorkerToControlMessageSchema.safeParse({
-        version: 6,
+        version: 7,
         type: "worker.heartbeat",
         requestId,
         payload: {
@@ -99,7 +100,7 @@ describe("worker protocol", () => {
 
     const storageSet = (diskLimitBytes: unknown) =>
       ControlToWorkerMessageSchema.safeParse({
-        version: 6,
+        version: 7,
         type: "workspace.storage.set",
         requestId,
         payload: { workspaceId, diskLimitBytes },
@@ -110,7 +111,7 @@ describe("worker protocol", () => {
     }
     const ensure = (storage: unknown) =>
       ControlToWorkerMessageSchema.safeParse({
-        version: 6,
+        version: 7,
         type: "workspace.ensure",
         requestId,
         payload: {
@@ -139,11 +140,12 @@ describe("worker protocol", () => {
 
   it("rejects a Worker claiming more allocations than its capacity", () => {
     const result = WorkerToControlMessageSchema.safeParse({
-      version: 6,
+      version: 7,
       type: "worker.hello",
       requestId,
       payload: {
         workerId: "worker-01",
+        workerVersion: "1.0.0-test",
         hostname: "worker-01.internal",
         architecture: "arm64",
         runtimeImages: [
@@ -175,7 +177,7 @@ describe("worker protocol", () => {
 
   it("does not accept host paths or container ids in infrastructure commands", () => {
     const result = ControlToWorkerMessageSchema.safeParse({
-      version: 6,
+      version: 7,
       type: "workspace.delete",
       requestId,
       payload: {
@@ -190,7 +192,7 @@ describe("worker protocol", () => {
 
   it("accepts a correlated response without exposing infrastructure details", () => {
     const parsed = WorkerToControlMessageSchema.parse({
-      version: 6,
+      version: 7,
       type: "response.ok",
       requestId,
       payload: {
@@ -210,7 +212,7 @@ describe("worker protocol", () => {
   it("accepts a bounded authoritative recovery command and typed inventory", () => {
     expect(
       ControlToWorkerMessageSchema.parse({
-        version: 6,
+        version: 7,
         type: "worker.reconcile",
         requestId,
         payload: {
@@ -228,7 +230,7 @@ describe("worker protocol", () => {
 
     expect(
       WorkerToControlMessageSchema.parse({
-        version: 6,
+        version: 7,
         type: "response.ok",
         requestId,
         payload: {
@@ -262,7 +264,7 @@ describe("worker protocol", () => {
     };
     expect(
       ControlToWorkerMessageSchema.safeParse({
-        version: 6,
+        version: 7,
         type: "worker.reconcile",
         requestId,
         payload: { assignments: [assignment, assignment] },
@@ -272,7 +274,7 @@ describe("worker protocol", () => {
 
   it("rejects stack traces and arbitrary fields in protocol errors", () => {
     const result = WorkerToControlMessageSchema.safeParse({
-      version: 6,
+      version: 7,
       type: "response.error",
       requestId,
       payload: {
@@ -298,11 +300,12 @@ describe("worker protocol", () => {
       capabilities,
     });
     const hello = (runtimeImages: unknown) => ({
-      version: 6,
+      version: 7,
       type: "worker.hello",
       requestId,
       payload: {
         workerId: "worker-01",
+        workerVersion: "1.0.0-test",
         hostname: "worker-01.internal",
         architecture: "arm64",
         runtimeImages,
@@ -334,9 +337,29 @@ describe("worker protocol", () => {
       expect(WorkerToControlMessageSchema.safeParse({ ...v5, version: 5 }).success).toBe(false);
     });
 
+    it("requires the Worker's software version in a v7 hello and rejects v6 (Phase 19.8)", () => {
+      const v7 = hello([report("a:1", "v1")]);
+      expect(WorkerToControlMessageSchema.safeParse({ ...v7, version: 6 }).success).toBe(false);
+      for (const workerVersion of ["1.0.0", "1.0.0-rc.1", "0.0.0-1a2b3c4", "dev"]) {
+        expect(
+          WorkerToControlMessageSchema.safeParse({ ...v7, payload: { ...v7.payload, workerVersion } }).success,
+          workerVersion,
+        ).toBe(true);
+      }
+      const withoutVersion: Record<string, unknown> = { ...v7.payload };
+      delete withoutVersion.workerVersion;
+      expect(WorkerToControlMessageSchema.safeParse({ ...v7, payload: withoutVersion }).success).toBe(false);
+      for (const workerVersion of ["", "-1", "1.0 beta", "x".repeat(65), "1.0.0\nforged"]) {
+        expect(
+          WorkerToControlMessageSchema.safeParse({ ...v7, payload: { ...v7.payload, workerVersion } }).success,
+          workerVersion,
+        ).toBe(false);
+      }
+    });
+
     it("carries workspace.runtime.set between two different image references only", () => {
       const command = (payload: Record<string, unknown>) =>
-        ControlToWorkerMessageSchema.safeParse({ version: 6, type: "workspace.runtime.set", requestId, payload });
+        ControlToWorkerMessageSchema.safeParse({ version: 7, type: "workspace.runtime.set", requestId, payload });
       expect(command({ workspaceId, fromImage: "a:1", toImage: "a:2" }).success).toBe(true);
       expect(command({ workspaceId, fromImage: "a:1", toImage: "a:1" }).success).toBe(false);
       expect(command({ workspaceId, fromImage: "a:1", toImage: "../../etc" }).success).toBe(false);
@@ -346,7 +369,7 @@ describe("worker protocol", () => {
     it("never lets a Worker report the Control Plane's UPGRADING state", () => {
       const observed = (state: string) =>
         WorkerToControlMessageSchema.safeParse({
-          version: 6,
+          version: 7,
           type: "response.ok",
           requestId,
           payload: {

@@ -173,6 +173,8 @@ export function publicWorker(
     id: worker.id,
     hostname: worker.hostname,
     architecture: worker.architecture,
+    /** Software version from the last hello; differs from the Control Plane's during an upgrade. */
+    workerVersion: worker.workerVersion,
     status,
     enabled: worker.enabled,
     schedulable: worker.schedulable,

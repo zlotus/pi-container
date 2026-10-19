@@ -305,3 +305,17 @@ describe("idle stop configuration (Phase 18.5)", () => {
     expect(() => parseServerConfig({ ...REQUIRED_ENV, ...override })).toThrow();
   });
 });
+
+describe("release configuration (Phase 19.8)", () => {
+  it("migrates at startup by default (development) and can leave it to the migrate command", () => {
+    expect(parseServerConfig(REQUIRED_ENV).DATABASE_MIGRATE_ON_START).toBe(true);
+    expect(
+      parseServerConfig({ ...REQUIRED_ENV, DATABASE_MIGRATE_ON_START: "false" }).DATABASE_MIGRATE_ON_START,
+    ).toBe(false);
+    expect(() => parseServerConfig({ ...REQUIRED_ENV, DATABASE_MIGRATE_ON_START: "no" })).toThrow();
+  });
+
+  it("defaults new Workspaces to the v1.0 Runtime image", () => {
+    expect(parseServerConfig(REQUIRED_ENV).DEFAULT_RUNTIME_IMAGE).toBe("agent-runtime:2026.10-pi1.1");
+  });
+});

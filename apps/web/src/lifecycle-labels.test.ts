@@ -4,7 +4,7 @@ import { describeAuditEvent } from "./components/AuditEventRow.js";
 import { runtimeLabel, TRANSITIONAL_WORKSPACE_STATES, workspaceStateLabel } from "./labels.js";
 import { runtimeChangeable } from "./pages/AdminWorkspacesPage.js";
 import { idleNote, runtimeActions } from "./pages/WorkspacesPage.js";
-import { idlePolicyText } from "./pages/AdminWorkersPage.js";
+import { idlePolicyText, workerVersionText } from "./pages/AdminWorkersPage.js";
 import type { WorkspaceRuntime } from "./types.js";
 
 const event = (eventType: string, details: Record<string, unknown>) => ({
@@ -127,5 +127,33 @@ describe("idle stop notes (Phase 18.5)", () => {
       .toBe("空闲回收：未启用。");
     expect(idlePolicyText({ idle: { enabled: true, stopAfterHours: 24, cpuThresholdCores: 0.05 }, defaultRuntimeImage: "a" }))
       .toContain("0.05 核持续 24 小时");
+  });
+});
+
+describe("Worker software version (Phase 19.8)", () => {
+  const controlPlane = { version: "1.0.0", protocolVersion: 7 };
+
+  it("shows the version and flags one that differs from the Control Plane", () => {
+    expect(workerVersionText({ workerVersion: "1.0.0" }, controlPlane)).toEqual({ text: "版本 1.0.0", differs: false });
+    expect(workerVersionText({ workerVersion: "1.0.0-rc.1" }, controlPlane)).toEqual({
+      text: "版本 1.0.0-rc.1",
+      differs: true,
+    });
+    expect(workerVersionText({ workerVersion: null }, controlPlane)).toEqual({ text: "版本未知", differs: false });
+    expect(workerVersionText({ workerVersion: "1.0.0-rc.1" }, null).differs).toBe(false);
+  });
+
+  it("labels the version Audit event", () => {
+    const event = {
+      id: "1",
+      eventType: "worker.version_reported",
+      actorUserId: null,
+      ownerUserId: null,
+      workspaceId: null,
+      workerId: "worker-a",
+      details: { fromVersion: "1.0.0-rc.1", toVersion: "1.0.0" },
+      createdAt: "2026-10-20T00:00:00.000Z",
+    };
+    expect(describeAuditEvent(event, [], [], true).label).toBe("Worker 软件版本已更新");
   });
 });
