@@ -12,8 +12,10 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { chmod, copyFile, cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import console from "node:console";
 import { arch } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
@@ -119,10 +121,15 @@ async function bundleApp({ app, entries, outDirectory, version, commit }) {
   // Production dependencies exactly as the lockfile resolves them, flat (no symlinks into
   // a store), then drop the workspace packages the bundle already contains.
   const deployDirectory = join(outDirectory, ".deploy");
+  // `pnpm deploy` records its own (production, hoisted) settings as the workspace's install
+  // state, after which every pnpm command in the checkout wants to reinstall; keep ours.
+  const stateFile = join(ROOT, "node_modules", ".pnpm-workspace-state-v1.json");
+  const state = existsSync(stateFile) ? await readFile(stateFile) : null;
   run("pnpm", [
     "--filter", `@agent-runtime/${app}`, "deploy", "--legacy", "--prod", "--frozen-lockfile",
     "--config.node-linker=hoisted", deployDirectory,
   ], { stdio: ["ignore", "ignore", "inherit"] });
+  if (state !== null) await writeFile(stateFile, state);
   await rm(join(deployDirectory, "node_modules", "@agent-runtime"), { recursive: true, force: true });
   await cp(join(deployDirectory, "node_modules"), join(outDirectory, "node_modules"), { recursive: true, verbatimSymlinks: true });
   await rm(deployDirectory, { recursive: true, force: true });
