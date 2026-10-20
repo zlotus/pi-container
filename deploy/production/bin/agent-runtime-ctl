@@ -15,12 +15,14 @@
 #
 # --release runs another installed release (e.g. migrate with the new release before
 # activating it). Environment: AGENT_RUNTIME_ROOT (/opt/agent-runtime),
-# AGENT_RUNTIME_CP_ENV (/etc/agent-runtime/control-plane.env), AGENT_RUNTIME_CP_USER
+# AGENT_RUNTIME_CP_ENV (/etc/agent-runtime/control-plane.env), AGENT_RUNTIME_CP_SECRETS
+# (/etc/agent-runtime/control-plane.secrets.env), AGENT_RUNTIME_CP_USER
 # (agent-runtime-cp).
 set -euo pipefail
 
 root="${AGENT_RUNTIME_ROOT:-/opt/agent-runtime}"
 env_file="${AGENT_RUNTIME_CP_ENV:-/etc/agent-runtime/control-plane.env}"
+secrets_file="${AGENT_RUNTIME_CP_SECRETS:-/etc/agent-runtime/control-plane.secrets.env}"
 service_user="${AGENT_RUNTIME_CP_USER:-agent-runtime-cp}"
 
 fail() {
@@ -68,10 +70,10 @@ done
 # Node reads the env file like systemd's EnvironmentFile for the documented format (one
 # KEY=value per line, values unquoted); variables passed through above take precedence.
 run=(env -i "PATH=/usr/sbin:/usr/bin:/sbin:/bin" "LANG=C.UTF-8" "${passthrough[@]}"
-  "$node" "--env-file=${env_file}" "$entry" "${args[@]}")
+  "$node" "--env-file=${env_file}" "--env-file=${secrets_file}" "$entry" "${args[@]}")
 
 if [[ "$(id -u)" -eq 0 ]]; then
-  [[ -r "$env_file" ]] || fail "cannot read $env_file"
+  [[ -r "$env_file" && -r "$secrets_file" ]] || fail "cannot read $env_file or $secrets_file"
   exec setpriv --reuid="$service_user" --regid="$service_user" --init-groups -- "${run[@]}"
 elif [[ "$(id -un)" == "$service_user" ]]; then
   exec "${run[@]}"

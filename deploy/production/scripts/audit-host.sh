@@ -188,6 +188,7 @@ else
   if [[ -f "${etc}/control-plane.env" ]]; then
     echo "== Control Plane host"
     check_env_file "${etc}/control-plane.env" agent-runtime-cp
+    check_env_file "${etc}/control-plane.secrets.env" agent-runtime-cp
     check_process "app/control-plane/server.mjs" agent-runtime-cp 0000000000000000
     cp_env="${etc}/control-plane.env"
     for name in HOST GATEWAY_HOST METRICS_HOST; do

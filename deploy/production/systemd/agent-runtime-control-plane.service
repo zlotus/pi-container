@@ -15,6 +15,8 @@ Type=simple
 User=agent-runtime-cp
 Group=agent-runtime-cp
 EnvironmentFile=/etc/agent-runtime/control-plane.env
+# Generated secrets (init-secrets.sh): DATABASE_URL, SESSION_SECRET, keys and tokens.
+EnvironmentFile=/etc/agent-runtime/control-plane.secrets.env
 # Trust the internal CA for HTTPS to Worker Gateways (specs.md Phase 19.6.1).
 Environment=NODE_EXTRA_CA_CERTS=/etc/agent-runtime/tls/internal-ca.crt
 ExecStart=/opt/agent-runtime/current/bin/node /opt/agent-runtime/current/app/control-plane/server.mjs
