@@ -207,7 +207,7 @@ else
     [[ "$(env_value "$cp_env" DATABASE_MIGRATE_ON_START)" == "false" ]] &&
       pass "migrations run only by the migrate command" || warn "DATABASE_MIGRATE_ON_START is not false"
     for service in postgres litellm; do
-      published="$(docker compose -p agent-runtime-prod -f "${etc}/compose.yml" port "$service" \
+      published="$(docker compose -p ar-platform -f "${etc}/compose.yml" port "$service" \
         "$([[ $service == postgres ]] && echo 5432 || echo 4000)" 2>/dev/null)"
       if [[ -z "$published" || "$published" == 127.0.0.1:* ]]; then
         pass "${service} is published on loopback only${published:+ (${published})}"

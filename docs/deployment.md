@@ -134,9 +134,9 @@ sudo nano /etc/agent-runtime/litellm.env   # 填上游模型服务商的 key（D
 ### 5.5 第三方服务、数据库与 Control Plane
 
 ```bash
-sudo docker compose -p agent-runtime-prod -f /etc/agent-runtime/compose.yml up -d postgres
+sudo docker compose -p ar-platform -f /etc/agent-runtime/compose.yml up -d postgres
 sudo $C/scripts/init-postgres.sh                      # agent_runtime 与 litellm 两个角色和库
-sudo docker compose -p agent-runtime-prod -f /etc/agent-runtime/compose.yml up -d     # LiteLLM、nginx
+sudo docker compose -p ar-platform -f /etc/agent-runtime/compose.yml up -d     # LiteLLM、nginx
 sudo agent-runtime-ctl db:migrate && sudo agent-runtime-ctl db:status
 sudo install -m 0644 $C/systemd/agent-runtime-platform.service $C/systemd/agent-runtime-control-plane.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -286,7 +286,7 @@ sudo nft delete table inet agent_runtime
 sudo find /var/lib/agent-runtime -mindepth 1 -maxdepth 1 -exec rm -rf {} +      # Workspace 数据
 # Control Plane 主机
 sudo systemctl disable --now agent-runtime-control-plane agent-runtime-platform
-sudo docker compose -p agent-runtime-prod -f /etc/agent-runtime/compose.yml down
+sudo docker compose -p ar-platform -f /etc/agent-runtime/compose.yml down
 sudo rm -rf /var/lib/agent-runtime-postgres                                   # 平台与网关数据库
 # 两者
 sudo rm -f /etc/systemd/system/agent-runtime-*.service && sudo systemctl daemon-reload

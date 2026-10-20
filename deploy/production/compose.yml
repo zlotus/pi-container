@@ -5,7 +5,10 @@
 #
 # Every port is published on loopback only, except nginx (host network), which listens on
 # AR_PUBLIC_LISTEN (users: 80, 443) and AR_INTERNAL_LISTEN (Workers: 8443, 8444).
-name: agent-runtime-prod
+# Not "agent-runtime-…": a Worker treats every container and network with that prefix as
+# its own namespace, so on a host that is also a Worker these would be reported as unknown
+# resources (specs.md Phase 19.19).
+name: ar-platform
 
 services:
   postgres:

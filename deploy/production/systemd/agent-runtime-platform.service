@@ -11,8 +11,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/docker compose --project-name agent-runtime-prod -f /etc/agent-runtime/compose.yml up -d --wait
-ExecStop=/usr/bin/docker compose --project-name agent-runtime-prod -f /etc/agent-runtime/compose.yml stop
+ExecStart=/usr/bin/docker compose --project-name ar-platform -f /etc/agent-runtime/compose.yml up -d --wait
+ExecStop=/usr/bin/docker compose --project-name ar-platform -f /etc/agent-runtime/compose.yml stop
 TimeoutStartSec=300
 
 [Install]

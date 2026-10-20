@@ -7,11 +7,11 @@
 #   init-postgres.sh
 #
 # Environment: AGENT_RUNTIME_ETC (/etc/agent-runtime), AGENT_RUNTIME_COMPOSE_PROJECT
-# (agent-runtime-prod).
+# (ar-platform).
 set -euo pipefail
 
 etc="${AGENT_RUNTIME_ETC:-/etc/agent-runtime}"
-project="${AGENT_RUNTIME_COMPOSE_PROJECT:-agent-runtime-prod}"
+project="${AGENT_RUNTIME_COMPOSE_PROJECT:-ar-platform}"
 
 fail() {
   echo "init-postgres.sh: $*" >&2

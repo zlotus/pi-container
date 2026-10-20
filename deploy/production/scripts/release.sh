@@ -62,7 +62,7 @@ case "${1:-}" in
     mv -T "${root}/.current.new" "${root}/current"
     echo "active release: ${version}${previous:+ (was ${previous})}"
     echo "now restart: systemctl restart agent-runtime-control-plane (Control Plane host),"
-    echo "  docker compose -p agent-runtime-prod -f /etc/agent-runtime/compose.yml restart nginx,"
+    echo "  docker compose -p ar-platform -f /etc/agent-runtime/compose.yml restart nginx,"
     echo "  systemctl restart agent-runtime-worker (each Worker host)"
     ;;
   list)

@@ -54,7 +54,7 @@ Worker 主机上需要：`/etc/agent-runtime/tls/internal-ca.crt`（同一根证
 （`root:agent-runtime 0640`）。拷贝时私钥只经 root 到 root 的通道（例如 `sudo tar ... | ssh ... sudo tar -x`），不要放进共享目录。
 
 **续期**：服务器证书 397 天。到期前 30 天内用同一命令重签（旧文件保留为 `*.old`），然后
-`docker compose -p agent-runtime-prod -f /etc/agent-runtime/compose.yml restart nginx`；Worker Gateway 证书重签后重启该 Worker。
+`docker compose -p ar-platform -f /etc/agent-runtime/compose.yml restart nginx`；Worker Gateway 证书重签后重启该 Worker。
 检查到期时间：
 
 ```bash
