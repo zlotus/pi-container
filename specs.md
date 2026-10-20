@@ -6855,6 +6855,24 @@ PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compo
   `PLATFORM_EGRESS_PROTECTED`；示例与部署文档已写明，实验环境已补上并确认拦截。由 Control Plane 自动把已注册 Worker 的 Gateway 地址加入
   保护集合（需要随 Worker 注册变化重新下发规则）留作 v1.x 改进。
 
+**阶段 3：运维演练（2026-10-20，worker-a 生产 Control Plane + Worker，worker-c Worker）**
+
+- **升级 / 回滚**（19.9.1、19.9.2 无 migration 分支）：用 `release.sh install|activate` 在两台主机间升级、回滚、再升级，期间两个用户
+  Workspace 的容器启动时间不变（一直运行）。**发现并修复**：Control Plane 收到 SIGTERM 后等待浏览器的长连接（SSE、WebSocket）自然结束，
+  永远等不到，每次停止都被 systemd 在 30 秒后强杀。改为关闭全部 Workspace 连接与监听后退出，并设 10 秒期限；Worker 同样主动关闭连接并
+  退出。修复后（演练中保持一条经 Gateway 的长连接）停止 0.1 秒、重新就绪约 1 秒。
+- **数据库比程序新**：向生产库插入一条虚构的更新 migration 记录，Control Plane 以 `DatabaseNewerThanBuildError` 拒绝启动（systemd
+  每 5 秒重试，始终不运行），`db:status` 以退出码 3 报告；删除记录后恢复。
+- **备份与恢复（S3）**：`pg_dump -Fc` 两库 + worker-c 受管根文件级归档（`tar --numeric-owner --xattrs --acls`）；之后新建、修改、删除
+  Workspace；删除 worker-c 全部受管容器与网络并清空受管根，从归档恢复、两库 `pg_restore`。结果：一致恢复时 Workspace 为 `ERROR`
+  （容器缺失），启动后按当前配置重建，`/workspace`、`/home/agent` 为备份时内容，XFS 配额重新生效，虚拟 key 继续有效；数据库较旧时
+  备份后新建的 Workspace 报告为 `MANAGED_ORPHAN`（容器、目录、网络，不删除），状态与期望相反的为 `ERROR`。均与 19.10 一致，写入
+  `docs/backup-runbook.md`。带 migration 的回滚（恢复备份）的数据库步骤与此相同，真实 migration 在阶段 4（v0.13 → v1.0）中演练。
+- **发现并修复**：Worker 把名字以 `agent-runtime-` 开头的容器与网络都视为自己的命名空间；生产 compose 项目原名 `agent-runtime-prod`，
+  在 Control Plane 与 Worker 同机时每次 reconcile 都报“未知资源”。项目改名为 `ar-platform`（运行中的部署经 `down` / `up` 迁移，数据目录
+  为 bind 挂载不受影响）。开发环境的 compose 项目（`agent-runtime-platform` 等）有同样现象，只在开发与 Worker 同机时出现，不改。
+- **文档**：`docs/upgrade-runbook.md`、`docs/backup-runbook.md`。
+
 ---
 
 # 65. Phase 开发流程
