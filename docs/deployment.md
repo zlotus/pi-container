@@ -110,7 +110,9 @@ sudo install -m 0644 $C/nginx/worker-allow.conf.example /etc/agent-runtime/nginx
 
 - `nginx.env`：`AR_PUBLIC_LISTEN`（用户访问的地址）、`AR_INTERNAL_LISTEN`（Worker 访问的地址，可与前者相同）、`AR_PORTAL_HOST`、
   `AR_WORKSPACE_DOMAIN`、三个端口（与 `control-plane.env` 的 `PORT`、`GATEWAY_PORT` 及 `.env` 的 `AR_LITELLM_PORT` 一致）。
-- `control-plane.env`：`PORTAL_ORIGIN`、`WORKSPACE_BASE_URL`、`PLATFORM_EGRESS_PROTECTED`（本主机在各网络中的地址）、按需的
+- `control-plane.env`：`PORTAL_ORIGIN`、`WORKSPACE_BASE_URL`、`PLATFORM_EGRESS_PROTECTED`（本主机在各网络中的地址，以及**每台
+  Worker 的 Gateway 地址**——Worker 不在 RFC1918 网段时（如 Tailscale/CGNAT 或公网地址）必须列出，否则一台 Worker 上的 Workspace 能连到
+  另一台 Worker 的 Gateway 端口；新增 Worker 后改这里并重启 Control Plane）、按需的
   `IDLE_STOP_AFTER_HOURS`、`MODEL_GATEWAY_USER_BUDGET_USD`、OIDC/OAuth2 设置（[authentication-runbook.md](authentication-runbook.md)）。
   端口与 `.env` 不同时同时改 `MODEL_GATEWAY_ADMIN_URL`。
 - 格式（systemd `EnvironmentFile` 与 Node `--env-file` 共同支持的写法）：每行 `KEY=value`，**不加引号、不加行尾注释**，JSON 原样写在一行。

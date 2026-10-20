@@ -6840,6 +6840,21 @@ PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compo
 - **文档**：`docs/deployment.md`、`docs/tls-and-dns.md`（dnsmasq、Tailscale split DNS、Clash、Windows Server 2008 R2 AD、根证书导入）。
   卸载步骤中删除 Workspace 网络改为按标签（网络名是 `agent-runtime-<id>`，`arw-` 只是网桥名）。
 
+**阶段 2 验收后（2026-10-20）**
+
+- 负责人完成阶段 2 人工验收（含重启 worker-c）；Firefox ESR 不读 Linux 系统证书库，需写入其配置目录的 `cert9.db`（文档已改正）。
+- **验收中发现并修复**：Control Plane 访问原生 TLS 的 Worker Gateway 时，Node 用转发的 `Host`（`<id>.agent.<域>`）作为 SNI 与证书校验名，
+  而 Worker 证书只签 IP，所有 Workspace 请求返回 `UPSTREAM_UNAVAILABLE`（开发环境 Worker Gateway 为 HTTP，从未暴露）。`packages/gateway`
+  对 HTTPS 上游改用目标自身的主机名（IP 不发 SNI、按 IP SAN 校验），补真实 HTTPS 上游回归测试与变异检查。两台主机按 19.9.1 升级到修复版
+  （无 migration）。
+- **worker-a 加入为第二台生产 Worker**（单机形态：Control Plane 与 Worker 同机）：开发数据打包备份到 `~/agent-runtime-dev-backup-worker-a.tar.zst`
+  后清空；Worker Gateway 绑定 `127.0.0.1:3100`（证书 `IP:127.0.0.1`），内部入口白名单加入本机 Tailscale 地址。Workspace 按负载落到 worker-a，
+  打开、中继、出口均正常。
+- **安全复查发现**：worker-a 上的 Workspace 能连到 worker-c 的 Worker Gateway（401，有 token 保护）——Worker 地址在 Tailscale 的
+  `100.64.0.0/10`，不在默认拒绝范围。生产 Worker 通常在 RFC1918 网段（默认拒绝），但不在内网段时必须把每台 Worker 的 Gateway 地址写进
+  `PLATFORM_EGRESS_PROTECTED`；示例与部署文档已写明，实验环境已补上并确认拦截。由 Control Plane 自动把已注册 Worker 的 Gateway 地址加入
+  保护集合（需要随 Worker 注册变化重新下发规则）留作 v1.x 改进。
+
 ---
 
 # 65. Phase 开发流程
