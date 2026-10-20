@@ -1,6 +1,12 @@
+import { execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { createServer, request as httpRequest } from "node:http";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, request as httpRequest, type Server } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { getCACertificates, setDefaultCACertificates } from "node:tls";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -138,6 +144,72 @@ describe("HTTP proxy connection lifecycle", () => {
       expect(body).toBe("ok");
       expect(unregister).toHaveBeenCalledOnce();
     } finally {
+      await Promise.all([
+        new Promise<void>((resolve) => proxy.close(() => resolve())),
+        new Promise<void>((resolve) => upstream.close(() => resolve())),
+      ]);
+    }
+  });
+});
+
+/** A certificate for IP:127.0.0.1 only, signed by a throwaway CA. */
+function ipCertificate(): { ca: string; cert: string; key: string } {
+  const directory = mkdtempSync(join(tmpdir(), "gateway-tls-"));
+  try {
+    const run = (args: string[]) => execFileSync("openssl", args, { cwd: directory, stdio: "ignore" });
+    run(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=test CA", "-keyout", "ca.key", "-out", "ca.crt"]);
+    run(["req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=127.0.0.1", "-keyout", "server.key", "-out", "server.csr"]);
+    writeFileSync(join(directory, "ext"), "subjectAltName=IP:127.0.0.1\n");
+    run(["x509", "-req", "-in", "server.csr", "-CA", "ca.crt", "-CAkey", "ca.key", "-CAcreateserial", "-days", "1", "-extfile", "ext", "-out", "server.crt"]);
+    const read = (name: string) => readFileSync(join(directory, name), "utf8");
+    return { ca: read("ca.crt"), cert: read("server.crt"), key: read("server.key") };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+describe("HTTPS upstream (Worker Gateway with native TLS)", () => {
+  it("verifies the upstream by its own address, not by the forwarded public Host (Phase 19.19)", async () => {
+    const tls = ipCertificate();
+    const previous = getCACertificates("default");
+    // Like NODE_EXTRA_CA_CERTS in the Control Plane unit.
+    setDefaultCACertificates([...previous, tls.ca]);
+    let seenHost: string | undefined;
+    const upstream = createHttpsServer({ cert: tls.cert, key: tls.key }, (request, response) => {
+      seenHost = request.headers.host;
+      response.end("tls-ok");
+    });
+    upstream.listen(0, "127.0.0.1");
+    await once(upstream, "listening");
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+    const proxy: Server = createServer((request, response) => {
+      proxyHttpRequest(request, response, {
+        target: new URL(`https://127.0.0.1:${upstreamPort}`),
+        requestHeaders: { ...request.headers, host: `${WORKSPACE_ID}.agent.example.internal` },
+      });
+    });
+    proxy.listen(0, "127.0.0.1");
+    await once(proxy, "listening");
+    const proxyPort = (proxy.address() as AddressInfo).port;
+    try {
+      const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const outgoing = httpRequest(
+          { hostname: "127.0.0.1", port: proxyPort, path: "/", headers: { connection: "close" } },
+          (response) => {
+            let body = "";
+            response.setEncoding("utf8");
+            response.on("data", (chunk: string) => (body += chunk));
+            response.once("end", () => resolve({ status: response.statusCode ?? 0, body }));
+          },
+        );
+        outgoing.once("error", reject);
+        outgoing.end();
+      });
+      expect(result).toEqual({ status: 200, body: "tls-ok" });
+      // The public Host still reaches the Worker Gateway, which checks it.
+      expect(seenHost).toBe(`${WORKSPACE_ID}.agent.example.internal`);
+    } finally {
+      setDefaultCACertificates(previous);
       await Promise.all([
         new Promise<void>((resolve) => proxy.close(() => resolve())),
         new Promise<void>((resolve) => upstream.close(() => resolve())),

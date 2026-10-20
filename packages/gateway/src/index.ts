@@ -154,6 +154,18 @@ function requester(target: URL) {
   throw new Error("proxy target must use http or https");
 }
 
+/**
+ * TLS name of an HTTPS upstream: the target's own host, never the forwarded public Host
+ * header, which Node would otherwise use for SNI and certificate verification (the
+ * Worker Gateway's certificate names the Worker, not `<id>.<Workspace domain>`). An IP
+ * target sends no SNI and is verified against its IP SAN (specs.md Phase 19.19).
+ */
+function tlsServername(target: URL): { servername?: string } {
+  if (target.protocol !== "https:") return {};
+  const hostname = target.hostname.replace(/^\[(.*)\]$/, "$1");
+  return { servername: isIP(hostname) === 0 ? hostname : "" };
+}
+
 function targetPath(request: IncomingMessage): string | null {
   const path = request.url;
   if (path === undefined || !path.startsWith("/") || path.startsWith("//")) {
@@ -198,6 +210,7 @@ export function proxyHttpRequest(
       protocol: options.target.protocol,
       hostname: options.target.hostname,
       port: options.target.port,
+      ...tlsServername(options.target),
       method: request.method,
       path,
       headers: options.requestHeaders,
@@ -326,6 +339,7 @@ export function proxyWebSocketUpgrade(
       protocol: options.target.protocol,
       hostname: options.target.hostname,
       port: options.target.port,
+      ...tlsServername(options.target),
       method: "GET",
       path,
       headers,
