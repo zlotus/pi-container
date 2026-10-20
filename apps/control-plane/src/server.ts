@@ -330,19 +330,33 @@ if (modelGateway !== undefined) {
   );
 }
 
+// Browsers keep Workspace connections (SSE, WebSocket) open indefinitely, so a graceful
+// stop that waits for them never ends: close them, and exit after a deadline regardless
+// (systemd would otherwise kill the process after TimeoutStopSec, specs.md Phase 19.19).
+const SHUTDOWN_DEADLINE_MS = 10_000;
+let shuttingDown = false;
 const shutdown = async (): Promise<void> => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log.info("control plane stopping");
+  setTimeout(() => {
+    log.warn({ deadlineMs: SHUTDOWN_DEADLINE_MS }, "shutdown deadline reached; exiting");
+    process.exit(0);
+  }, SHUTDOWN_DEADLINE_MS).unref();
   modelGateway?.stop();
   clearInterval(workerStatusTimer);
   clearInterval(accessFlushTimer);
   if (idleTimer !== null) clearInterval(idleTimer);
   await workspaceAccess.flush((entries) => repository.recordWorkspaceAccess(entries)).catch(() => undefined);
   clearInterval(authThrottleCleanupTimer);
-  await new Promise<void>((resolve, reject) => {
-    gateway.close((error) => (error === undefined ? resolve() : reject(error)));
-  });
+  const gatewayClosed = new Promise<void>((resolve) => gateway.close(() => resolve()));
+  sessionConnections.closeAll();
+  gateway.closeAllConnections();
+  await gatewayClosed;
   metricsServer?.close();
   await app.close();
   await database.end({ timeout: 5 });
+  process.exit(0);
 };
 
 process.once("SIGINT", () => {

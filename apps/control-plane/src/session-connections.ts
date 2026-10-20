@@ -44,6 +44,11 @@ export class SessionConnectionRegistry {
     this.#closeMatching((connection) => targets.has(connection.workspaceId));
   }
 
+  /** Closes every tracked connection (process shutdown). */
+  closeAll(): void {
+    this.#closeMatching(() => true);
+  }
+
   #closeMatching(predicate: (connection: TrackedConnection) => boolean): void {
     for (const connection of [...this.#connections]) {
       if (!predicate(connection)) continue;

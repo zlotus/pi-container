@@ -107,11 +107,15 @@ const gateway = buildWorkerGateway({
   ...(tls === undefined ? {} : { tls }),
 });
 
+// Open Gateway connections would keep the process alive; Workspace containers keep
+// running either way (specs.md Phase 19.19).
 const shutdown = (): void => {
   daemon.stop();
   oomEvents.stop();
   gateway.close();
-  void modelAccess?.stop();
+  gateway.closeAllConnections();
+  void Promise.resolve(modelAccess?.stop()).finally(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5_000).unref();
 };
 
 process.once("SIGINT", shutdown);
