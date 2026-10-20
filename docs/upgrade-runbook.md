@@ -89,7 +89,48 @@ sudo systemctl start agent-runtime-control-plane       # 然后 nginx 与各 Wor
 数据库不匹配或有待执行 migration 时，Control Plane 每 5 秒重启一次并立即退出（`systemctl status` 为 `activating`），不会在不匹配的
 数据库上运行。修好原因后 `sudo systemctl reset-failed agent-runtime-control-plane && sudo systemctl start agent-runtime-control-plane`。
 
-## 5. 失败时收集
+## 5. 从 v0.13（开发形态）升级到 v1.0
+
+v0.13 只有开发形态（`tsx`、开发 compose 的 PostgreSQL、本地构建的 `agent-runtime:phase7-toolchain`）。升级是**停机**进行的原位迁移：
+数据留在原 Worker 的原路径，数据库恢复进生产 PostgreSQL 后由 v1.0 迁移（`0010`～`0014`）。2026-10-20 在 worker-c 上以单机形态演练通过
+（`specs.md` 19.19 阶段 4）。
+
+1. **通知用户**：旧容器的 `/tmp` 与容器可写层（例如自装的 rustup 组件）不会保留，需要的先移到 `/workspace`；home 会迁移。
+2. **停止并备份**：Portal 中停止全部 Workspace；
+   `docker exec agent-runtime-platform-postgres-1 pg_dump -U agent_runtime -Fc agent_runtime > agent_runtime.dump`；
+   按 [backup-runbook.md](backup-runbook.md) 2.2 备份受管根；然后停止 Worker、Control Plane、Vite 与开发 PostgreSQL。
+3. **Worker 主机**：受管根若还不是独立 XFS（`prjquota`），按 [storage-runbook.md](storage-runbook.md) 第 3/4 节建好并原样拷入数据；
+   按 [deployment.md](deployment.md) 6.1、6.2 安装软件包、`agent-runtime` 用户、发布包与出口规则 unit。然后把 **Worker 自己的路径**交给
+   Worker 用户（Workspace 数据目录保持属于 UID 1000）：
+   ```bash
+   R=/var/lib/agent-runtime
+   sudo chown agent-runtime:agent-runtime $R $R/workspaces
+   for w in $R/workspaces/*/; do sudo chown agent-runtime:agent-runtime "$w"; sudo chown -R agent-runtime:agent-runtime "$w/metadata"; done
+   ```
+4. **Control Plane 主机**：按 deployment.md 5.1–5.4 安装（发布包、配置、`init-secrets.sh`、证书），启动 PostgreSQL 与 `init-postgres.sh`，然后
+   把开发库导入平台库并迁移：
+   ```bash
+   cat agent_runtime.dump | sudo docker compose -p ar-platform -f /etc/agent-runtime/compose.yml exec -T postgres \
+     sh -c 'pg_restore -U "$POSTGRES_USER" -d agent_runtime --no-owner --role=agent_runtime --exit-on-error'
+   sudo agent-runtime-ctl db:status      # applied 9，pending 0010…0014
+   sudo agent-runtime-ctl db:migrate
+   ```
+5. **配置迁移**：开发 `.env` → `control-plane.env` / `control-plane.secrets.env`（HTTPS 的 `PORTAL_ORIGIN`、`WORKSPACE_BASE_URL`，
+   `SESSION_COOKIE_SECURE=true`，`DATABASE_MIGRATE_ON_START=false` 等，见示例）；Worker 的开发 env → `worker.env`（`wss://` 的
+   `CONTROL_PLANE_URL`、Worker Gateway TLS、`RUNTIME_IMAGES` 同时列出本机已有的 `agent-runtime:phase7-toolchain@<docker image inspect 得到的
+   ID>` 与 v1.0 镜像）。**Worker 的两个 token 与 Worker ID 原样沿用**；`WORKER_GATEWAY_TOKENS_JSON` 照抄开发 `.env` 中的值，但去掉开发
+   `.env` 为了 `set -a; . .env` 而加的单引号（systemd 与 Node 的 env 文件都按原样读取一行 JSON）。
+6. **Worker Gateway 地址**：`sudo env WORKER_ID=<id> WORKER_GATEWAY_BASE_URL=https://<地址>:3100 agent-runtime-ctl worker:configure-gateway`。
+   该命令同时打印一个新生成的 Gateway token 供轮换使用；沿用旧 token 时忽略它即可。
+7. **启动**：`agent-runtime-platform`、`agent-runtime-control-plane`、`agent-runtime-worker`（deployment.md 5.5、6.6）。Worker 以原凭据连接；
+   v0.13 创建的容器为旧格式，启动时报 `STORAGE_MIGRATION_REQUIRED`。
+8. **逐个迁移旧 Workspace**（Worker 主机，**root**）：`sudo migrate-legacy-workspace <workspace-id>`：把旧容器中的 `/home/agent` 复制到受管
+   home（属主为 Workspace UID），然后删除旧容器。之后用户在 Portal 启动即按 v1.0 配置重建容器（只读根、配额、出口规则）。
+9. **验证**：用户、角色、身份绑定、Audit 历史都在；文件与 Pi 会话可用（演练中与 v0.13 时逐字节一致，pi-web 0.9.0 中会话列表正常）；
+   home 中的个人配置在；`df -h /workspace` 显示配额；然后停止并“升级到”v1.0 Runtime（Pi 1.1.0），会话仍可打开。
+10. 所有 Workspace 都离开 `phase7-toolchain` 后，从 `RUNTIME_IMAGES` 移除它（lifecycle-runbook 1.3 第 8 步）。
+
+## 6. 失败时收集
 
 `agent-runtime-ctl version` 与 `db:status`、`release.sh list`、`journalctl -u agent-runtime-control-plane -n 200`、每台 Worker 的
 `journalctl -u agent-runtime-worker -n 200`、Portal → Worker 截图、`audit-host.sh` 输出。

@@ -103,10 +103,10 @@ Workspace 返回 `STORAGE_MIGRATION_REQUIRED`，Portal 提示需要管理员迁�
 迁移前提醒用户：旧容器 `/tmp` 与其他可写层位置（如 `/usr/local/rustup` 中自装的组件）的内容**不会保留**；
 需要的请先移到 `/workspace`。
 
-对每个旧 Workspace（必须已停止），在 Worker 宿主机上以 Worker 用户执行：
+对每个旧 Workspace（必须已停止），在 Worker 宿主机上执行（生产以 root；开发以 Worker 用户，即 Workspace UID）：
 
 ```bash
-WORKER_ID=worker-a deploy/production/bin/migrate-legacy-workspace <workspace-id>   # 生产：sudo -u agent-runtime migrate-legacy-workspace <id>
+WORKER_ID=worker-a deploy/production/bin/migrate-legacy-workspace <workspace-id>   # 生产：sudo migrate-legacy-workspace <id>
 ```
 
 脚本只处理带本 Worker managed label 的旧格式容器；把 `/home/agent` 复制到 `workspaces/<id>/home/`（目标

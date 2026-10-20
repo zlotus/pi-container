@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # One-off migration of a Workspace container created before Phase 15 (writable root,
 # home only in the container's writable layer) to the quota'd layout (specs.md Phase
-# 15.6, decision Q6 option B). Run on the Worker host as the Worker's user, with the
-# Workspace STOPPED. It copies /home/agent out of the old container into the managed
+# 15.6, decision Q6 option B). Run on the Worker host as root (production: the home
+# directory belongs to the Workspace UID, not to the Worker user), with the Workspace STOPPED. It copies /home/agent out of the old container into the managed
 # home directory and then removes the old container; the next start recreates it with
 # the current configuration. /tmp and any other writable-layer content are NOT kept.
 #
-# Usage (production; reads WORKER_ID and WORKER_MANAGED_ROOT from the Worker's env file):
-#   sudo -u agent-runtime migrate-legacy-workspace <workspace-id>
-# Development: WORKER_ID=<id> [WORKER_MANAGED_ROOT=/var/lib/agent-runtime] \
-#   deploy/production/bin/migrate-legacy-workspace <workspace-id>
+# Usage (production; reads WORKER_ID, WORKER_MANAGED_ROOT and WORKSPACE_UID/GID from the
+# Worker's env file):
+#   sudo migrate-legacy-workspace <workspace-id>
+# Development (Worker runs as the Workspace UID): WORKER_ID=<id> \
+#   [WORKER_MANAGED_ROOT=/var/lib/agent-runtime] deploy/production/bin/migrate-legacy-workspace <workspace-id>
 set -euo pipefail
 
 workspace_id="${1:?usage: migrate-legacy-workspace <workspace-id>}"
@@ -18,7 +19,12 @@ if [[ -z "${WORKER_ID:-}" && -r "$env_file" ]]; then
   # Only the two non-secret settings this script needs.
   WORKER_ID="$(sed -n 's/^WORKER_ID=//p' "$env_file" | tail -n 1)"
   WORKER_MANAGED_ROOT="${WORKER_MANAGED_ROOT:-$(sed -n 's/^WORKER_MANAGED_ROOT=//p' "$env_file" | tail -n 1)}"
+  WORKSPACE_UID="${WORKSPACE_UID:-$(sed -n 's/^WORKSPACE_UID=//p' "$env_file" | tail -n 1)}"
+  WORKSPACE_GID="${WORKSPACE_GID:-$(sed -n 's/^WORKSPACE_GID=//p' "$env_file" | tail -n 1)}"
 fi
+runtime_uid="${WORKSPACE_UID:-1000}"
+runtime_gid="${WORKSPACE_GID:-1000}"
+[[ "$runtime_uid" =~ ^[0-9]+$ && "$runtime_gid" =~ ^[0-9]+$ ]] || { echo "migrate-legacy-workspace: invalid WORKSPACE_UID/GID" >&2; exit 1; }
 worker_id="${WORKER_ID:?WORKER_ID must name this Worker}"
 managed_root="${WORKER_MANAGED_ROOT:-/var/lib/agent-runtime}"
 
@@ -58,6 +64,8 @@ if [[ -e "$home" || -L "$home" ]]; then
 else
   mkdir -m 0700 "$home"
 fi
+# The home belongs to the Workspace user, like the directories the Worker creates.
+if [[ "$(id -u)" -eq 0 ]]; then chown "${runtime_uid}:${runtime_gid}" "$home"; fi
 
 # 4. Copy, and only then remove the old container.
 docker cp "${name}:/home/agent/." "${home}/"

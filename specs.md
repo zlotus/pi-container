@@ -6873,6 +6873,23 @@ PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compo
   为 bind 挂载不受影响）。开发环境的 compose 项目（`agent-runtime-platform` 等）有同样现象，只在开发与 Worker 同机时出现，不改。
 - **文档**：`docs/upgrade-runbook.md`、`docs/backup-runbook.md`。
 
+**阶段 4：v0.13 → v1.0（2026-10-20，worker-c 单机）**
+
+- worker-c 退出阶段 2 的生产部署（`worker:disable`，按 deployment.md 第 9 节卸载，保留 dnsmasq），在其上以 `v0.13.0` 开发形态单机部署
+  （tsx、开发 PostgreSQL、本机已有的 `phase7-toolchain`），造数据：admin 与 alice；alice 两个 Workspace（一个运行、一个停止），各有项目
+  文件、`.bashrc` 改动（在旧容器可写层）、`/tmp` 文件，以及用本机 mock OpenAI 服务经真实 `pi` CLI 生成的会话；记录文件与会话的校验和。
+- 按 19.9.3 原位升级为单机生产形态（同一台主机上 Control Plane 与 Worker，名字 `portal.c.ar.internal`、`*.agent.c.ar.internal`，证书由同一
+  内部 CA 签发）：备份 → 停止 → Worker 自有路径改属主 → 发布包、出口 unit → 生产 PostgreSQL 导入开发库 → `db:migrate`（9 → 14）→
+  Worker 沿用 v0.13 的 ID 与两个 token → 启动 → 两个旧容器报 `STORAGE_MIGRATION_REQUIRED` → `migrate-legacy-workspace` → 启动。
+- **结果**：用户、角色、Worker 凭据未变；v0.13 时期的 22 条 Audit 全部保留；`/workspace` 文件与 Pi 会话 JSONL 与升级前逐字节一致；home 中
+  的 `.bashrc` 改动迁移成功；`/tmp` 按设计未保留；配额 20 GiB、出口规则生效；pi-web 0.9.0（phase7）中会话可见，经平台升级到
+  `2026.10-pi1.1`（Pi 1.1.0）后仍可见。`audit-host.sh` 0 失败。
+- **发现并修复**：`migrate-legacy-workspace` 按开发形态设计（Worker 用户 = Workspace UID）。生产 Worker 用户读不了属于 UID 1000 的 home
+  目录（已存在时检查失败），新建的 home 又属于 Worker 用户（容器内的用户无法访问）。改为由 root 执行，并把 home 交给 `WORKSPACE_UID/GID`；
+  开发形态行为不变。
+- **文档要点**：开发 `.env` 中 JSON 值（`WORKER_GATEWAY_TOKENS_JSON`）为 `set -a; . .env` 需加单引号，迁入生产 env 文件时去掉；
+  `worker:configure-gateway` 会打印一个新 Gateway token 供轮换，沿用旧 token 时忽略。写入 `docs/upgrade-runbook.md` 第 5 节。
+
 ---
 
 # 65. Phase 开发流程
