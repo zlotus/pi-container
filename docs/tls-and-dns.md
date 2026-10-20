@@ -68,8 +68,12 @@ for f in /etc/agent-runtime/tls/*.crt; do echo "$f $(openssl x509 -in "$f" -noou
 - **Ubuntu / Debian**：`sudo cp ca.crt /usr/local/share/ca-certificates/agent-runtime-ca.crt && sudo update-ca-certificates`。
   Chrome/Chromium 使用 NSS 数据库，另执行：`certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "Agent Runtime CA" -i ca.crt`
   （`libnss3-tools` 提供 `certutil`）。
-- **Firefox**（各平台）：设置 → 隐私与安全 → 证书 → 查看证书 → 证书颁发机构 → 导入，勾选“信任由此证书颁发机构来标识网站”。
-  或在 `about:config` 设 `security.enterprise_roots.enabled=true` 使用系统证书库（Windows/macOS）。
+- **Firefox**：使用自己配置目录中的证书库，**不读 Linux 系统证书库**（`security.enterprise_roots.enabled` 只在 Windows/macOS 上读取系统库）。
+  - 界面：设置 → 隐私与安全 → 证书 → 查看证书 → 证书颁发机构 → 导入 → **选择 `ca.crt` 文件后**才会弹出“信任由此证书颁发机构来标识网站”，
+    勾选后确定。文件选择框可能读不到 `/etc` 下的文件（snap 版 Firefox 尤其如此），先把证书拷到 `~/Downloads`。
+  - 命令行（Linux）：找到配置目录 `find ~ -name cert9.db -path '*firefox*'`（deb 版 ESR 为 `~/.mozilla/firefox-esr/<profile>/`，snap 版为
+    `~/snap/firefox/common/.mozilla/firefox/<profile>/`），然后
+    `certutil -d sql:<该目录> -A -t "C,," -n "Agent Runtime CA" -i ca.crt`。之后**完全退出 Firefox 再打开**（运行中的 Firefox 不会重新读取）。
 - **Windows**：双击 `ca.crt` → 安装证书 → 本地计算机 → “受信任的根证书颁发机构”；域环境用组策略分发（第 6 节）。
 - **macOS**：钥匙串访问 → 系统 → 导入 → 双击证书 → 信任 → “始终信任”。
 
