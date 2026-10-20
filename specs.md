@@ -6819,6 +6819,27 @@ PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compo
   `proxy_buffering`、8444 放开全部路径、`X-Forwarded-For` 追加、8443 去掉地址白名单；`release.sh` 不校验校验和、`agent-runtime-image`
   不校验校验和或版本标签、`build-runtime-image.sh` 覆盖已有 tag、`audit-host.sh` 不检查 Docker socket 或特权。
 
+**阶段 2：从零部署（2026-10-20，worker-a 生产 Control Plane + worker-c 生产 Worker）**
+
+- **拓扑**：worker-c 在另一个局域网（192.168.0.0/24），经 Tailscale 子网路由可达 worker-a 的 `192.168.1.124`。用户入口 nginx 绑定
+  `192.168.1.124:443`（Tailscale 地址的 443 由 `tailscale serve` 提供开发用 Keycloak，保留不动），内部入口绑定 `100.112.169.46:8443/8444`；
+  Worker 与 Control Plane 互访用 IP 证书，不依赖 DNS。生产 Control Plane 与开发环境并存：loopback 端口 3200/3201/9465、PostgreSQL 5442、
+  LiteLLM 4410，compose 项目 `agent-runtime-prod`。dnsmasq 在 worker-c，只绑定 `100.115.94.58`。
+- **密钥文件拆分**：Control Plane 的配置与密钥分为 `control-plane.env` 与 `control-plane.secrets.env`（`init-secrets.sh` 生成，unit 与
+  `agent-runtime-ctl` 都读取两者）；`worker:provision` 的输出写入 root-only 文件再分别填入两侧，token 不经终端显示。
+- **S1 结论**：以 UID 999 的 `agent-runtime` 运行 Worker，逐项去掉 capability 后跑完整生命周期：去掉 `CAP_DAC_OVERRIDE` → 配额无法应用
+  （`STORAGE_QUOTA_APPLY_FAILED`），换成 `CAP_DAC_READ_SEARCH` 可以启动但删除失败；去掉 `CAP_FOWNER` 或 `CAP_CHOWN` → “could not set managed
+  Workspace directory ownership”。最终集合即 unit 中的 `CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE`（掩码 `0x20100b`）。
+  试验留下的半初始化 Workspace（目录没有 `managed.json`）Worker 拒绝删除（`WORKSPACE_NOT_MANAGED`，符合第 6 节）；删除其目录后重启 Worker，
+  reconcile 补完成删除。
+- **S2 跨主机结论**：worker-a 构建的归档在 worker-c `agent-runtime-image load` 后镜像 ID 仍为 `sha256:3bad0e0f…`，Worker 的 pin 校验通过。
+- **实测**（经 HTTPS 入口与 API）：Worker `ONLINE`、版本与 Control Plane 一致、出口与配额生效、新镜像六项 capability 全真；Workspace
+  创建 → 运行（worker-c、2026.10-pi1.1）→ 停止 → 删除；Workspace 内经中继 → 8444 → LiteLLM 的请求被网关以虚拟 key 鉴权；Workspace 访问
+  Control Plane 主机 8443/8444/443、本机 Worker Gateway、内网网关均被拒绝，公网可达。`audit-host.sh`：Control Plane 主机 0 失败，Worker 主机
+  0 失败 1 告警（UID 1000 为 `radxa`，Q12 已知）。Control Plane unit（无 capability、`ProtectSystem=strict` 等）与 Worker unit 的加固项均正常运行。
+- **文档**：`docs/deployment.md`、`docs/tls-and-dns.md`（dnsmasq、Tailscale split DNS、Clash、Windows Server 2008 R2 AD、根证书导入）。
+  卸载步骤中删除 Workspace 网络改为按标签（网络名是 `agent-runtime-<id>`，`arw-` 只是网桥名）。
+
 ---
 
 # 65. Phase 开发流程

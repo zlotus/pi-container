@@ -31,7 +31,7 @@ LimitNOFILE=65536
 
 # NET_ADMIN: the platform's nftables table (Phase 14). SYS_ADMIN: XFS project quota limits
 # (Phase 15). CHOWN/FOWNER/DAC_OVERRIDE: Workspace directories belong to the Runtime UID,
-# not to this user (to be minimised by spike S1, specs.md Phase 19.13).
+# not to this user; each one was required in spike S1 (specs.md Phase 19.19).
 AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
 NoNewPrivileges=yes

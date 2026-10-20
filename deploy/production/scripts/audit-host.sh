@@ -25,7 +25,9 @@ env_value() { # env_value <file> <name>: the last plain KEY=value line, without 
 }
 
 caps_of() { # caps_of <mask hex>: capability names (capsh when present, else the mask)
-  if command -v capsh >/dev/null; then capsh --decode="$1" | sed 's/.*=//'; else echo "0x$1"; fi
+  local names
+  if command -v capsh >/dev/null; then names="$(capsh --decode="$1" | sed 's/.*=//')"; else names="0x$1"; fi
+  echo "${names:-none}"
 }
 
 check_containers() {
