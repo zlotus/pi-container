@@ -6890,6 +6890,13 @@ PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compo
 - **文档要点**：开发 `.env` 中 JSON 值（`WORKER_GATEWAY_TOKENS_JSON`）为 `set -a; . .env` 需加单引号，迁入生产 env 文件时去掉；
   `worker:configure-gateway` 会打印一个新 Gateway token 供轮换，沿用旧 token 时忽略。写入 `docs/upgrade-runbook.md` 第 5 节。
 
+**阶段 4 验收与空闲回收默认值（2026-10-21）**
+
+- 负责人完成阶段 4 人工验收。
+- **决策变更（D6 补充）**：负责人要求生产部署默认开启空闲回收，避免遗忘。生产模板 `control-plane.env.example` 的
+  `IDLE_STOP_AFTER_HOURS` 默认 8 小时（留空即关闭）；代码默认仍为关闭（开发与测试不受影响），判定规则（无连接、无访问、CPU 低于阈值，
+  只停不删）不变。两套演练部署已设为 8 小时。
+
 ---
 
 # 65. Phase 开发流程
