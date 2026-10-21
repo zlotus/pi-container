@@ -6707,7 +6707,7 @@ Cookie 值）、Admin 页面截图。
   （多架构 index，2026-10-19 查询）。
 - **Q3 仓库**：**修订（2026-10-19）**——GitHub 为普通账户，Runtime 镜像不放镜像仓库：worker-a 构建一次，归档分发到各 Worker，按 digest pin
   （19.4.2）；发布包仍为 GitHub Release 附件。**追加**：`docs/ops/22-offline-deployment.md`——纯内网企业的离线部署（AMD64）：在联网机器上下载发布包、
-  `docker save` Runtime 镜像与第三方镜像、准备同版本 OS 的离线 apt 包（Docker、nftables、xfsprogs），介质导入后按 deployment.md 部署；可选内网
+  `docker save` Runtime 镜像与第三方镜像、准备同版本 OS 的离线 apt 包（Docker、nftables、xfsprogs），介质导入后按 `docs/ops/` 01～05 部署；可选内网
   registry（`registry:2`）导入后按 digest 分发。
 - **Q4 默认 Runtime 镜像**：CI 构建 `agent-runtime:2026.10-pi1.1`——**确认**。**追加**：`docs/ops/23-build-from-source.md`——在 AMD64 主机上手动构建
   发布包与 Runtime 镜像（不依赖 CI），含校验步骤。两份 AMD64 文档在负责人取得 AMD64 主机实测前标注“未经真实 AMD64 设备验证”（D2）。
@@ -6767,7 +6767,7 @@ Cookie 值）、Admin 页面截图。
 **设备约束（2026-10-19 修订，只用 worker-a 与 worker-c）**：
 
 - AGX Orin（agx1/agx2）内核缺少 XFS 与 nft fib（19.16），不参与验收。负责人的 PVE 工作站（2×EPYC 7B13）耗电高、平时不开；需要时可虚拟出
-  AMD64 主机，用于**可选的** AMD64 补充验收（全新 AMD64 单机部署、`offline-deployment.md`、`build-from-source.md`），不阻塞 v1.0（D2）。
+  AMD64 主机，用于**可选的** AMD64 补充验收（全新 AMD64 单机部署、`docs/ops/22-offline-deployment.md`、`docs/ops/23-build-from-source.md`），不阻塞 v1.0（D2）。
 - worker-a 始终运行开发环境（开发 Control Plane 3000/3001/9464、开发 PostgreSQL 5432、开发 LiteLLM 4400、开发 Worker 与其 nft 表、受管根）。
   阶段 2、3 的生产 Control Plane 与之并存：只增加 Control Plane 角色（**不在 worker-a 运行生产 Worker**——同一主机两个 Worker 会争用 nft 表、
   受管根与 Docker）；生产 loopback 端口改用 3200/3201/9465（Control Plane）、5442（PostgreSQL）、4410（LiteLLM），compose 项目名与数据目录独立；
@@ -6875,7 +6875,7 @@ PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compo
 
 **阶段 4：v0.13 → v1.0（2026-10-20，worker-c 单机）**
 
-- worker-c 退出阶段 2 的生产部署（`worker:disable`，按 deployment.md 第 9 节卸载，保留 dnsmasq），在其上以 `v0.13.0` 开发形态单机部署
+- worker-c 退出阶段 2 的生产部署（`worker:disable`，按卸载步骤（现 `docs/ops/24-uninstall.md`）卸载，保留 dnsmasq），在其上以 `v0.13.0` 开发形态单机部署
   （tsx、开发 PostgreSQL、本机已有的 `phase7-toolchain`），造数据：admin 与 alice；alice 两个 Workspace（一个运行、一个停止），各有项目
   文件、`.bashrc` 改动（在旧容器可写层）、`/tmp` 文件，以及用本机 mock OpenAI 服务经真实 `pi` CLI 生成的会话；记录文件与会话的校验和。
 - 按 19.9.3 原位升级为单机生产形态（同一台主机上 Control Plane 与 Worker，名字 `portal.c.ar.internal`、`*.agent.c.ar.internal`，证书由同一
@@ -6896,6 +6896,20 @@ PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compo
 - **决策变更（D6 补充）**：负责人要求生产部署默认开启空闲回收，避免遗忘。生产模板 `control-plane.env.example` 的
   `IDLE_STOP_AFTER_HOURS` 默认 8 小时（留空即关闭）；代码默认仍为关闭（开发与测试不受影响），判定规则（无连接、无访问、CPU 低于阈值，
   只停不删）不变。两套演练部署已设为 8 小时。
+
+**阶段 5：回归、安全复查、运维手册（2026-10-21）**
+
+- **运维手册**：负责人要求部署文档与开发文档分开、按序号查阅。新增 `docs/ops/`（README 索引 + 00 功能总览、01～05 首次部署、10 日常运维、
+  20～24 升级/备份/离线/源码构建/卸载、30 排障、31 安全、90 参考）；原 `docs/deployment.md` 拆入各章，`tls-and-dns`、`upgrade-runbook`、
+  `backup-runbook` 移入；开发 runbook 保留原位，由运维章节链接。`docs/README.md` 与根 README 指明两套文档的读者。
+- **安全复查（19.11）**：在 worker-a、worker-c 两套部署上执行，清单与结果写入 `docs/ops/31-security.md` 第 3、4 节：端口、TLS、Cookie 与
+  响应头、入口路径、日志与命令行中的密钥、文件权限、进程 capability、`audit-host.sh`、出口抽查均符合设计；`systemd-analyze security`
+  Control Plane 1.7、Worker 5.3（来自必要的五项 capability 与 docker 组）。
+- **漏洞扫描（Q14，非门槛）**：Trivy 0.76.0。平台发布包 0 HIGH/CRITICAL；第三方镜像与 Runtime 镜像的结论与建议（PostgreSQL 17.x 补丁
+  升级、Runtime 基础层刷新为新 tag）见 `docs/ops/31-security.md` 第 5 节，由负责人决定是否在 v1.0 前处理。
+- **全量回归（worker-a，ARM64）**：`lint`、`typecheck`、`test`（单元 + 独立测试库上的 PostgreSQL 集成，535 项通过）、`test:e2e`（100）、
+  `build:web`、`test:deploy`（10）、`test:egress`（真实内核 nftables，21）、promtool 规则检查与测试、shellcheck、`test:e2e:runtime`
+  （`2026.10-pi1.1`，11）、`test:model-gateway`（固定版本 LiteLLM + mock 上游，5）、`test:quota`（XFS loop 设备，3）全部通过。
 
 ---
 
