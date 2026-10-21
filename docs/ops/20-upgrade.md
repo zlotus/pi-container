@@ -1,7 +1,7 @@
 # 升级与回滚
 
-`specs.md` 19.9。适用于按 [deployment.md](deployment.md) 部署的生产形态。Runtime 镜像的升级与回滚是另一套流程，见
-[lifecycle-runbook.md](lifecycle-runbook.md)；两者互不依赖。
+`specs.md` 19.9。适用于按 [运维手册](README.md) 部署的生产形态。Runtime 镜像的升级与回滚是另一套流程，见
+[lifecycle-runbook.md](../lifecycle-runbook.md)；两者互不依赖。
 
 ## 1. 先看发布说明
 
@@ -24,7 +24,7 @@ sudo agent-runtime-ctl version | jq '{version, protocolVersion, migrations}'    
    ```bash
    sudo /opt/agent-runtime/current/deploy/scripts/release.sh install ~/release/agent-runtime-Y-linux-arm64.tar.gz
    ```
-2. **备份**（Y 带新 migration 时必须）：按 [backup-runbook.md](backup-runbook.md) 第 2.1 节导出 `agent_runtime` 与 `litellm`。
+2. **备份**（Y 带新 migration 时必须）：按 [21 备份与恢复](21-backup-restore.md) 第 2.1 节导出 `agent_runtime` 与 `litellm`。
 3. **Control Plane 主机**：
    ```bash
    sudo agent-runtime-ctl --release Y db:status            # pending 列出 Y 要执行的 migration
@@ -75,13 +75,13 @@ sudo systemctl restart agent-runtime-worker             # 每台 Worker
 
 ```bash
 sudo systemctl stop agent-runtime-control-plane
-# 恢复 agent_runtime 与 litellm：backup-runbook.md 第 3.2 节
+# 恢复 agent_runtime 与 litellm：21-backup-restore.md 第 3.2 节
 sudo /opt/agent-runtime/current/deploy/scripts/release.sh activate X
 sudo systemctl start agent-runtime-control-plane       # 然后 nginx 与各 Worker 同 4.1
 ```
 
 **代价**：升级之后在平台里产生的变化随数据库一起回到备份时刻——新用户、新 Workspace、Audit、配置变化都会丢失。Worker 上的数据
-不回退，因此会出现 [backup-runbook.md](backup-runbook.md) 第 4 节描述的不一致（升级后新建的 Workspace 成为孤儿、升级后删除的
+不回退，因此会出现 [21 备份与恢复](21-backup-restore.md) 第 4 节描述的不一致（升级后新建的 Workspace 成为孤儿、升级后删除的
 重新出现）。回滚应在升级后的验证阶段尽快决定。
 
 ### 4.3 拒绝启动时 systemd 的表现
@@ -98,16 +98,16 @@ v0.13 只有开发形态（`tsx`、开发 compose 的 PostgreSQL、本地构建�
 1. **通知用户**：旧容器的 `/tmp` 与容器可写层（例如自装的 rustup 组件）不会保留，需要的先移到 `/workspace`；home 会迁移。
 2. **停止并备份**：Portal 中停止全部 Workspace；
    `docker exec agent-runtime-platform-postgres-1 pg_dump -U agent_runtime -Fc agent_runtime > agent_runtime.dump`；
-   按 [backup-runbook.md](backup-runbook.md) 2.2 备份受管根；然后停止 Worker、Control Plane、Vite 与开发 PostgreSQL。
-3. **Worker 主机**：受管根若还不是独立 XFS（`prjquota`），按 [storage-runbook.md](storage-runbook.md) 第 3/4 节建好并原样拷入数据；
-   按 [deployment.md](deployment.md) 6.1、6.2 安装软件包、`agent-runtime` 用户、发布包与出口规则 unit。然后把 **Worker 自己的路径**交给
+   按 [21 备份与恢复](21-backup-restore.md) 2.2 备份受管根；然后停止 Worker、Control Plane、Vite 与开发 PostgreSQL。
+3. **Worker 主机**：受管根若还不是独立 XFS（`prjquota`），按 [storage-runbook.md](../storage-runbook.md) 第 3/4 节建好并原样拷入数据；
+   按 [04](04-worker-host.md) 1.1、1.2 安装软件包、`agent-runtime` 用户、发布包与出口规则 unit。然后把 **Worker 自己的路径**交给
    Worker 用户（Workspace 数据目录保持属于 UID 1000）：
    ```bash
    R=/var/lib/agent-runtime
    sudo chown agent-runtime:agent-runtime $R $R/workspaces
    for w in $R/workspaces/*/; do sudo chown agent-runtime:agent-runtime "$w"; sudo chown -R agent-runtime:agent-runtime "$w/metadata"; done
    ```
-4. **Control Plane 主机**：按 deployment.md 5.1–5.4 安装（发布包、配置、`init-secrets.sh`、证书），启动 PostgreSQL 与 `init-postgres.sh`，然后
+4. **Control Plane 主机**：按 [03](03-control-plane-host.md) 1.1–1.4 安装（发布包、配置、`init-secrets.sh`、证书），启动 PostgreSQL 与 `init-postgres.sh`，然后
    把开发库导入平台库并迁移：
    ```bash
    cat agent_runtime.dump | sudo docker compose -p ar-platform -f /etc/agent-runtime/compose.yml exec -T postgres \
@@ -122,7 +122,7 @@ v0.13 只有开发形态（`tsx`、开发 compose 的 PostgreSQL、本地构建�
    `.env` 为了 `set -a; . .env` 而加的单引号（systemd 与 Node 的 env 文件都按原样读取一行 JSON）。
 6. **Worker Gateway 地址**：`sudo env WORKER_ID=<id> WORKER_GATEWAY_BASE_URL=https://<地址>:3100 agent-runtime-ctl worker:configure-gateway`。
    该命令同时打印一个新生成的 Gateway token 供轮换使用；沿用旧 token 时忽略它即可。
-7. **启动**：`agent-runtime-platform`、`agent-runtime-control-plane`、`agent-runtime-worker`（deployment.md 5.5、6.6）。Worker 以原凭据连接；
+7. **启动**：`agent-runtime-platform`、`agent-runtime-control-plane`、`agent-runtime-worker`（03 1.5、04 1.6）。Worker 以原凭据连接；
    v0.13 创建的容器为旧格式，启动时报 `STORAGE_MIGRATION_REQUIRED`。
 8. **逐个迁移旧 Workspace**（Worker 主机，**root**）：`sudo migrate-legacy-workspace <workspace-id>`：把旧容器中的 `/home/agent` 复制到受管
    home（属主为 Workspace UID），然后删除旧容器。之后用户在 Portal 启动即按 v1.0 配置重建容器（只读根、配额、出口规则）。

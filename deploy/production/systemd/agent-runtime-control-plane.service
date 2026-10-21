@@ -1,6 +1,6 @@
 # Control Plane (Portal API, Worker control channel, Workspace Gateway, metrics), run from
 # the active release /opt/agent-runtime/current (specs.md Phase 19.5). Every listener
-# binds loopback; nginx is the only entry point. See docs/deployment.md.
+# binds loopback; nginx is the only entry point. See docs/ops/03-control-plane-host.md.
 #
 # Install (root): install -m 0644 <release>/deploy/systemd/agent-runtime-*.service /etc/systemd/system/
 #                 systemctl daemon-reload && systemctl enable --now agent-runtime-control-plane

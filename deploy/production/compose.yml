@@ -1,7 +1,7 @@
 # Control Plane host services: PostgreSQL, the model gateway (LiteLLM) and nginx
 # (specs.md Phase 19.3, 19.5, 19.7). The Control Plane itself runs from the release under
 # systemd (agent-runtime-control-plane.service); agent-runtime-platform.service starts this
-# file at boot. Installed as /etc/agent-runtime/compose.yml; see docs/deployment.md.
+# file at boot. Installed as /etc/agent-runtime/compose.yml; see docs/ops/README.md.
 #
 # Every port is published on loopback only, except nginx (host network), which listens on
 # AR_PUBLIC_LISTEN (users: 80, 443) and AR_INTERNAL_LISTEN (Workers: 8443, 8444).
@@ -24,7 +24,7 @@ services:
       retries: 20
     ports:
       - "127.0.0.1:${AR_POSTGRES_PORT:-5432}:5432"
-    # The platform database: back up this directory or pg_dump (docs/backup-runbook.md).
+    # The platform database: back up this directory or pg_dump (docs/ops/21-backup-restore.md).
     volumes:
       - /var/lib/agent-runtime-postgres:/var/lib/postgresql/data
     shm_size: 256m

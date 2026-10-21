@@ -29,7 +29,7 @@ tools/dev/init-litellm-db.sh ~/.config/agent-runtime/litellm.env   # 建 litellm
 LITELLM_ENV_FILE=~/.config/agent-runtime/litellm.env docker compose -f deploy/model-gateway/compose.yml up -d
 ```
 
-开发网关监听 `127.0.0.1:4400`（Q8B 的 4000 已被占用）。生产部署模板见 Phase 19。
+开发网关监听 `127.0.0.1:4400`（Q8B 的 4000 已被占用）。生产部署（loopback 4410 + nginx 8444）见 [ops/03](ops/03-control-plane-host.md)。
 
 `config.yaml` 以相对路径挂载，Docker 在**创建**容器时把它解析为绝对路径并记录在容器上。若仓库目录移动或删除
 （例如换用另一个 worktree），`docker start` 会因源文件不存在而失败；在新的仓库目录下执行
@@ -70,7 +70,7 @@ WORKER_MODEL_RELAY_PORT=3101                         # 不能与 WORKER_GATEWAY_
    `WORKER_MODEL_GATEWAY_URL=http://<该地址>:4401` 与 `WORKER_MODEL_RELAY_PORT=3101`，以 `CAP_NET_ADMIN` 重启 Worker。
 3. 隔离不变：Worker 把 `WORKER_MODEL_GATEWAY_URL` 的地址加入本机出口保护集合，它的 Workspace 连不到网关；网关主机上的
    Workspace 本来就连不到本机任何地址。代价是网关的推理与管理接口对该网络上的其他设备可达（仍需 master key 或虚拟 key），
-   只在受保护网络上这样做；生产部署见 Phase 19。
+   只在受保护网络上这样做；生产部署改由 nginx 8444 以 TLS 与地址白名单只开放推理路径，见 [ops/03](ops/03-control-plane-host.md)。
 
 **修改配置或切换分支后必须 force-recreate**：`config.yaml` 是单文件 bind mount，运行中的容器看到的是挂载时的那个文件，
 `git switch` 或编辑器“另存为”换掉文件后，不重建容器就仍是旧配置（Admin 面板会显示“网关中缺少”）。

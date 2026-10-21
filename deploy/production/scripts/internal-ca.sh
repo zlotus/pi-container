@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A minimal internal certificate authority for deployments without an enterprise PKI
-# (specs.md Phase 19.6.1, docs/tls-and-dns.md). With a PKI, use its certificates instead;
+# (specs.md Phase 19.6.1, docs/ops/02-tls-and-dns.md). With a PKI, use its certificates instead;
 # the platform only needs PEM files at the paths below.
 #
 #   internal-ca.sh init

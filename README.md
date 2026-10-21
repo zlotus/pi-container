@@ -21,6 +21,9 @@ message/tool stream。ARM64 与 AMD64 均有原生验证记录（ARM64 为主开
 HTTP、SSE 与 WebSocket 仍由两级 Gateway 透明代理到原始 pi-web，不复制其
 Chat、Terminal 或 streaming 实现。
 
+> **部署与运维请读 [运维手册](docs/ops/README.md)**（编号章节，第一次部署按 00→05 顺序）。本 README 及以下内容面向平台
+> 开发者，描述开发环境；全部文档的分工见 [docs/README.md](docs/README.md)。
+
 ## Prerequisites
 
 - Node.js 22.20.0 或更高版本
@@ -565,7 +568,7 @@ CSP 的最小 Workspace-origin bootstrap 页面；它使用 `location.replace("/
 而不是用 HTTP redirect 延续 Portal 发起的跨站导航链。Gateway 因此仍可拒绝所有进入 pi-web
 的 cross-site fetch、XHR、subresource 与 iframe 请求。
 
-生产部署需为 `WORKSPACE_BASE_URL` 配置内部 wildcard DNS 和 wildcard certificate，并把
+生产部署的完整步骤见 [运维手册](docs/ops/README.md)。要点：为 `WORKSPACE_BASE_URL` 配置内部 wildcard DNS 和 wildcard certificate，并把
 Workspace Host 原样保留 `Host` 转发到 `GATEWAY_HOST:GATEWAY_PORT`；前置代理还必须允许
 WebSocket upgrade、关闭响应缓冲并为 SSE/长连接配置合适的 timeout。公开 Gateway 本身默认
 提供 HTTP listener，HTTPS 应由受信反向代理终止；不要把 Worker Gateway 或 pi-web loopback

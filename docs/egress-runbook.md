@@ -65,14 +65,14 @@ Docker 的规则需要重启 Docker 才会恢复。
 Worker 需要 `CAP_NET_ADMIN` 才能管理平台表；它仍以普通用户（docker 组）运行，不使用 root。docker 组
 本身已等价于 root，增加这一项 capability 不扩大 Worker 的实际权限面。
 
-生产（Phase 19 提供完整 unit）：
+生产：发布包中的 `deploy/production/systemd/agent-runtime-worker.service`（部署见 [ops/04](ops/04-worker-host.md)），要点：
 
 ```ini
 [Service]
 User=agent-runtime
 SupplementaryGroups=docker
-AmbientCapabilities=CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
 ```
 
 开发：

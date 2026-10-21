@@ -1,7 +1,7 @@
 # nginx in front of the Control Plane (specs.md Phase 19.6). Rendered by the nginx image at
 # container start: ${AR_*} come from the compose environment (NGINX_ENVSUBST_FILTER=^AR_),
 # every other $variable is nginx's own. Certificates live in /etc/agent-runtime/tls
-# (docs/tls-and-dns.md). Requirements for another proxy: docs/deployment.md.
+# (docs/ops/02-tls-and-dns.md). Requirements for another proxy: docs/ops/01-planning.md.
 #
 #   :443   ${AR_PORTAL_HOST}            Portal (static, SPA fallback) + /api, /auth -> Control Plane
 #   :443   *.${AR_WORKSPACE_DOMAIN}     Workspaces -> Workspace Gateway (Host kept, streaming)

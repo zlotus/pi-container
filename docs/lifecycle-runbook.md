@@ -55,7 +55,7 @@ agent-runtime-image load /tmp/agent-runtime_<tag>_linux-<arch>.tar.zst   # 发�
 # 也可：docker save agent-runtime:<tag> | ssh <Worker> docker load，再 agent-runtime-image verify agent-runtime:<tag>
 ```
 
-v1.0 不使用镜像仓库（`specs.md` 19.15 Q3）；企业已有内部仓库时的做法见 `docs/offline-deployment.md`。
+v1.0 不使用镜像仓库（`specs.md` 19.15 Q3）；企业已有内部仓库时的做法见 `docs/ops/22-offline-deployment.md`。
 
 最后一条在本机的每个 Runtime 镜像中加载平台模型目录：新旧镜像共用一个目录，任一 Pi 版本拒绝都不能上线。pi-web 版本变化时
 必须重写 `runtime/patches/pi-web-<版本>.mjs`（只接受 pin 的版本，片段对不上即构建失败），并按 `specs.md` 18.1 的检查表核对

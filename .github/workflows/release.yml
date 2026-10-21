@@ -121,6 +121,6 @@ jobs:
           prerelease=""
           [[ "$tag" == *-* ]] && prerelease="--prerelease"
           gh release view "$tag" >/dev/null 2>&1 ||
-            gh release create "$tag" --draft $prerelease --title "$tag" --notes "See docs/upgrade-runbook.md." ||
+            gh release create "$tag" --draft $prerelease --title "$tag" --notes "See docs/ops/20-upgrade.md." ||
             gh release view "$tag" >/dev/null
           gh release upload "$tag" dist/release/agent-runtime-*.tar.gz dist/release/SHA256SUMS-* --clobber

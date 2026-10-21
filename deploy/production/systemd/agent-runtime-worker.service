@@ -3,7 +3,7 @@
 # (specs.md Phase 19.5). Runs as the unprivileged agent-runtime user (docker group) with
 # only the capabilities below; never as root. Stopping it leaves Workspaces running.
 #
-# Install (root): see docs/deployment.md (Worker host). Requires agent-runtime-egress.service
+# Install (root): see docs/ops/04-worker-host.md. Requires agent-runtime-egress.service
 # and the WORKER_MANAGED_ROOT mount; adjust RequiresMountsFor/ReadWritePaths if the managed
 # root is not /var/lib/agent-runtime.
 [Unit]

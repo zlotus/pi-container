@@ -6227,8 +6227,8 @@ Worker Gateway 全部明文，Worker 控制通道与 Portal API 共用对外 lis
   生产形态（19.9）。
 - **外部备份说明**与恢复语义（19.10）。
 - **发布前完整回归与安全复查**（19.11、19.14），发布 `v1.0.0-rc.1` 与 `v1.0.0`。
-- 文档：新增 `docs/deployment.md`、`docs/tls-and-dns.md`、`docs/upgrade-runbook.md`、`docs/backup-runbook.md`、
-  `docs/offline-deployment.md`（AMD64）、`docs/build-from-source.md`（AMD64）；README、各 runbook 中“Phase 19 提供”的
+- 文档：新增 `docs/ops/README.md`、`docs/ops/02-tls-and-dns.md`、`docs/ops/20-upgrade.md`、`docs/ops/21-backup-restore.md`、
+  `docs/ops/22-offline-deployment.md`（AMD64）、`docs/ops/23-build-from-source.md`（AMD64）；README、各 runbook 中“Phase 19 提供”的
   占位改为实际内容；`AGENTS.md`、`docs/progress.md`、路线图更新为 v1.0 状态。
 
 非目标（v1.0 不做）：
@@ -6336,7 +6336,7 @@ Worker 网络 ◀───────────┘
   `docker save <tag> | ssh <worker> docker load`（开发环境现有做法），再用 `agent-runtime-image verify <本地名>` 取 digest。`docker save/load`
   保持镜像 digest 不变（Phase 18 验收已在 worker-a → worker-c 上确认）。
 - **镜像引用与仓库解耦**：`RUNTIME_IMAGES` 与 `workspaces.runtime_image` 使用本地逻辑名（如 `agent-runtime:2026.10-pi1.1`），不含仓库主机。
-  企业已有内部仓库（Harbor 等）时，`docs/offline-deployment.md` 说明推送与按 digest 拉取后 `docker tag` 为同一本地名的做法（可选，平台不依赖）。
+  企业已有内部仓库（Harbor 等）时，`docs/ops/22-offline-deployment.md` 说明推送与按 digest 拉取后 `docker tag` 为同一本地名的做法（可选，平台不依赖）。
 - **v1.0 默认 Runtime 镜像**（Q4）：在 worker-a 上以上述脚本构建新 tag `agent-runtime:2026.10-pi1.1`（`runtime_version` 同名），Dockerfile 与
   `phase18-pi1.1-r2` 相同（pi-web 0.12.0 + Pi 1.1.0，lockfile 固定），系统包按构建当天解析（差异见构建清单）。Control Plane
   `DEFAULT_RUNTIME_IMAGE` 默认值、`worker.env.example`、`test:e2e:runtime`、`runtime-toolchain.yml` 同步改为该名。开发环境的 Workspace 经
@@ -6408,7 +6408,7 @@ Gateway 的服务器证书，SAN 由参数给出；企业有 PKI 时不用）。
 ### 19.6 反向代理与 TLS
 
 模板：`deploy/production/nginx/`（nginx 官方镜像，pin digest，host 网络，只读挂载 `/opt/agent-runtime` 与 `/etc/agent-runtime/{nginx,tls}`）。
-另在 `docs/deployment.md` 列出与实现无关的**通用要求**，供换用企业已有的 nginx / HAProxy / F5 等：
+另在 `docs/ops/01-planning.md` 列出与实现无关的**通用要求**，供换用企业已有的 nginx / HAProxy / F5 等：
 
 **Portal（`portal.<域>`）**：
 
@@ -6497,7 +6497,7 @@ Cookie、`Authorization`、Referer。与平台日志规则一致（第 10 节）
 
 ### 19.9 升级与回滚流程
 
-写入 `docs/upgrade-runbook.md`。每个发布在 `release.json` 与发布说明中声明：协议版本是否变化、包含哪些 migration、最低可升级来源版本、
+写入 `docs/ops/20-upgrade.md`。每个发布在 `release.json` 与发布说明中声明：协议版本是否变化、包含哪些 migration、最低可升级来源版本、
 默认 Runtime 镜像是否变化。
 
 #### 19.9.1 常规版本升级（生产形态 X → Y）
@@ -6554,7 +6554,7 @@ TLS 入口与内部入口、`RUNTIME_IMAGES` 切到仓库分发的镜像。是�
 
 ### 19.10 外部备份与恢复语义
 
-写入 `docs/backup-runbook.md`（落实 D5 与第 28 节；平台不执行、不调度任何备份）。
+写入 `docs/ops/21-backup-restore.md`（落实 D5 与第 28 节；平台不执行、不调度任何备份）。
 
 | 对象 | 位置 | 方法与一致性 |
 |---|---|---|
@@ -6671,7 +6671,7 @@ v6 hello 被接受；nginx 公开入口代理 `/api/workers/`；日志格式包�
 人工验收要点（详细步骤随各阶段交付说明给出，阶段划分见 19.17；设备分工见 19.17）：
 
 - **A. 从零部署**（生产 Control Plane = worker-a，与开发环境并存；生产 Worker = worker-c，先删除开发 Runtime、受管根数据并退出开发环境；
-  19.17），只按 `docs/deployment.md` 操作，偏离文档之处即缺陷。OS 准备、Docker、独立
+  19.17），只按 `docs/ops/README.md` 操作，偏离文档之处即缺陷。OS 准备、Docker、独立
   XFS、用户、出口 unit、发布包、`internal-ca.sh` 签发证书、dnsmasq、compose（PostgreSQL、LiteLLM、nginx）、`control-plane.env`、
   `db:migrate`、创建管理员、provision Worker、`agent-runtime-image load`（镜像归档由 worker-a 拷贝）、`worker.env`、启动。预期：Admin Workers 显示 Worker `ONLINE`、版本、
   镜像、capability 全真、配额与出口生效；浏览器（导入内部 CA、使用 dnsmasq）经 HTTPS 新建 Workspace、打开（证书无警告）、平台模型带工具
@@ -6684,7 +6684,7 @@ v6 hello 被接受；nginx 公开入口代理 `/api/workers/`；日志格式包�
 - **D. 升级与回滚演练**：在 A 的部署上从验收构建 R1 升级到 R2（第二次手动构建，版本不同），按 19.9.1；再回滚到 R1（19.9.2 无 migration
   分支）；在 R1 的数据库中插入一条虚构的更新 migration 记录，确认 R1 拒绝启动、删除后恢复（含 migration 回滚分支的演示：备份 → R2 迁移 →
   恢复备份 → R1）。期间运行中的 Workspace 不被停止，浏览器重连后可继续。
-- **E. 备份与恢复演练**：按 `docs/backup-runbook.md` 备份；之后新建/修改/删除若干 Workspace；停止并删除全部 Workspace 容器（模拟 Docker 数据
+- **E. 备份与恢复演练**：按 `docs/ops/21-backup-restore.md` 备份；之后新建/修改/删除若干 Workspace；停止并删除全部 Workspace 容器（模拟 Docker 数据
   丢失），恢复数据库与受管根；预期与 19.10 的语义表一致，恢复点之前的文件与 Session 完整。
 - **F. 完整回归**：`docs/demo-runbook.md` 主链在生产部署上完整走一遍；Phase 14–18 关键检查的精简清单（出口探测、配额写满、登录锁定与
   解锁、禁用用户的连接断开、模型 key 吊销、指标抓取与一条告警、空闲回收（1 小时）、Runtime 升级/回滚、Worker 吊销与重新启用）。
@@ -6706,20 +6706,20 @@ Cookie 值）、Admin 页面截图。
 - **Q2 反向代理**：nginx——**确认**。pin `nginx:1.30.6-alpine@sha256:970364228b1e4f932abc22d321932816782cca8a20b85a77552a7cfe9acfb3b5`
   （多架构 index，2026-10-19 查询）。
 - **Q3 仓库**：**修订（2026-10-19）**——GitHub 为普通账户，Runtime 镜像不放镜像仓库：worker-a 构建一次，归档分发到各 Worker，按 digest pin
-  （19.4.2）；发布包仍为 GitHub Release 附件。**追加**：`docs/offline-deployment.md`——纯内网企业的离线部署（AMD64）：在联网机器上下载发布包、
+  （19.4.2）；发布包仍为 GitHub Release 附件。**追加**：`docs/ops/22-offline-deployment.md`——纯内网企业的离线部署（AMD64）：在联网机器上下载发布包、
   `docker save` Runtime 镜像与第三方镜像、准备同版本 OS 的离线 apt 包（Docker、nftables、xfsprogs），介质导入后按 deployment.md 部署；可选内网
   registry（`registry:2`）导入后按 digest 分发。
-- **Q4 默认 Runtime 镜像**：CI 构建 `agent-runtime:2026.10-pi1.1`——**确认**。**追加**：`docs/build-from-source.md`——在 AMD64 主机上手动构建
+- **Q4 默认 Runtime 镜像**：CI 构建 `agent-runtime:2026.10-pi1.1`——**确认**。**追加**：`docs/ops/23-build-from-source.md`——在 AMD64 主机上手动构建
   发布包与 Runtime 镜像（不依赖 CI），含校验步骤。两份 AMD64 文档在负责人取得 AMD64 主机实测前标注“未经真实 AMD64 设备验证”（D2）。
 - **Q5**：不采用 snapshot / 可复现构建，保持简洁——**确认**。
 - **Q6**：Worker 上报软件版本（协议 v7、`0014_release`）——**确认**。
-- **Q7**：生产显式 `db:migrate`、开发自动迁移——**确认**；开发与生产的差异在 `docs/deployment.md` 中列表说明（迁移、日志格式、Cookie、TLS、
+- **Q7**：生产显式 `db:migrate`、开发自动迁移——**确认**；开发与生产的差异在 `docs/ops/01-planning.md` 中列表说明（迁移、日志格式、Cookie、TLS、
   进程托管、镜像来源、密钥位置）。
-- **Q8 TLS**：按建议——**确认**；负责人要求说明“哪些链路加密、自签证书怎么做、签哪些证书”，见 19.6.1，并写入 `docs/tls-and-dns.md`。
+- **Q8 TLS**：按建议——**确认**；负责人要求说明“哪些链路加密、自签证书怎么做、签哪些证书”，见 19.6.1，并写入 `docs/ops/02-tls-and-dns.md`。
 - **Q9 Node**：24 LTS，pin `v24.22.0`（2026-10-14 发布，LTS Krypton）——**确认**；CI 同步改为该版本。
 - **Q10 设备与 DNS**：**修订（2026-10-19）**：只用 worker-a 与 worker-c（AGX 不适用，PVE AMD64 虚拟机为可选补充），分工见 19.17。
   原定 worker-c（Ubuntu 26.04.1、8 核、30 GiB、Docker 29.9.1、已有 loop XFS 受管根；它目前是开发环境的
-  worker-c，阶段 2 前从开发环境退出并清理，见 19.17）；证书用 `internal-ca.sh` 签发 wildcard；DNS 用 dnsmasq，`docs/tls-and-dns.md` 详细写
+  worker-c，阶段 2 前从开发环境退出并清理，见 19.17）；证书用 `internal-ca.sh` 签发 wildcard；DNS 用 dnsmasq，`docs/ops/02-tls-and-dns.md` 详细写
   dnsmasq 安装配置与客户端设置，另附 Windows Server 2008 R2 AD 集成 DNS 的配置说明（通配记录、条件转发、组策略分发根证书；注明 2008 R2 已
   停止支持）。建议验收域名 `ar.internal`（`.internal` 为 ICANN 保留的私有用途顶级域）：`portal.ar.internal`、`*.agent.ar.internal`、内部入口
   `cp.ar.internal`。开发设备上的 Clash（fake-ip）与 Tailscale DNS 可能接管 `.internal` 解析，文档写明需要的 Clash `fake-ip-filter` / 直连规则。
@@ -6750,7 +6750,7 @@ Cookie 值）、Admin 页面截图。
   生效，平台会 fail-closed（Worker 不启动任何 Workspace）。因此 **AGX 不能作为 v1.0 Worker**（为 tegra 内核自行编译模块属于环境改造，不在本
   Phase 范围），**可以作为 Control Plane 主机**（nginx、PostgreSQL、LiteLLM、Control Plane 不依赖这些内核功能）。v0.13 的 Worker 不需要
   XFS 与 nft，但 v0.13 → v1.0 要求原位升级（数据留在原 Worker 原路径），所以 v0.13 演练的 Worker 也必须放在 worker-c。
-  `docs/deployment.md` 的主机要求中写明这两项内核配置，`audit-host.sh` 与 Worker 启动日志已能指出缺失项。
+  `docs/ops/01-planning.md` 的主机要求中写明这两项内核配置，`audit-host.sh` 与 Worker 启动日志已能指出缺失项。
 
 ### 19.17 分阶段实施与验收
 
@@ -6759,10 +6759,10 @@ Cookie 值）、Admin 页面截图。
 | 阶段 | 内容 | 设备 | 阶段验收 |
 |---|---|---|---|
 | 1 构建与代码 | 19.8 全部代码变更（含协议 v7、`0014_release`、migration 检查、移除 `RUNTIME_IMAGE`）；esbuild 发布包、`pnpm release:build` 与 `release.yml`；`build-runtime-image.sh` 在 worker-a 构建 `agent-runtime:2026.10-pi1.1`；systemd unit、`agent-runtime-ctl`、`release.sh`、`agent-runtime-image`、`audit-host.sh`；nginx 模板与 CI 测试；spike S4、S5 | worker-a（开发环境）+ CI | CI 绿；发布包可构建并校验；开发环境升到协议 v7 后正常，Admin 显示 Worker 版本；开发 Workspace 经 Phase 18 机制升级到新镜像 |
-| 2 从零部署（跨主机） | `docs/deployment.md`、`docs/tls-and-dns.md`（dnsmasq、Clash 与 Tailscale 客户端设置、AD 2008 R2）、`internal-ca.sh`、生产 compose、`init-*.sh`；spike S1 | **生产 Control Plane = worker-a**（与开发环境并存，见下）；**生产 Worker = worker-c**（删除开发 Runtime 与受管根数据、退出开发环境后从零部署）；dnsmasq 在 worker-c | 19.14 A + C（真实跨主机：8443/8444 TLS、Worker Gateway TLS） |
-| 3 运维演练 | `docs/upgrade-runbook.md`（19.9.1/19.9.2）、`docs/backup-runbook.md`；spike S3 | worker-a（生产 CP）+ worker-c | 19.14 D、E |
-| 4 v0.13 升级（单机形态） | 19.9.3、`docs/deployment.md` 的卸载与清理；`migrate-legacy-workspace` 归位 | worker-c：卸载阶段 2 的 Worker → 以 `v0.13.0` 开发形态单机部署（CP + Worker）→ 原位升级为 v1.0 **单机**生产形态；worker-a 上的生产 Control Plane 停用 | 19.14 B（同时验收单机形态） |
-| 5 回归与发布准备 | `docs/offline-deployment.md`、`docs/build-from-source.md`（AMD64，标注待实机验证）；README、各 runbook、AGENTS.md、progress、路线图；Trivy 报告；完整回归与安全复查 | worker-c（单机生产）+ CI | 19.14 F、G；之后 H |
+| 2 从零部署（跨主机） | `docs/ops/README.md`、`docs/ops/02-tls-and-dns.md`（dnsmasq、Clash 与 Tailscale 客户端设置、AD 2008 R2）、`internal-ca.sh`、生产 compose、`init-*.sh`；spike S1 | **生产 Control Plane = worker-a**（与开发环境并存，见下）；**生产 Worker = worker-c**（删除开发 Runtime 与受管根数据、退出开发环境后从零部署）；dnsmasq 在 worker-c | 19.14 A + C（真实跨主机：8443/8444 TLS、Worker Gateway TLS） |
+| 3 运维演练 | `docs/ops/20-upgrade.md`（19.9.1/19.9.2）、`docs/ops/21-backup-restore.md`；spike S3 | worker-a（生产 CP）+ worker-c | 19.14 D、E |
+| 4 v0.13 升级（单机形态） | 19.9.3、`docs/ops/README.md` 的卸载与清理；`migrate-legacy-workspace` 归位 | worker-c：卸载阶段 2 的 Worker → 以 `v0.13.0` 开发形态单机部署（CP + Worker）→ 原位升级为 v1.0 **单机**生产形态；worker-a 上的生产 Control Plane 停用 | 19.14 B（同时验收单机形态） |
+| 5 回归与发布准备 | `docs/ops/22-offline-deployment.md`、`docs/ops/23-build-from-source.md`（AMD64，标注待实机验证）；README、各 runbook、AGENTS.md、progress、路线图；Trivy 报告；完整回归与安全复查 | worker-c（单机生产）+ CI | 19.14 F、G；之后 H |
 
 **设备约束（2026-10-19 修订，只用 worker-a 与 worker-c）**：
 
@@ -6837,7 +6837,7 @@ PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compo
   创建 → 运行（worker-c、2026.10-pi1.1）→ 停止 → 删除；Workspace 内经中继 → 8444 → LiteLLM 的请求被网关以虚拟 key 鉴权；Workspace 访问
   Control Plane 主机 8443/8444/443、本机 Worker Gateway、内网网关均被拒绝，公网可达。`audit-host.sh`：Control Plane 主机 0 失败，Worker 主机
   0 失败 1 告警（UID 1000 为 `radxa`，Q12 已知）。Control Plane unit（无 capability、`ProtectSystem=strict` 等）与 Worker unit 的加固项均正常运行。
-- **文档**：`docs/deployment.md`、`docs/tls-and-dns.md`（dnsmasq、Tailscale split DNS、Clash、Windows Server 2008 R2 AD、根证书导入）。
+- **文档**：`docs/ops/README.md`、`docs/ops/02-tls-and-dns.md`（dnsmasq、Tailscale split DNS、Clash、Windows Server 2008 R2 AD、根证书导入）。
   卸载步骤中删除 Workspace 网络改为按标签（网络名是 `agent-runtime-<id>`，`arw-` 只是网桥名）。
 
 **阶段 2 验收后（2026-10-20）**
@@ -6867,11 +6867,11 @@ PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compo
   Workspace；删除 worker-c 全部受管容器与网络并清空受管根，从归档恢复、两库 `pg_restore`。结果：一致恢复时 Workspace 为 `ERROR`
   （容器缺失），启动后按当前配置重建，`/workspace`、`/home/agent` 为备份时内容，XFS 配额重新生效，虚拟 key 继续有效；数据库较旧时
   备份后新建的 Workspace 报告为 `MANAGED_ORPHAN`（容器、目录、网络，不删除），状态与期望相反的为 `ERROR`。均与 19.10 一致，写入
-  `docs/backup-runbook.md`。带 migration 的回滚（恢复备份）的数据库步骤与此相同，真实 migration 在阶段 4（v0.13 → v1.0）中演练。
+  `docs/ops/21-backup-restore.md`。带 migration 的回滚（恢复备份）的数据库步骤与此相同，真实 migration 在阶段 4（v0.13 → v1.0）中演练。
 - **发现并修复**：Worker 把名字以 `agent-runtime-` 开头的容器与网络都视为自己的命名空间；生产 compose 项目原名 `agent-runtime-prod`，
   在 Control Plane 与 Worker 同机时每次 reconcile 都报“未知资源”。项目改名为 `ar-platform`（运行中的部署经 `down` / `up` 迁移，数据目录
   为 bind 挂载不受影响）。开发环境的 compose 项目（`agent-runtime-platform` 等）有同样现象，只在开发与 Worker 同机时出现，不改。
-- **文档**：`docs/upgrade-runbook.md`、`docs/backup-runbook.md`。
+- **文档**：`docs/ops/20-upgrade.md`、`docs/ops/21-backup-restore.md`。
 
 **阶段 4：v0.13 → v1.0（2026-10-20，worker-c 单机）**
 
@@ -6888,7 +6888,7 @@ PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compo
   目录（已存在时检查失败），新建的 home 又属于 Worker 用户（容器内的用户无法访问）。改为由 root 执行，并把 home 交给 `WORKSPACE_UID/GID`；
   开发形态行为不变。
 - **文档要点**：开发 `.env` 中 JSON 值（`WORKER_GATEWAY_TOKENS_JSON`）为 `set -a; . .env` 需加单引号，迁入生产 env 文件时去掉；
-  `worker:configure-gateway` 会打印一个新 Gateway token 供轮换，沿用旧 token 时忽略。写入 `docs/upgrade-runbook.md` 第 5 节。
+  `worker:configure-gateway` 会打印一个新 Gateway token 供轮换，沿用旧 token 时忽略。写入 `docs/ops/20-upgrade.md` 第 5 节。
 
 **阶段 4 验收与空闲回收默认值（2026-10-21）**
 
