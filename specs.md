@@ -6907,7 +6907,7 @@ PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compo
   Control Plane 1.7、Worker 5.3（来自必要的五项 capability 与 docker 组）。
 - **漏洞扫描（Q14，非门槛）**：Trivy 0.76.0。平台发布包 0 HIGH/CRITICAL；第三方镜像与 Runtime 镜像的结论与建议（PostgreSQL 17.x 补丁
   升级、Runtime 基础层刷新为新 tag）见 `docs/ops/31-security.md` 第 5 节，由负责人决定是否在 v1.0 前处理。
-- **全量回归（worker-a，ARM64）**：`lint`、`typecheck`、`test`（单元 + 独立测试库上的 PostgreSQL 集成，535 项通过）、`test:e2e`（100）、
+- **全量回归（worker-a，ARM64）**：`lint`、`typecheck`、`test`（单元 + 独立测试库上的 PostgreSQL 集成，539 项通过）、`test:e2e`（100）、
   `build:web`、`test:deploy`（10）、`test:egress`（真实内核 nftables，21）、promtool 规则检查与测试、shellcheck、`test:e2e:runtime`
   （`2026.10-pi1.1`，11）、`test:model-gateway`（固定版本 LiteLLM + mock 上游，5）、`test:quota`（XFS loop 设备，3）全部通过。
 
