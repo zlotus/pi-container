@@ -1,0 +1,5 @@
+# Addresses allowed to reach the internal entry points 8443/8444 (installed as
+# /etc/agent-runtime/nginx/worker-allow.conf). One `allow` per Worker host or Worker
+# network; everything else is denied. The host firewall should restrict the same ports.
+allow 192.0.2.10;      # worker-a
+allow 192.0.2.11;      # worker-b

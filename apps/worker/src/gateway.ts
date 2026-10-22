@@ -199,9 +199,10 @@ export function buildWorkerGateway(
   const listener = (request: IncomingMessage, response: ServerResponse): void => {
     void handleHttp(request, response, dependencies);
   };
+  // Like the Control Plane Gateway: no limit on a whole (upload) request, only on headers.
   const server = dependencies.tls
-    ? createHttpsServer(dependencies.tls, listener)
-    : createHttpServer(listener);
+    ? createHttpsServer({ ...dependencies.tls, requestTimeout: 0 }, listener)
+    : createHttpServer({ requestTimeout: 0 }, listener);
   server.on("upgrade", (request, socket, head) => {
     void handleUpgrade(request, socket, head, dependencies);
   });

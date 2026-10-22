@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
+import { PLATFORM_VERSION } from "@agent-runtime/protocol";
 
 import { loadWorkerConfig } from "./config.js";
 import {
@@ -14,6 +15,7 @@ import {
 import { EgressApplyError } from "./egress/controller.js";
 import type { WorkerModelAccess } from "./model-relay/access.js";
 
+const TEST_RUNTIME_IMAGE = "agent-runtime:phase7-toolchain";
 const config = loadWorkerConfig({
   CONTROL_PLANE_URL: "wss://control.internal/api/workers/connect",
   WORKER_ID: "worker-01",
@@ -21,6 +23,7 @@ const config = loadWorkerConfig({
   WORKER_GATEWAY_TOKEN: "gateway0123456789abcdef0123456789abcdef",
   WORKSPACE_BASE_URL: "https://agent.example.internal",
   WORKER_MAX_WORKSPACES: "8",
+  RUNTIME_IMAGES: `${TEST_RUNTIME_IMAGE}@sha256:7777777777777777777777777777777777777777777777777777777777777777`,
 });
 
 function fakeRuntime(): WorkspaceRuntime {
@@ -145,10 +148,11 @@ describe("worker daemon messages", () => {
     }, runtimeImages, { enforced: true, revision: 4 }, STORAGE_STATUS);
 
     expect(message).toMatchObject({
-      version: 6,
+      version: 7,
       type: "worker.hello",
       payload: {
         workerId: "worker-01",
+        workerVersion: PLATFORM_VERSION,
         runtimeImages,
         maxWorkspaces: 8,
         allocatedWorkspaces: 0,
@@ -277,7 +281,7 @@ describe("worker daemon egress", () => {
       ]) {
         workerSocket?.send(
           JSON.stringify({
-            version: 6,
+            version: 7,
             type: "worker.egress.apply",
             requestId,
             payload: policy,
@@ -287,7 +291,7 @@ describe("worker daemon egress", () => {
       await vi.waitFor(() => expect(received).toHaveLength(3));
       expect(egress.apply).toHaveBeenCalledWith(policy);
       expect(received[1]).toEqual({
-        version: 6,
+        version: 7,
         type: "response.ok",
         requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d01",
         payload: {
@@ -296,7 +300,7 @@ describe("worker daemon egress", () => {
         },
       });
       expect(received[2]).toEqual({
-        version: 6,
+        version: 7,
         type: "response.error",
         requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d02",
         payload: {
@@ -372,7 +376,7 @@ describe("worker daemon disk quotas", () => {
 
       workerSocket?.send(
         JSON.stringify({
-          version: 6,
+          version: 7,
           type: "workspace.storage.set",
           requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d03",
           payload: { workspaceId: sample.workspaceId, diskLimitBytes: 5 * 1024 ** 3 },
@@ -428,7 +432,7 @@ describe("worker daemon model access (Phase 16.9)", () => {
     const observation = {
       workspaceId,
       state: "STOPPED" as const,
-      runtimeImage: config.RUNTIME_IMAGE,
+      runtimeImage: TEST_RUNTIME_IMAGE,
       observedAt: "2026-10-08T08:00:00.000Z",
     };
     vi.mocked(runtime.ensure).mockResolvedValue(observation);
@@ -457,7 +461,7 @@ describe("worker daemon model access (Phase 16.9)", () => {
       modelAccess,
     );
     const command = (type: string, requestId: string, payload: Record<string, unknown>) =>
-      workerSocket?.send(JSON.stringify({ version: 6, type, requestId, payload }));
+      workerSocket?.send(JSON.stringify({ version: 7, type, requestId, payload }));
     const response = (requestId: string) => received.find((entry) => entry.requestId === requestId);
     try {
       daemon.start();
@@ -466,7 +470,7 @@ describe("worker daemon model access (Phase 16.9)", () => {
 
       command("workspace.ensure", "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d11", {
         workspaceId,
-        runtimeImage: config.RUNTIME_IMAGE,
+        runtimeImage: TEST_RUNTIME_IMAGE,
         resources: { cpuCount: 2, memoryBytes: 4 * 1024 ** 3, pidsLimit: 512 },
         storage: { diskLimitBytes: 20 * 1024 ** 3 },
         modelGateway: catalog,
@@ -518,7 +522,7 @@ describe("worker daemon model access (Phase 16.9)", () => {
       vi.mocked(runtime.configureModelProvider).mockRejectedValueOnce(new Error("disk full"));
       command("workspace.ensure", "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d16", {
         workspaceId,
-        runtimeImage: config.RUNTIME_IMAGE,
+        runtimeImage: TEST_RUNTIME_IMAGE,
         resources: { cpuCount: 2, memoryBytes: 4 * 1024 ** 3, pidsLimit: 512 },
         storage: { diskLimitBytes: 20 * 1024 ** 3 },
         modelGateway: null,
@@ -559,7 +563,7 @@ describe("worker daemon model access (Phase 16.9)", () => {
       expect(received[0]?.payload.modelRelay).toEqual({ enabled: false, port: null, listening: false });
       workerSocket?.send(
         JSON.stringify({
-          version: 6,
+          version: 7,
           type: "workspace.model_key.set",
           requestId: "6a1c49ea-1f53-4c55-8a38-9a0f8f2f0d21",
           payload: { workspaceId, keyAlias, secret: SECRET },

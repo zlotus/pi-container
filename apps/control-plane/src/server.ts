@@ -2,7 +2,7 @@ import {
   checkDatabase,
   createDatabaseClient,
   createRepository,
-  migrateDatabase,
+  prepareDatabase,
 } from "@agent-runtime/database";
 import { createLogger, LoggingConfigSchema } from "@agent-runtime/logging";
 import { buildControlPlane } from "./app.js";
@@ -33,7 +33,7 @@ import {
 } from "./metrics/listener.js";
 import { PlatformMetrics } from "./metrics/platform-metrics.js";
 import { UsageRegistry } from "./metrics/usage-registry.js";
-import { WORKER_PROTOCOL_VERSION } from "@agent-runtime/protocol";
+import { PLATFORM_VERSION, WORKER_PROTOCOL_VERSION } from "@agent-runtime/protocol";
 import {
   GenericOAuth2UserInfoClient,
   OAuth2TransactionStore,
@@ -56,12 +56,21 @@ if (config.METRICS_PORT !== null) {
 }
 const metrics = new PlatformMetrics({
   defaultMetrics: true,
-  version: process.env.npm_package_version ?? "dev",
+  version: PLATFORM_VERSION,
   protocolVersion: WORKER_PROTOCOL_VERSION,
 });
 const database = createDatabaseClient(config.DATABASE_URL);
 
-await migrateDatabase(database);
+try {
+  await prepareDatabase(database, { migrate: config.DATABASE_MIGRATE_ON_START });
+} catch (error) {
+  // Pending migrations without permission to apply them, or a schema from a newer
+  // release: never run on a database this build does not match (specs.md Phase 19.8).
+  log.fatal({ err: error }, "database schema check failed");
+  await database.end({ timeout: 5 });
+  process.exit(1);
+}
+log.info({ version: PLATFORM_VERSION, protocolVersion: WORKER_PROTOCOL_VERSION }, "control plane starting");
 
 const repository = createRepository(database, selectWorker);
 await repository.markAllWorkersOfflineForRecovery(new Date());
@@ -321,19 +330,33 @@ if (modelGateway !== undefined) {
   );
 }
 
+// Browsers keep Workspace connections (SSE, WebSocket) open indefinitely, so a graceful
+// stop that waits for them never ends: close them, and exit after a deadline regardless
+// (systemd would otherwise kill the process after TimeoutStopSec, specs.md Phase 19.19).
+const SHUTDOWN_DEADLINE_MS = 10_000;
+let shuttingDown = false;
 const shutdown = async (): Promise<void> => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log.info("control plane stopping");
+  setTimeout(() => {
+    log.warn({ deadlineMs: SHUTDOWN_DEADLINE_MS }, "shutdown deadline reached; exiting");
+    process.exit(0);
+  }, SHUTDOWN_DEADLINE_MS).unref();
   modelGateway?.stop();
   clearInterval(workerStatusTimer);
   clearInterval(accessFlushTimer);
   if (idleTimer !== null) clearInterval(idleTimer);
   await workspaceAccess.flush((entries) => repository.recordWorkspaceAccess(entries)).catch(() => undefined);
   clearInterval(authThrottleCleanupTimer);
-  await new Promise<void>((resolve, reject) => {
-    gateway.close((error) => (error === undefined ? resolve() : reject(error)));
-  });
+  const gatewayClosed = new Promise<void>((resolve) => gateway.close(() => resolve()));
+  sessionConnections.closeAll();
+  gateway.closeAllConnections();
+  await gatewayClosed;
   metricsServer?.close();
   await app.close();
   await database.end({ timeout: 5 });
+  process.exit(0);
 };
 
 process.once("SIGINT", () => {

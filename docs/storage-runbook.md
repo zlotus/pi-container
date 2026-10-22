@@ -30,9 +30,10 @@ Phase 17 再提供告警。
 `lsattr`，不经 shell；路径只能是 Worker 自己构造的受管路径（`WORKER_MANAGED_ROOT` 因此只允许字母、数字、
 `.`、`_`、`-`、`/`）。
 
-- 生产（Phase 19 的 systemd unit）：`AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN`，
-  `CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN`。若 Worker 的运行用户与 `WORKSPACE_UID` 不同，还需要
-  `CAP_FOWNER`（给 Workspace 用户的文件打 project 标记）。
+- 生产：`deploy/production/systemd/agent-runtime-worker.service`（[ops/04](ops/04-worker-host.md)）授予
+  `CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE`。Worker 的运行用户与 `WORKSPACE_UID` 不同，
+  因此需要 `CAP_FOWNER`（给 Workspace 用户的文件打 project 标记），`CAP_CHOWN`、`CAP_DAC_OVERRIDE` 用于创建与删除
+  属于 Workspace 用户的受管目录。
 - 开发：`tools/dev/run-worker-privileged.sh <worker env 文件>`（原 `run-worker-with-egress.sh`），以当前用户
   运行 Worker，只附加 `CAP_NET_ADMIN` 与 `CAP_SYS_ADMIN`。
 
@@ -103,10 +104,10 @@ Workspace 返回 `STORAGE_MIGRATION_REQUIRED`，Portal 提示需要管理员迁�
 迁移前提醒用户：旧容器 `/tmp` 与其他可写层位置（如 `/usr/local/rustup` 中自装的组件）的内容**不会保留**；
 需要的请先移到 `/workspace`。
 
-对每个旧 Workspace（必须已停止），在 Worker 宿主机上以 Worker 用户执行：
+对每个旧 Workspace（必须已停止），在 Worker 宿主机上执行（生产以 root；开发以 Worker 用户，即 Workspace UID）：
 
 ```bash
-WORKER_ID=worker-a tools/dev/migrate-legacy-workspace.sh <workspace-id>
+WORKER_ID=worker-a deploy/production/bin/migrate-legacy-workspace <workspace-id>   # 生产：sudo migrate-legacy-workspace <id>
 ```
 
 脚本只处理带本 Worker managed label 的旧格式容器；把 `/home/agent` 复制到 `workspaces/<id>/home/`（目标

@@ -64,14 +64,8 @@ export const WorkerConfigSchema = z
       .min(1_000)
       .max(300_000)
       .default(30_000),
-    RUNTIME_IMAGE: z
-      .string()
-      .min(1)
-      .max(255)
-      .default("agent-runtime:phase7-toolchain"),
-    RUNTIME_VERSION: z.string().min(1).max(128).default("phase-7"),
-    /** `<reference>@sha256:<digest>`, comma separated (specs.md Phase 18.4). */
-    RUNTIME_IMAGES: z.string().min(1).max(2_048).optional(),
+    /** `<reference>@sha256:<digest>`, comma separated (specs.md Phase 18.4); required. */
+    RUNTIME_IMAGES: z.string().min(1).max(2_048),
     RUNTIME_CAPABILITY_PROBE_TIMEOUT_MS: z.coerce
       .number()
       .int()
@@ -152,7 +146,6 @@ export const WorkerConfigSchema = z
   )
   .refine(
     (value) => {
-      if (value.RUNTIME_IMAGES === undefined) return true;
       try {
         parseRuntimeImages(value.RUNTIME_IMAGES);
         return true;
@@ -173,8 +166,15 @@ export type WorkerConfig = z.infer<typeof WorkerConfigSchema>;
 export function loadWorkerConfig(
   environment: NodeJS.ProcessEnv,
 ): WorkerConfig {
-  if (environment.RUNTIME_IMAGES !== undefined && environment.RUNTIME_IMAGE !== undefined) {
-    throw new Error("Set RUNTIME_IMAGES or the transitional RUNTIME_IMAGE, not both");
+  // The unpinned single-image variables of Phase 18's transition were removed in v1.0
+  // (specs.md Phase 19.8); refuse them rather than silently ignoring an old configuration.
+  for (const removed of ["RUNTIME_IMAGE", "RUNTIME_VERSION"] as const) {
+    if (environment[removed] !== undefined) {
+      throw new Error(
+        `${removed} is no longer supported; list images as RUNTIME_IMAGES=<image>@sha256:<digest> ` +
+          "(docs/lifecycle-runbook.md)",
+      );
+    }
   }
   return WorkerConfigSchema.parse(environment);
 }

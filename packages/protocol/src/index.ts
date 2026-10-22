@@ -8,13 +8,15 @@ import {
   ModelKeySecretSchema,
   ModelRelayStatusSchema,
 } from "./model-gateway.js";
+import { SoftwareVersionSchema } from "./build-info.js";
 import { WorkerHostUsageSchema, WorkspaceUsageSchema } from "./usage.js";
 
+export * from "./build-info.js";
 export * from "./egress.js";
 export * from "./model-gateway.js";
 export * from "./usage.js";
 
-export const WORKER_PROTOCOL_VERSION = 6 as const;
+export const WORKER_PROTOCOL_VERSION = 7 as const;
 
 export const WorkspaceIdSchema = z.string().uuid();
 
@@ -150,6 +152,8 @@ export const WorkerHelloMessageSchema = RequestEnvelopeSchema.extend({
   payload: z
     .object({
       workerId: WorkerIdSchema,
+      /** The Worker's software version (protocol v7, specs.md Phase 19.8). */
+      workerVersion: SoftwareVersionSchema,
       hostname: z.string().min(1).max(255),
       architecture: ArchitectureSchema,
       runtimeImages: z

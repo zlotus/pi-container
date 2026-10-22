@@ -21,6 +21,7 @@ const BASE = {
   WORKER_GATEWAY_TOKEN: "gateway0123456789abcdef0123456789abcdef",
   WORKSPACE_BASE_URL: "https://agent.example.internal",
   WORKER_MAX_WORKSPACES: "8",
+  RUNTIME_IMAGES: `agent-runtime:test@sha256:${"9".repeat(64)}`,
 };
 
 interface FakeImage {
@@ -54,8 +55,8 @@ const log = () => ({ error: vi.fn(), warn: vi.fn() });
 describe("RUNTIME_IMAGES configuration (Phase 18.4)", () => {
   it("parses digest-pinned references", () => {
     expect(parseRuntimeImages(`agent-runtime:phase7-toolchain@${ID_A}, registry.internal:5000/agent-runtime:R2@${ID_B}`)).toEqual([
-      { image: "agent-runtime:phase7-toolchain", digest: ID_A, fallbackVersion: null },
-      { image: "registry.internal:5000/agent-runtime:R2", digest: ID_B, fallbackVersion: null },
+      { image: "agent-runtime:phase7-toolchain", digest: ID_A },
+      { image: "registry.internal:5000/agent-runtime:R2", digest: ID_B },
     ]);
   });
 
@@ -73,20 +74,21 @@ describe("RUNTIME_IMAGES configuration (Phase 18.4)", () => {
     }
   });
 
-  it("refuses to start with an invalid list or with both variables set", () => {
+  it("refuses to start with an invalid or missing list", () => {
     expect(() => loadWorkerConfig({ ...BASE, RUNTIME_IMAGES: "agent-runtime:phase7-toolchain" })).toThrow();
-    expect(() =>
-      loadWorkerConfig({ ...BASE, RUNTIME_IMAGES: `a:1@${ID_A}`, RUNTIME_IMAGE: "a:1" }),
-    ).toThrow("not both");
+    const withoutImages: Record<string, string> = { ...BASE };
+    delete withoutImages.RUNTIME_IMAGES;
+    expect(() => loadWorkerConfig(withoutImages)).toThrow();
     expect(configuredRuntimeImages(loadWorkerConfig({ ...BASE, RUNTIME_IMAGES: `a:1@${ID_A}` }))).toEqual([
-      { image: "a:1", digest: ID_A, fallbackVersion: null },
+      { image: "a:1", digest: ID_A },
     ]);
   });
 
-  it("keeps the transitional single RUNTIME_IMAGE unpinned with its configured version", () => {
-    expect(configuredRuntimeImages(loadWorkerConfig(BASE))).toEqual([
-      { image: "agent-runtime:phase7-toolchain", digest: null, fallbackVersion: "phase-7" },
-    ]);
+  it("refuses the removed transitional RUNTIME_IMAGE and RUNTIME_VERSION (Phase 19.8)", () => {
+    expect(() => loadWorkerConfig({ ...BASE, RUNTIME_IMAGE: "a:1" })).toThrow("RUNTIME_IMAGE is no longer supported");
+    expect(() => loadWorkerConfig({ ...BASE, RUNTIME_VERSION: "phase-7" })).toThrow(
+      "RUNTIME_VERSION is no longer supported",
+    );
   });
 });
 
@@ -114,12 +116,12 @@ describe("Runtime image catalog (Phase 18.4)", () => {
     const errors = log();
     const catalog = new DockerRuntimeImageCatalog(
       [
-        { image: "a:pinned", digest: ID_A, fallbackVersion: null },
-        { image: "b:repo-digest", digest: ID_B, fallbackVersion: null },
-        { image: "c:moved", digest: ID_A, fallbackVersion: null },
-        { image: "d:amd64", digest: ID_A, fallbackVersion: null },
-        { image: "e:unlabelled", digest: ID_B, fallbackVersion: null },
-        { image: "f:missing", digest: ID_A, fallbackVersion: null },
+        { image: "a:pinned", digest: ID_A },
+        { image: "b:repo-digest", digest: ID_B },
+        { image: "c:moved", digest: ID_A },
+        { image: "d:amd64", digest: ID_A },
+        { image: "e:unlabelled", digest: ID_B },
+        { image: "f:missing", digest: ID_A },
       ],
       docker,
       errors,
@@ -137,8 +139,8 @@ describe("Runtime image catalog (Phase 18.4)", () => {
   it("does not offer two images with the same runtime version", async () => {
     const catalog = new DockerRuntimeImageCatalog(
       [
-        { image: "a:1", digest: ID_A, fallbackVersion: null },
-        { image: "a:2", digest: ID_B, fallbackVersion: null },
+        { image: "a:1", digest: ID_A },
+        { image: "a:2", digest: ID_B },
       ],
       fakeDocker({
         "a:1": { Id: ID_A, labels: label("same") },
@@ -152,7 +154,7 @@ describe("Runtime image catalog (Phase 18.4)", () => {
   it("stops offering an image once its reference is re-tagged to other content", async () => {
     const images: Record<string, FakeImage> = { "a:1": { Id: ID_A, labels: label("v1") } };
     const catalog = new DockerRuntimeImageCatalog(
-      [{ image: "a:1", digest: ID_A, fallbackVersion: null }],
+      [{ image: "a:1", digest: ID_A }],
       fakeDocker(images),
       log(),
     );
@@ -161,19 +163,6 @@ describe("Runtime image catalog (Phase 18.4)", () => {
     images["a:1"] = { Id: ID_B, labels: label("v1") };
     await catalog.refresh("arm64");
     expect(catalog.find("a:1")).toBeNull();
-  });
-
-  it("uses the configured version for an unpinned transitional image without a label", async () => {
-    const warnings = log();
-    const catalog = new DockerRuntimeImageCatalog(
-      [{ image: "legacy:1", digest: null, fallbackVersion: "phase-7" }],
-      fakeDocker({ "legacy:1": { Id: ID_A } }),
-      warnings,
-    );
-    await expect(catalog.refresh("arm64")).resolves.toMatchObject([
-      { image: "legacy:1", imageId: ID_A, runtimeVersion: "phase-7" },
-    ]);
-    expect(warnings.warn).toHaveBeenCalledOnce();
   });
 });
 

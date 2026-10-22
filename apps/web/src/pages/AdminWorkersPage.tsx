@@ -69,6 +69,24 @@ export interface LifecyclePolicy {
   defaultRuntimeImage: string;
 }
 
+export interface ControlPlaneVersion {
+  version: string;
+  protocolVersion: number;
+}
+
+/**
+ * A Worker's software version next to the Control Plane's (Phase 19.8). A different version
+ * is expected only during an upgrade; the protocol version is what actually gates a Worker.
+ */
+export function workerVersionText(
+  worker: Pick<Worker, "workerVersion">,
+  controlPlane: ControlPlaneVersion | null,
+): { text: string; differs: boolean } {
+  if (worker.workerVersion === null) return { text: "版本未知", differs: false };
+  const differs = controlPlane !== null && worker.workerVersion !== controlPlane.version;
+  return { text: `版本 ${worker.workerVersion}`, differs };
+}
+
 /** The idle stop policy as one sentence for the page heading (Phase 18.8). */
 export function idlePolicyText(policy: LifecyclePolicy): string {
   const idle = policy.idle;
@@ -85,6 +103,7 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
   const [error, setError] = useState<string | null>(null);
   const [expandedWorkerId, setExpandedWorkerId] = useState<string | null>(null);
   const [defaultRuntimeImage, setDefaultRuntimeImage] = useState<string | null>(null);
+  const [controlPlane, setControlPlane] = useState<ControlPlaneVersion | null>(null);
   const [lifecycle, setLifecycle] = useState<LifecyclePolicy | null>(null);
 
   useEffect(() => {
@@ -93,9 +112,14 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
 
   const refreshWorkers = useCallback(async () => {
     try {
-      const result = await api<{ workers: Worker[]; defaultRuntimeImage?: string }>("/api/admin/workers");
+      const result = await api<{
+        workers: Worker[];
+        defaultRuntimeImage?: string;
+        controlPlane?: ControlPlaneVersion;
+      }>("/api/admin/workers");
       setWorkers(result.workers);
       setDefaultRuntimeImage(result.defaultRuntimeImage ?? null);
+      setControlPlane(result.controlPlane ?? null);
       setError(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "无法载入 Worker");
@@ -140,6 +164,7 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
           <h1>Worker</h1>
           <p>
             Worker 状态、Workspace 容量与运行环境信息，每 5 秒自动更新。
+            {controlPlane === null ? null : ` 平台版本 ${controlPlane.version}（Worker 协议 v${controlPlane.protocolVersion}）。`}
             {lifecycle === null ? null : ` ${idlePolicyText(lifecycle)}`}
           </p>
         </div>
@@ -162,7 +187,18 @@ export function AdminWorkersPage({ session }: { session: SessionResponse }) {
                 {workers.map((worker) => (
                   <Fragment key={worker.id}>
                     <tr>
-                      <td><strong>{worker.id}</strong><small>{worker.hostname ?? "尚未连接"}</small></td>
+                      <td>
+                        <strong>{worker.id}</strong>
+                        <small>{worker.hostname ?? "尚未连接"}</small>
+                        {(() => {
+                          const version = workerVersionText(worker, controlPlane);
+                          return (
+                            <small title={version.differs ? "与 Control Plane 版本不同：升级尚未完成时属正常，完成后应一致" : undefined}>
+                              {version.text}{version.differs ? "（与平台不同）" : null}
+                            </small>
+                          );
+                        })()}
+                      </td>
                       <td>
                         <span className="state-group">
                           <span className={`state worker-${worker.status.toLowerCase()}`}>{workerStatusLabel(worker.status)}</span>

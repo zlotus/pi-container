@@ -1,0 +1,55 @@
+# Worker: manages this host's Workspace containers through the local Docker Engine, the
+# Workspace egress rules (nftables) and the XFS project quotas of WORKER_MANAGED_ROOT
+# (specs.md Phase 19.5). Runs as the unprivileged agent-runtime user (docker group) with
+# only the capabilities below; never as root. Stopping it leaves Workspaces running.
+#
+# Install (root): see docs/ops/04-worker-host.md. Requires agent-runtime-egress.service
+# and the WORKER_MANAGED_ROOT mount; adjust RequiresMountsFor/ReadWritePaths if the managed
+# root is not /var/lib/agent-runtime.
+[Unit]
+Description=Agent Runtime Worker
+Documentation=file:///opt/agent-runtime/current/deploy
+Wants=network-online.target
+After=network-online.target docker.service agent-runtime-egress.service
+Requires=docker.service agent-runtime-egress.service
+RequiresMountsFor=/var/lib/agent-runtime
+
+[Service]
+Type=simple
+User=agent-runtime
+Group=agent-runtime
+SupplementaryGroups=docker
+EnvironmentFile=/etc/agent-runtime/worker.env
+# Trust the internal CA for wss/https to the Control Plane's internal entry (19.6.1).
+Environment=NODE_EXTRA_CA_CERTS=/etc/agent-runtime/tls/internal-ca.crt
+ExecStart=/opt/agent-runtime/current/bin/node /opt/agent-runtime/current/app/worker/server.mjs
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+LimitNOFILE=65536
+
+# NET_ADMIN: the platform's nftables table (Phase 14). SYS_ADMIN: XFS project quota limits
+# (Phase 15). CHOWN/FOWNER/DAC_OVERRIDE: Workspace directories belong to the Runtime UID,
+# not to this user; each one was required in spike S1 (specs.md Phase 19.19).
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agent-runtime
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+ReadOnlyPaths=/etc/agent-runtime
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

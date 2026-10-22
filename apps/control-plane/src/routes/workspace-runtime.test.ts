@@ -64,7 +64,7 @@ async function setup(defaultRuntimeImage = NEW) {
     const reply = (workspaceState: string, runtimeImage: string) =>
       worker.send(
         JSON.stringify({
-          version: 6,
+          version: 7,
           type: "response.ok",
           requestId: command.requestId,
           payload: {
@@ -88,7 +88,7 @@ async function setup(defaultRuntimeImage = NEW) {
       }
       worker.send(
         JSON.stringify({
-          version: 6,
+          version: 7,
           type: "response.error",
           requestId: command.requestId,
           payload: {

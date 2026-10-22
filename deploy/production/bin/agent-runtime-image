@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Loads and checks a Runtime image archive on a Worker host (specs.md Phase 19.4.2).
+# Images are built once (deploy/production/scripts/build-runtime-image.sh) and distributed
+# as archives, so every Worker runs the same image under the same digest.
+#
+#   agent-runtime-image load <archive.tar.zst>   verify the .sha256 next to it, docker load,
+#                                                check, print the RUNTIME_IMAGES entry
+#   agent-runtime-image verify <image>           check an image already loaded or built here
+#
+# Run as a user that may use Docker (root or the docker group).
+set -euo pipefail
+
+fail() {
+  echo "agent-runtime-image: $*" >&2
+  exit 1
+}
+
+host_arch() {
+  docker version --format '{{.Server.Arch}}'
+}
+
+# Prints "<image>@<id>" for an image that is a usable Runtime image on this host.
+verify_image() {
+  local image="$1" platform version id
+  [[ "$image" =~ ^agent-runtime:[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]] ||
+    fail "expected an image named agent-runtime:<tag>, got '$image'"
+  platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image" 2>/dev/null)" ||
+    fail "$image is not present on this host"
+  [[ "$platform" == "linux/$(host_arch)" ]] || fail "$image is $platform; this host is linux/$(host_arch)"
+  version="$(docker image inspect --format '{{index .Config.Labels "io.agent-runtime.runtime.version"}}' "$image")"
+  [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]] ||
+    fail "$image has no io.agent-runtime.runtime.version label"
+  [[ "$image" == "agent-runtime:${version}" ]] ||
+    echo "note: tag and runtime version differ (${image} / ${version})" >&2
+  id="$(docker image inspect --format '{{.Id}}' "$image")"
+  [[ "$id" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "unexpected image ID '$id'"
+  echo "${image}@${id}"
+}
+
+case "${1:-}" in
+  load)
+    archive="${2:?usage: agent-runtime-image load <archive.tar.zst>}"
+    [[ -f "$archive" ]] || fail "no such archive: $archive"
+    [[ -f "${archive}.sha256" ]] || fail "missing checksum file ${archive}.sha256"
+    (cd "$(dirname "$archive")" && sha256sum --check --strict --quiet "$(basename "$archive").sha256") ||
+      fail "checksum mismatch for $archive; do not load it"
+    command -v zstd >/dev/null || fail "zstd is required (apt-get install zstd)"
+    loaded="$(zstd -dc "$archive" | docker load)"
+    echo "$loaded"
+    image="$(sed -n 's/^Loaded image: //p' <<<"$loaded" | tail -n 1)"
+    [[ -n "$image" ]] || fail "the archive did not contain a tagged image"
+    entry="$(verify_image "$image")"
+    ;;
+  verify)
+    entry="$(verify_image "${2:?usage: agent-runtime-image verify <image>}")"
+    ;;
+  *)
+    echo "usage: agent-runtime-image load <archive.tar.zst> | verify <image>" >&2
+    exit 2
+    ;;
+esac
+
+echo
+echo "Runtime image ready: ${entry%@*}"
+echo "Append to RUNTIME_IMAGES in the Worker's env file (keep images still in use):"
+echo "  ${entry}"

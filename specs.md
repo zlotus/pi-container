@@ -6137,11 +6137,781 @@ Admin 切换、镜像 pin、空闲回收（1 小时策略下空闲 Workspace 被
 
 ## Phase 19：生产部署与 v1.0 发布
 
-状态：待开工设计。
+状态：**设计已确认（2026-10-19，19.15），分阶段实施（19.17）**，分支 `phase-19-production`。方向见 `docs/v1-roadmap.md` Phase 19（G9）、决策 D2、D5，
+第 9、21、28 节与 18.15。
 
-- 生产镜像或 systemd unit、部署模板（ARM64 优先）、TLS/wildcard 与反向代理文档（含 SPA fallback 与
-  WebSocket 超时）、升级与回滚流程、外部备份说明（第 28 节）。
-- 验收要点：按文档在全新设备上从零部署成功；从 v0.13 升级到 v1.0 数据完整；完整回归通过。
+目标：一名不熟悉开发环境的运维人员，只按仓库文档与 CI 产出的发布物，就能在一台全新的 ARM64 设备上部署出可长期运行的
+平台（Control Plane、Portal、Worker、PostgreSQL、模型网关、TLS 入口），不依赖 `tsx watch`、`pnpm` 或开发者本机配置；
+能按文档完成版本升级与回滚、外部备份与原位恢复；从 v0.13 升级到 v1.0 不丢失用户、Workspace 文件与 Pi Session。发布前
+完成完整回归与安全复查，然后依次发布 `v1.0.0-rc.1`、`v1.0.0`。
+
+### 19.1 开工环境核查（Q8B，2026-10-14，只读）
+
+**仓库现有部署产物**（`master` @ `8a359c7`）：
+
+| 产物 | 现状 | 对生产的意义 |
+|---|---|---|
+| `deploy/compose.dev.yml` | PostgreSQL `17.6-alpine`（只 pin tag，未 pin digest），`127.0.0.1:5432`，开发口令默认值 | 只适合开发 |
+| `deploy/worker.env.example` | 仍以过渡写法 `RUNTIME_IMAGE=agent-runtime:phase7-toolchain` 为默认，`RUNTIME_IMAGES` 被注释；`CONTROL_PLANE_URL=ws://127.0.0.1…` | 需改为生产示例（18.14 Q10：Phase 19 移除过渡写法） |
+| `deploy/egress/agent-runtime-egress.{nft,service}` | 生产可用（Phase 14 验收），本机已安装并 `enabled` | 直接沿用 |
+| `deploy/model-gateway/compose.yml` | 标注 DEV ONLY；LiteLLM 1.104.1 pin digest；`127.0.0.1:4400` + 可选 `LITELLM_REMOTE_BIND`（明文 HTTP，开发用 Tailscale 地址） | 生产需要 TLS 与路径收敛的 Worker 入口（19.7） |
+| `deploy/observability/` | Prometheus 3.13.4 / Grafana 13.2.3（pin），19 条规则，3 个面板；地址全部为 loopback（DEV ONLY） | 规则与面板可直接复用 |
+| `tools/dev/*.sh` | `migrate-legacy-workspace.sh`、`init-litellm-db.sh`、`init-metrics-token.sh`、`create-litellm-metrics-key.sh`、`run-worker-privileged.sh` | 前四个在生产/升级中同样需要，应成为发布物中的运维脚本 |
+| systemd unit | 只有出口规则 unit；Control Plane / Worker 没有（`storage-runbook.md`、`egress-runbook.md` 中写着“Phase 19 提供完整 unit”） | 本 Phase 提供 |
+| CI | `ci.yml`（ARM64 质量门）、`runtime-toolchain.yml`（双架构原生构建 + 验证，**不推送**镜像）；Node 均为 `22.20.0` | 没有发布工作流；CI 与开发主机 Node 版本不一致 |
+
+**进程与启动方式**：Control Plane 与 Worker 都以 `tsx watch src/server.ts` 运行 TypeScript 源码（`start` 脚本是不带 watch 的
+`tsx`）；workspace 包的 `exports` 直接指向 `src/*.ts`，没有任何编译产物。Worker 由 `tools/dev/run-worker-privileged.sh` 以
+`sudo setpriv` 降回 `radxa`（UID 1000，docker 组）并附加 ambient `CAP_NET_ADMIN`、`CAP_SYS_ADMIN`（实测 `CapAmb=0x201000`）。
+Portal 由 Vite dev server（`--host 0.0.0.0`，5173）提供并把 `/api`、`/auth` 代理到 Control Plane；**Control Plane 不提供
+Portal 静态文件**，生产必须由反向代理提供 `apps/web/dist` 并做 SPA fallback。Node：开发主机 `v24.20.0`（nvm，用户级安装），
+CI `22.20.0`，`engines.node >=22.20.0`。本机没有 nginx / Caddy / HAProxy。OS Ubuntu 26.04.1 LTS（aarch64），Docker 29.8.1
+（containerd 镜像存储），Compose v5.5.1；`/var/lib/agent-runtime` 是 loop 设备上的 XFS（`prjquota`）。
+
+**Control Plane 启动行为**：每次启动先 `migrateDatabase`（单事务 + advisory lock，逐个执行未登记的 migration），**不检查数据库中
+是否存在本版本不认识的 migration**——旧版本程序可以在新 schema 上静默运行。版本号取 `process.env.npm_package_version ?? "dev"`
+（根 `package.json` 为 `0.0.0`），脱离 pnpm 运行时恒为 `dev`。健康检查 `GET /health`、`GET /ready`（Portal API listener）。
+
+**配置项与密钥**（全部经环境变量，Zod 校验，不合法即拒绝启动）：
+
+| 组件 | 密钥类配置 | 文件型配置 | 其余 |
+|---|---|---|---|
+| Control Plane | `DATABASE_URL`（含口令）、`SESSION_SECRET`、`AUTH_OIDC_CLIENT_SECRET`、`AUTH_OAUTH2_CLIENT_SECRET`、`WORKER_GATEWAY_TOKENS_JSON`、`MODEL_GATEWAY_MASTER_KEY` | `METRICS_TOKEN_FILE`、`MODEL_GATEWAY_CATALOG_FILE` | 监听（`HOST`/`PORT`、`GATEWAY_HOST`/`GATEWAY_PORT`、`METRICS_*`）、`PORTAL_ORIGIN`、`WORKSPACE_BASE_URL`、`AUTH_TRUSTED_PROXIES`、`PLATFORM_EGRESS_PROTECTED`、资源/配额/空闲/网关策略 |
+| Worker | `WORKER_TOKEN`、`WORKER_GATEWAY_TOKEN` | `WORKER_GATEWAY_TLS_{CERT,KEY}_PATH` | `CONTROL_PLANE_URL`、`WORKSPACE_BASE_URL`、`RUNTIME_IMAGES`、`WORKER_MANAGED_ROOT`、出口/配额/中继 |
+| LiteLLM | 上游 key、`LITELLM_MASTER_KEY`、`DATABASE_URL` | `config.yaml` | — |
+
+开发环境中这些值放在仓库根 `.env`（用户 0664）与 `.data/worker-a.env`，密钥内联。Worker 调用 `nft` / `xfs_quota` 时已只传
+固定 `PATH`/`LANG`，不把令牌带入子进程。URL 校验现状：`MODEL_GATEWAY_ADMIN_URL`、OIDC/OAuth2 端点只接受 HTTPS 或 loopback
+HTTP；`CONTROL_PLANE_URL` 接受任意 `ws://`；`WORKER_MODEL_GATEWAY_URL` 接受任意 `http://`；Worker Gateway 有可选原生 TLS，
+Control Plane 访问它时用 Node 默认 CA（可经 `NODE_EXTRA_CA_CERTS` 追加）。
+
+**端口与网络边界（开发现状）**：Control Plane `0.0.0.0:3000`（Portal API + `/api/workers/connect` 同一 listener）、`0.0.0.0:3001`
+（Workspace Gateway）、`127.0.0.1:9464`（指标）；Vite `0.0.0.0:5173`；Worker Gateway `0.0.0.0:3100`（HTTP）；模型中继 3101（只对
+`arw-*` 接口）；LiteLLM `127.0.0.1:4400` 与 Tailscale `:4401`（HTTP）；PostgreSQL `127.0.0.1:5432`；pi-web 动态 `127.0.0.1` 端口。
+`PORTAL_ORIGIN`、`WORKSPACE_BASE_URL` 为 HTTP + `nip.io`，`SESSION_COOKIE_SECURE=false`。即：用户入口、Worker 控制通道与
+Worker Gateway 全部明文，Worker 控制通道与 Portal API 共用对外 listener。
+
+**发现的问题与对设计的影响**：
+
+1. **Workspace UID 与宿主机登录用户重叠**：Runtime 以 UID/GID 1000 运行，本机 UID 1000 是 `radxa`（sudo 组）；Ubuntu 云镜像的
+   默认用户同样是 1000。Workspace 的持久文件在宿主机上属于该登录用户；一旦发生容器逃逸，进程身份即该用户（可写其 home）。
+   生产 Worker 宿主机上 UID/GID 1000 不应属于有登录或 sudo 权限的账户（19.11、Q12）。
+2. **生产 Worker 运行用户与 Workspace UID 不同**后所需 capability 未经验证：Worker 创建目录并 `chown` 给 1000（`runtime.ts`）、
+   向 1000 所有的 `pi/` 写 `models.json`（`model-relay/pi-config.ts`）、给 1000 的文件打 project 标记；可能需要
+   `CAP_CHOWN`、`CAP_FOWNER`、`CAP_DAC_OVERRIDE`。开发中二者相同，从未暴露（spike S1）。
+3. **Node 默认 `server.requestTimeout` 为 300 s**：Control Plane 与 Worker 的 Gateway listener 未设置，慢速大文件上传可能在 5 分钟
+   时被 Node 以 408 截断（与反向代理超时无关）。需实测（S4）。
+4. **`MODEL_GATEWAY_ADMIN_URL` 只接受 loopback HTTP**：Control Plane 若放在容器网络中按服务名访问 LiteLLM 会被拒绝；这约束
+   部署拓扑（19.3 采用宿主机 loopback）。
+5. **v0.13 基线**（tag `v0.13.0`）：Worker 协议 v1、migration `0001`～`0009`、单一 `phase7-toolchain` 镜像；容器根可写、home 在
+   容器可写层（Phase 15 前的 legacy 容器，需 `migrate-legacy-workspace.sh`）；Workspace 网络为 `br-<id>`（Phase 14 起在停止状态下
+   自动迁移为 `arw-`）；`WORKER_MANAGED_ROOT` 不要求 XFS。从 v0.13 升级到 v1.0 因此包含：数据库 `0010`～`0014`、协议 v1→v7、
+   受管根迁移到 XFS、出口 unit、legacy 容器迁移、镜像 pin（19.9.3）。
+6. 开发库中的 Workspace 使用本地构建的 `agent-runtime:phase18-pi1.1-r2`（worker-a 构建，`docker save | load` 到 worker-c）。按
+   “同一 tag 不重建”规则，v1.0 重新构建的镜像必须使用新 tag（19.4.2、Q4）。
+
+### 19.2 范围与非目标
+
+范围：
+
+- **发布物**：一个按架构的平台发布包（Control Plane、Worker、运维 CLI、migration、Portal 静态文件、部署模板、pin 的 Node 运行时），
+  由 CI 构建并带校验和；Runtime 镜像在一台主机上构建一次、以归档分发、各 Worker 按同一 digest pin（19.4，不使用镜像仓库）。
+- **部署模板**（ARM64 优先）：Control Plane 与 Worker 的 systemd unit（含加固与最小 capability）；Control Plane 主机上 PostgreSQL、
+  LiteLLM、nginx 的 compose 模板（pin digest）；配置与密钥文件布局；运维脚本（19.5）。
+- **TLS 与反向代理**：Portal 与 wildcard Workspace 入口、Worker 专用的内部入口（控制通道、模型网关），SPA fallback、WebSocket /
+  SSE / 大文件上传、日志脱敏、安全响应头；nginx 模板 + 通用要求文档（便于换用企业已有代理）（19.6）。
+- **生产模型网关**：替代开发用 `LITELLM_REMOTE_BIND`（19.7）。
+- **小型代码变更**：移除 `RUNTIME_IMAGE`/`RUNTIME_VERSION`；默认 Runtime 镜像改为 v1.0 镜像；migration 显式执行与“数据库比程序新”
+  拒绝启动；构建版本注入；Worker 上报软件版本（协议 v7、migration `0014_release`，Q6）；Gateway 上传超时（19.8）。
+- **升级与回滚流程**：常规版本升级、Worker 升级、协议同时升级、数据库迁移与回滚；v0.13 → v1.0；当前开发环境（alpha.6）→ v1.0
+  生产形态（19.9）。
+- **外部备份说明**与恢复语义（19.10）。
+- **发布前完整回归与安全复查**（19.11、19.14），发布 `v1.0.0-rc.1` 与 `v1.0.0`。
+- 文档：新增 `docs/ops/README.md`、`docs/ops/02-tls-and-dns.md`、`docs/ops/20-upgrade.md`、`docs/ops/21-backup-restore.md`、
+  `docs/ops/22-offline-deployment.md`（AMD64）、`docs/ops/23-build-from-source.md`（AMD64）；README、各 runbook 中“Phase 19 提供”的
+  占位改为实际内容；`AGENTS.md`、`docs/progress.md`、路线图更新为 v1.0 状态。
+
+非目标（v1.0 不做）：
+
+- Control Plane 主机的一次性容器部署（Phase 20，19.18）。
+- Kubernetes / Helm、Control Plane 多实例与零停机升级、PostgreSQL 高可用 / 复制 / 大版本升级。
+- 平台内备份、快照、跨 Worker 恢复（D5）；平台不调度、不触发备份。
+- ACME / 证书自动签发与续期、企业 PKI 集成、密钥管理系统（Vault 等）集成；只提供手工流程与一个最小内部 CA 辅助脚本（19.6）。
+- 自动更新、批量远程升级 Worker、平台管理宿主机防火墙（只给出示例规则与验收检查）。
+- bit-for-bit 可复现构建、Debian snapshot pin（评估结论见 19.4.3）。
+- 宣称 AMD64 生产支持（D2：CI 原生构建与测试通过即可，发布说明标注“仅 CI 证据”）。
+- LiteLLM、PostgreSQL、Prometheus/Grafana 的版本升级（保持 Phase 16/17 的 pin）。
+- 更换 Workspace UID 或启用 Docker userns-remap（只做文档与检查，Q12）。
+
+建议实现顺序：① 构建与发布包（19.4.1、19.8 的版本与 migration 变更）→ ② systemd unit、运维 CLI 与脚本（19.5）→ ③ nginx 模板与
+compose（19.6、19.7）→ ④ Runtime 镜像工作流与拉取辅助（19.4.2）→ ⑤ 协议 v7 与 Worker 版本（19.8）→ ⑥ 文档（部署、升级、
+备份）→ ⑦ 回归与安全复查。
+
+### 19.3 部署架构
+
+```text
+用户网络 ──443──▶ ┌──────────── Control Plane 主机 ────────────┐
+                 │ nginx（host 网络）                              │
+                 │  :443  portal.<域>      → 静态 Portal + /api、/auth → 127.0.0.1:3000
+                 │        *.agent.<域>     → 127.0.0.1:3001（Workspace Gateway，保留 Host）
+                 │  :8443 （仅 Worker 网络）/api/workers/connect → 127.0.0.1:3000（WebSocket）
+                 │  :8444 （仅 Worker 网络）模型推理路径      → 127.0.0.1:4400（LiteLLM）
+                 │ agent-runtime-control-plane（systemd）127.0.0.1:3000 / :3001 / :9464
+                 │ PostgreSQL（compose，127.0.0.1:5432）  LiteLLM（compose，127.0.0.1:4400）
+                 └────────────────────────────────────────────────┘
+                        │ https（内部 CA）→ Worker Gateway :3100
+Worker 网络 ◀───────────┘
+┌──────────── Worker 主机 ×N ────────────┐
+│ agent-runtime-egress（开机早于 Docker）  │
+│ agent-runtime-worker（systemd，非 root，最小 capability）
+│   wss → CP :8443；https → CP :8444；Worker Gateway :3100（TLS，只允许 CP 主机）
+│ Docker Engine（不开放 TCP）；Workspace 容器（pi-web 只在 127.0.0.1）
+│ /var/lib/agent-runtime（独立 XFS，prjquota）
+└────────────────────────────────────────┘
+```
+
+- **单机部署**（Control Plane 与 Worker 同一主机）是同一模板的特例：Worker 的 `CONTROL_PLANE_URL` 指向本机 `:8443`，Worker
+  Gateway 监听 `127.0.0.1:3100`。仍保持独立进程与独立系统用户（第 9.1 节）。
+- **Control Plane 主机上的 platform 服务都绑定 loopback**，只有 nginx 对外监听 443（用户）与 8443/8444（Worker 网络）。这满足
+  `MODEL_GATEWAY_ADMIN_URL` 的 loopback 要求，`AUTH_TRUSTED_PROXIES` 只需 `127.0.0.1/32,::1/128`，与已验收的开发拓扑一致。
+  nginx 使用 host 网络（仅平台服务，不涉及 Workspace，第 4 节的限制针对 Workspace 容器）。
+- **Worker 控制通道不再经用户入口**：公开 443 对 `/api/workers/` 返回 404；Worker 只能经 8443 连接。8443/8444 由宿主机防火墙限制为
+  Worker 地址（文档给出示例规则，验收以端口扫描确认）。
+- **全部跨主机链路使用 TLS**：用户 → 443（企业证书或内部 CA，wildcard）；Worker → 8443/8444、Control Plane → Worker Gateway
+  （内部 CA；Node 进程以 `NODE_EXTRA_CA_CERTS` 信任）。代码仍允许 HTTP（开发需要），生产模板与安全复查脚本把明文跨主机链路
+  标为不合格（Q8）。
+- **数据位置不变**：PostgreSQL 数据目录（`/var/lib/agent-runtime-postgres`，bind 挂载，便于外部备份定位）与各 Worker 的
+  `WORKER_MANAGED_ROOT`；其余均可由发布物、镜像与配置重建（19.10）。
+
+端口表（生产模板）：
+
+| 主机 | 端口 | 监听 | 可达方 |
+|---|---|---|---|
+| CP | 443（+80 只做跳转） | nginx | 用户网络 |
+| CP | 8443、8444 | nginx | 仅 Worker 主机 |
+| CP | 3000、3001、9464、4400、5432 | 127.0.0.1 | 本机 |
+| Worker | 3100 | Worker Gateway（TLS），绑定 Worker 内部地址 | 仅 CP 主机 |
+| Worker | 3101 | 模型中继 | 仅本机 `arw-*` 接口（Phase 16 nft 规则） |
+| Worker | 动态 | pi-web | 127.0.0.1 |
+| 两者 | 22 | sshd | 管理网络（不属于平台） |
+
+### 19.4 发布物与构建
+
+#### 19.4.1 平台发布包
+
+- **构建**：`esbuild`（pin 版本，加入 devDependencies）把各入口打成 ESM bundle——`control-plane`（`server.ts`）、`worker`、运维 CLI
+  （`create-user`、`provision-worker`、`unlock-auth`、`migrate-cli`，合并为一个按子命令分派的 `cli`）；workspace 包被打入 bundle，
+  npm 依赖保持外部，由 `pnpm deploy --prod --frozen-lockfile` 生成生产 `node_modules`（保留 lockfile 解析结果，不在目标机安装）。
+  `pino-pretty` 等开发依赖不进入发布包（`LOG_FORMAT=pretty` 在发布包中启动即报错，现有行为）。
+- **Node 运行时**：发布包内含官方 Node 二进制（Q9：24.x LTS，pin 精确版本与 nodejs.org `SHASUMS256.txt` 中的校验和，CI 下载后校验）。
+  目标机不需要安装 Node / pnpm，也不使用发行版 Node。CI 的 Node 同步改为同一版本。
+- **布局**：`agent-runtime-<版本>-linux-<arch>.tar.gz`
+
+  ```text
+  agent-runtime-<版本>/
+    release.json        # version、commit、protocolVersion、migrations[]、defaultRuntimeImage、node 版本、构建时间
+    bin/node  bin/agent-runtime-ctl  bin/agent-runtime-image  bin/migrate-legacy-workspace  …
+    lib/control-plane.mjs  lib/worker.mjs  lib/cli.mjs  node_modules/
+    migrations/*.sql    portal/（apps/web/dist）
+    deploy/             # systemd unit、compose、nginx 模板、env 示例、脚本
+  ```
+
+  另附 `SHA256SUMS`。版本号来自 git tag（`v1.0.0-rc.1` → `1.0.0-rc.1`）；分支上手动触发时为 `0.0.0-<短 commit>`，只用于验收。
+- **工作流** `release.yml`：tag `v*` 推送或 `workflow_dispatch`；ARM64 与 AMD64 原生 runner 各构建一份；冒烟（解包后用发布包内的 Node
+  启动 Control Plane 连接 CI PostgreSQL 服务：未迁移时拒绝启动、`agent-runtime-ctl db:migrate` 后 `/ready` 为 200；Worker bundle
+  `--check-config` 解析示例配置）；nginx 模板测试（19.12）；产物为 GitHub Release（tag 时，预发布标记 `-rc`）或工作流 artifact
+  （手动触发）。`v1.0.0` 由 `v1.0.0-rc.1` 的产物**晋升**（同一文件、同一校验和，不重新构建），Q13。
+
+#### 19.4.2 Runtime 镜像：构建一次、按 digest 分发（不使用镜像仓库，2026-10-19 修订）
+
+负责人决定（Q3 修订）：GitHub 为普通账户，私有包额度不足以存放约 5.4 GB × 架构数的 Runtime 镜像，**v1.0 不使用镜像仓库**。镜像在一台构建
+主机（worker-a）上构建一次，以镜像归档分发到各 Worker，按同一 digest pin：
+
+- **构建**：`deploy/production/scripts/build-runtime-image.sh <tag> <runtime_version>`：本机原生构建（与 `runtime-toolchain.yml` 相同步骤）→
+  `verify-image.sh` → 拒绝已存在的本地 tag（落实“同一 tag 不重建”）→ 写出构建清单（`dpkg-query -W` 全部系统包、`npm ls --all`、基础镜像
+  digest、构建时间、commit）与 `docker save | zstd` 归档及其 `sha256`。CI 的 `runtime-toolchain.yml` 继续只做双架构原生构建与验证，不推送、
+  不上传镜像。
+- **分发**：`agent-runtime-image load <归档>`（Worker 主机）：校验归档 `sha256` → `docker load` → 校验平台为本机架构、带
+  `io.agent-runtime.runtime.version` 标签 → 输出可直接粘贴的 `RUNTIME_IMAGES` 项（`<本地名>@sha256:<digest>`）。也可直接
+  `docker save <tag> | ssh <worker> docker load`（开发环境现有做法），再用 `agent-runtime-image verify <本地名>` 取 digest。`docker save/load`
+  保持镜像 digest 不变（Phase 18 验收已在 worker-a → worker-c 上确认）。
+- **镜像引用与仓库解耦**：`RUNTIME_IMAGES` 与 `workspaces.runtime_image` 使用本地逻辑名（如 `agent-runtime:2026.10-pi1.1`），不含仓库主机。
+  企业已有内部仓库（Harbor 等）时，`docs/ops/22-offline-deployment.md` 说明推送与按 digest 拉取后 `docker tag` 为同一本地名的做法（可选，平台不依赖）。
+- **v1.0 默认 Runtime 镜像**（Q4）：在 worker-a 上以上述脚本构建新 tag `agent-runtime:2026.10-pi1.1`（`runtime_version` 同名），Dockerfile 与
+  `phase18-pi1.1-r2` 相同（pi-web 0.12.0 + Pi 1.1.0，lockfile 固定），系统包按构建当天解析（差异见构建清单）。Control Plane
+  `DEFAULT_RUNTIME_IMAGE` 默认值、`worker.env.example`、`test:e2e:runtime`、`runtime-toolchain.yml` 同步改为该名。开发环境的 Workspace 经
+  Phase 18 的升级机制从 `phase18-pi1.1-r2` 切到它。
+- 平台发布包（约数十 MB）仍由 CI 构建：tag 时作为 GitHub Release 附件；分支上手动构建时由同一脚本 `pnpm release:build` 在本机生成（不占用
+  Actions artifact 额度）。
+
+#### 19.4.3 Debian snapshot pin 与可复现构建（评估）
+
+结论：**v1.0 不采用**，改为“构建一次 + 按 digest 分发 + 构建清单”（Q5）。
+
+| 方案 | 收益 | 代价 |
+|---|---|---|
+| snapshot.debian.org pin（`sources.list` 指向固定时间点） | 重建同一 Dockerfile 得到相同的系统包版本；便于审计 | snapshot 服务速度慢、常见限流与超时（CI 构建 20～40 分钟会进一步变长且不稳定）；pin 后安全更新需手动推进时间点；对 Node/Rust/Playwright 下载不起作用 |
+| bit-for-bit 可复现（`SOURCE_DATE_EPOCH`、去时间戳、固定所有下载） | 第三方可独立验证镜像内容 | 需要处理 npm/cargo/Playwright 浏览器下载、文件时间戳、层顺序；工作量远超本 Phase，收益在“只分发一次构建产物”后很小 |
+
+Phase 18 暴露的问题（各 Worker 各自构建导致内容不同、同名 tag 内容漂移）由“只构建一次、按 digest 拉取、同一 tag 不重建”根治；构建清单
+满足“这个镜像里到底是什么版本”的审计需求。重新构建总是产生新 tag，与 18.15 的流程一致。如将来有合规要求，再单独评估。
+
+### 19.5 安装布局、systemd 与密钥
+
+**路径与用户**：
+
+| 路径 | 属主 / 权限 | 内容 |
+|---|---|---|
+| `/opt/agent-runtime/releases/<版本>/` | root，只读 | 解包的发布包 |
+| `/opt/agent-runtime/current` | root | 指向当前版本的**相对**符号链接；切换用同目录临时链接 + `rename`（原子） |
+| `/etc/agent-runtime/control-plane.env` | `root:agent-runtime-cp 0640` | Control Plane 配置（含密钥） |
+| `/etc/agent-runtime/worker.env` | `root:agent-runtime 0640` | Worker 配置（含密钥） |
+| `/etc/agent-runtime/{metrics.token,catalog.json,litellm.env,postgres.env}` | 0640 / 0600 | 文件型配置；`litellm.env`、`postgres.env` 仅 root（compose 读取） |
+| `/etc/agent-runtime/tls/` | root 0750 | 公网证书、内部 CA、各服务证书；Worker 的私钥 `root:agent-runtime 0640` |
+| `/etc/agent-runtime/nginx/` | root | nginx 配置（由模板渲染） |
+| `/var/lib/agent-runtime-postgres/` | PostgreSQL 容器用户 | PostgreSQL 数据（备份对象） |
+| `/var/lib/agent-runtime/` | Worker 用户 | Worker 受管根（独立 XFS，备份对象） |
+
+系统用户：`agent-runtime-cp`（Control Plane，无附加组、无 shell）；`agent-runtime`（Worker，`docker` 组，无 shell）。二者 UID 均不为
+1000。
+
+**systemd unit**（`deploy/production/systemd/`）：
+
+- `agent-runtime-control-plane.service`：`User=agent-runtime-cp`；`EnvironmentFile=/etc/agent-runtime/control-plane.env`；
+  `Environment=NODE_EXTRA_CA_CERTS=/etc/agent-runtime/tls/internal-ca.crt`；`ExecStart=/opt/agent-runtime/current/bin/node
+  /opt/agent-runtime/current/lib/control-plane.mjs`；`After=/Wants=` PostgreSQL compose unit 与 `network-online.target`；
+  `Restart=on-failure`；`LimitNOFILE=65536`（长连接）；加固：`NoNewPrivileges`、`ProtectSystem=strict`、`ProtectHome`、`PrivateTmp`、
+  `PrivateDevices`、`CapabilityBoundingSet=`（空）、`RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`、`SystemCallFilter=@system-service`、
+  `ReadOnlyPaths=/etc/agent-runtime`。
+- `agent-runtime-worker.service`：`User=agent-runtime`、`SupplementaryGroups=docker`；`AmbientCapabilities=` 与
+  `CapabilityBoundingSet=` 为 S1 确定的最小集合（预期 `CAP_NET_ADMIN CAP_SYS_ADMIN` + `CAP_CHOWN CAP_FOWNER`，必要时
+  `CAP_DAC_OVERRIDE`）；`After=Requires=` `docker.service`、`agent-runtime-egress.service` 与受管根的 mount unit
+  （`RequiresMountsFor=/var/lib/agent-runtime`）；`ProtectSystem=strict` + `ReadWritePaths=/var/lib/agent-runtime`；`ProtectHome`；
+  `PrivateTmp`；`Restart=always`；`KillMode=mixed`、`TimeoutStopSec=30`。Worker 停止不影响 Workspace 容器（容器属于 Docker，第 6 节）。
+- `agent-runtime-platform.service`（CP 主机，`Type=oneshot`/`RemainAfterExit`）：`docker compose -f /etc/agent-runtime/compose.yml up -d`，
+  使 PostgreSQL、LiteLLM、nginx 随开机启动并排在 Control Plane 之前。
+- 现有 `agent-runtime-egress.service` 不变。`systemd-analyze verify` 在 CI 中检查全部 unit；`systemd-analyze security` 的结果记录在安全复查中。
+
+**运维 CLI** `agent-runtime-ctl`（在 Control Plane 主机，root 执行，内部以 `agent-runtime-cp` 身份并加载其 env 文件运行，避免密钥出现
+在命令行）：`version`、`db:status`（已应用 / 待执行 / 未知）、`db:migrate`、`user:create`、`auth:unlock`、`worker:provision|rotate|
+configure-gateway|disable|enable|delete`；`--release <版本>` 使用已安装但尚未激活的版本（升级时先迁移再激活）。语义与现有 `pnpm` 命令
+完全相同（同一代码），输出的 token 只打印一次。
+Worker 主机：`agent-runtime-image`（19.4.2）、`migrate-legacy-workspace`（由 `tools/dev/` 移入发布包，逻辑不变，读取 `worker.env`）。
+发布管理：`deploy/production/scripts/release.sh install <tar.gz> | activate <版本> | list | prune`（安装前校验 `SHA256SUMS`；`activate`
+只切换符号链接，不重启服务）。初始化脚本：`init-postgres.sh`（创建 `agent_runtime` 与 `litellm` 库及独立角色、随机口令写入 env 文件）、
+`init-secrets.sh`（`SESSION_SECRET`、metrics token、LiteLLM master key）、`internal-ca.sh`（最小内部 CA：签发 CP 内部入口与各 Worker
+Gateway 的服务器证书，SAN 由参数给出；企业有 PKI 时不用）。脚本只写 `/etc/agent-runtime` 下的目标文件，已存在时拒绝覆盖。
+
+**密钥原则**：密钥只在 `/etc/agent-runtime` 的 env/文件中（0640/0600），不进入命令行参数、unit 文件、compose 文件正文、仓库或日志；
+`journalctl` 中不得出现任何密钥（安全复查以已知前缀 grep 检查）。不引入 `*_FILE` 变体（`EnvironmentFile` 已满足）。
+
+### 19.6 反向代理与 TLS
+
+模板：`deploy/production/nginx/`（nginx 官方镜像，pin digest，host 网络，只读挂载 `/opt/agent-runtime` 与 `/etc/agent-runtime/{nginx,tls}`）。
+另在 `docs/ops/01-planning.md` 列出与实现无关的**通用要求**，供换用企业已有的 nginx / HAProxy / F5 等：
+
+**Portal（`portal.<域>`）**：
+
+- 静态根为 `/opt/agent-runtime/current/portal`（相对符号链接在容器内解析，切换版本后无需重建 nginx 容器，`nginx -s reload` 即可）。
+- **SPA fallback**：`try_files $uri /index.html`；`/assets/*`（带哈希）`Cache-Control: public, max-age=31536000, immutable`，
+  `index.html` `no-cache`；不存在的 `/assets/*` 返回 404（不回落到 index，避免缓存错误内容）。
+- `/api/`、`/auth/` → `127.0.0.1:3000`，`X-Forwarded-For $remote_addr`（**覆盖**而非追加；前面还有企业负载均衡时改为其地址并相应配置
+  `AUTH_TRUSTED_PROXIES`）、`X-Forwarded-Proto https`；`/api/workers/` 返回 404；`/health`、`/ready` 不对外。
+- 响应头：`Strict-Transport-Security`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、
+  `Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://*.agent.<域>`
+  （Portal 以表单 POST 进入 Workspace Host，第 4 节交换流程；最终 CSP 以 Portal 实测为准）。
+
+**Workspace（`*.agent.<域>`）**：
+
+- 原样转发 `Host`（Gateway 以 `WORKSPACE_BASE_URL` 的主机与端口严格匹配，端口为 443 时 Host 不带端口）→ `127.0.0.1:3001`；不添加、
+  不改写安全响应头（pi-web 与 Gateway bootstrap 自己的 CSP 原样通过）。
+- WebSocket：`proxy_http_version 1.1`、`Upgrade`/`Connection` 映射；SSE 与流式响应：`proxy_buffering off`、`proxy_cache off`、
+  `X-Accel-Buffering` 不改写；上传：`client_max_body_size 0`、`proxy_request_buffering off`。
+- **超时**：`proxy_read_timeout` / `proxy_send_timeout` 3600 s（Terminal、长时间无输出的 Agent 任务）；最终取值由 S4 对 pi-web 的心跳
+  行为实测后确定并写入文档。Control Plane / Worker Gateway listener 的 Node `requestTimeout` 同时处理（19.8）。
+- 证书：wildcard `*.agent.<域>` 只覆盖一级标签，正好对应 `<workspace-uuid>.agent.<域>`；Portal 证书可与之合并（SAN）。
+
+**内部入口**（8443、8444，只对 Worker 网络）：8443 只代理 `/api/workers/connect`（WebSocket，读超时大于心跳间隔的 3 倍）；8444 只代理
+Worker 中继会转发的推理路径（`ALLOWED_RELAY_PATHS`，`POST`）与 Worker 使用的健康检查路径，其余（含 `/key/*`、`/user/*`、`/metrics`、
+UI）一律 404。证书来自内部 CA；Worker 以 `NODE_EXTRA_CA_CERTS` 信任。
+
+**日志**：自定义 `log_format`，只记录时间、客户端地址、方法、`$uri`（不含 query string）、状态、字节数、耗时、upstream 状态；不记录
+Cookie、`Authorization`、Referer。与平台日志规则一致（第 10 节）；OAuth2 query 模式的 UserInfo 与 OIDC/OAuth2 callback 的 query 因此
+不进入 nginx 日志。
+
+**TLS**：TLSv1.2+、现代密码套件（Mozilla intermediate）、OCSP stapling 关闭（内部 CA 无 OCSP）；HTTP 80 只做 301 跳转到 443。
+
+#### 19.6.1 哪些链路加密、签哪些证书（Q8）
+
+原则：**离开本机的链路都加密，只在 loopback 或本机内部网桥上的链路不加密**。
+
+| 链路 | 是否加密 | 证书 / 信任 |
+|---|---|---|
+| 浏览器 → nginx 443（Portal、Workspace） | 是 | 证书①，用户的浏览器/操作系统信任内部 CA |
+| Worker → nginx 8443（控制通道）、8444（模型网关） | 是 | 证书②，Worker 以 `NODE_EXTRA_CA_CERTS` 信任内部 CA |
+| Control Plane → Worker Gateway 3100 | 是 | 证书③（每台 Worker 一张），Control Plane 以 `NODE_EXTRA_CA_CERTS` 信任内部 CA |
+| LiteLLM → 上游模型服务商 | 是 | 服务商的公网证书（系统 CA） |
+| nginx → Control Plane 3000/3001、Control Plane → PostgreSQL / LiteLLM、Prometheus → 指标 | 否 | 都在 CP 主机 127.0.0.1 |
+| Worker Gateway → pi-web | 否 | Worker 主机 127.0.0.1 |
+| Workspace → 本机模型中继 3101 | 否 | 本机 Workspace 网桥；容器内没有任何凭据，中继注入虚拟 key 后经②加密转发 |
+
+单机部署（CP 与 Worker 同一主机）时 ②③ 的流量也不离开本机，但模板仍按跨主机方式配置（同一份文档，加第二台 Worker 时不用改）。
+
+需要签发的证书（`internal-ca.sh`，不使用 ACME）：
+
+0. **内部根 CA**（一次，10 年；私钥离线保存，只用于签发）：`ca.crt` 分发给浏览器客户端、Control Plane 与每台 Worker。
+1. **用户入口证书**：SAN `portal.<域>`、`*.agent.<域>`（wildcard 只覆盖一级，正好是 `<workspace-uuid>.agent.<域>`），装在 CP 主机 nginx。
+2. **内部入口证书**：SAN 为 Worker 访问 CP 时使用的名字或 IP（如 `cp.<域>`），装在 CP 主机 nginx 的 8443/8444。
+3. **Worker Gateway 证书**：每台 Worker 一张，SAN 为 `WORKER_GATEWAY_BASE_URL` 中的主机名或 IP，装在该 Worker
+   （`WORKER_GATEWAY_TLS_{CERT,KEY}_PATH`）。
+
+服务器证书有效期 397 天（满足各浏览器对证书期限的限制），到期前用同一脚本重签并 `nginx -s reload` / 重启 Worker；文档给出到期检查命令
+（`openssl x509 -enddate`），并在 Phase 17 告警之外由运维日历提醒（不新增指标）。企业已有 PKI 或公网证书时直接替换对应文件即可，平台不关心
+签发方式。
+
+### 19.7 生产模型网关
+
+- LiteLLM 与 PostgreSQL 在 CP 主机同一 compose（`deploy/production/compose.yml`），pin 版本不变（Phase 16）。只发布到 `127.0.0.1:4400`：
+  Control Plane 管理调用与 Prometheus 抓取走 loopback；Worker 经 nginx 8444（TLS、路径白名单）访问，`WORKER_MODEL_GATEWAY_URL=
+  https://<CP 内部地址>:8444`。开发用 `LITELLM_REMOTE_BIND` 保留在开发 compose 中并注明 DEV ONLY，生产文档不再出现。
+- 隔离不变：Worker 把 `WORKER_MODEL_GATEWAY_URL` 主机加入本机出口保护集合（现有逻辑），Workspace 不可达网关与 CP 主机任何端口。
+- `config.yaml`、`catalog.json` 安装到 `/etc/agent-runtime/`（不再从仓库目录 bind 单个文件，消除 Phase 18 记录的“切换分支后需
+  force-recreate”问题；修改后仍需重建该容器，runbook 写明）。
+- `init-postgres.sh` 创建 `litellm` 库与角色；`create-litellm-metrics-key.sh` 移入发布包脚本。
+
+### 19.8 代码变更
+
+| 变更 | 内容 | fail-closed |
+|---|---|---|
+| 移除过渡镜像写法 | Worker 删除 `RUNTIME_IMAGE`、`RUNTIME_VERSION`；`RUNTIME_IMAGES` 必填；环境中仍存在旧变量时**拒绝启动**并提示改写方式（不静默忽略） | 是 |
+| 默认 Runtime 镜像 | `DEFAULT_RUNTIME_IMAGE` 默认值 → `agent-runtime:2026.10-pi1.1`（Q4）；文档示例同步 | — |
+| migration 显式执行 | Control Plane 新配置 `DATABASE_MIGRATE_ON_START`（默认 `true`，开发行为不变；生产模板为 `false`）。为 `false` 且有待执行 migration 时拒绝启动并列出名称；`agent-runtime-ctl db:migrate` / `db:status`（`pnpm db:migrate` 同一实现） | 是 |
+| 数据库比程序新 | 启动与 `db:migrate` 时，`platform_migrations` 中存在本版本不认识的名称即拒绝运行（“数据库来自更新的版本，请使用该版本或恢复升级前的备份”） | 是 |
+| 版本注入 | 构建时注入版本与 commit（bundle `define`）；开发运行仍为 `dev`。用于日志、`agent_runtime_build_info`（Phase 17 指标的 `version` 标签）、`GET /api/admin/system`（新增只读：Control Plane 版本、协议版本、数据库 migration 状态、默认 Runtime 镜像）与 Admin Workers 页首 | — |
+| Worker 软件版本（Q6） | 协议 **v7**：`worker.hello` 增加必填 `workerVersion`（版本字符串，与 `release.json` 同源）；migration `0014_release` 增加 `workers.worker_version text null`（hello 时写入）；Admin Workers 显示，与 Control Plane 版本不同时显示提示（协议版本才是硬门槛）。v6 hello 被拒绝 | 是（协议） |
+| Gateway 上传超时 | Control Plane Workspace Gateway 与 Worker Gateway 的 HTTP server 设置 `requestTimeout = 0`（不限制整个请求体的接收时间），保留 `headersTimeout`；以 S4 结论为准 | — |
+| Worker 配置自检 | `worker --check-config`：只解析与校验配置并退出（CI 冒烟与安装文档使用） | — |
+| 运维脚本归位 | `migrate-legacy-workspace.sh`、`init-litellm-db.sh`、`init-metrics-token.sh`、`create-litellm-metrics-key.sh` 移到 `deploy/production/scripts/`（开发文档引用新位置）；`tools/dev/` 只留开发专用 | — |
+
+不改变：Workspace 生命周期、调度、出口、配额、模型中继、空闲回收与镜像升级的语义；Portal 只增加版本显示。
+
+### 19.9 升级与回滚流程
+
+写入 `docs/ops/20-upgrade.md`。每个发布在 `release.json` 与发布说明中声明：协议版本是否变化、包含哪些 migration、最低可升级来源版本、
+默认 Runtime 镜像是否变化。
+
+#### 19.9.1 常规版本升级（生产形态 X → Y）
+
+1. **准备**：阅读发布说明；在所有主机 `release.sh install`（不激活）；若 Y 改变默认 Runtime 镜像，先按 18.15 在所有 Worker 上架新镜像。
+2. **备份**：Y 含 migration 时**必须**先做 PostgreSQL 逻辑备份（`agent_runtime` 与 `litellm` 两库，19.10），记录备份文件名。Worker 数据
+   不受平台升级影响，按日常备份策略即可。
+3. **Control Plane**：`systemctl stop agent-runtime-control-plane` → `agent-runtime-ctl --release Y db:migrate`（单事务，失败则整体不生效）
+   → `release.sh activate Y` → `systemctl start` → `/ready` 200、日志无错误、Admin“系统”显示 Y。期间 Workspace 容器与 Agent 继续运行；
+   浏览器到 Workspace 的连接中断（Gateway 在 Control Plane 进程内），用户刷新即可（Session 由 pi-web 恢复，第 40 节）。
+4. **Worker**（协议变化时需在 Control Plane 之后立即进行；未变化时可滚动进行）：逐台 `release.sh activate Y` → `systemctl restart
+   agent-runtime-worker` → Admin Workers 中该 Worker `ONLINE`、版本 Y，其 Workspace 经 reconcile 回到原状态。协议变化期间，未升级的
+   Worker 被拒绝（`WORKER_OFFLINE`，容器不受影响），升级后自动恢复。
+5. **验证**：19.14 F 中的快速回归子集（登录、打开 Workspace、Prompt、Terminal、Files、模型调用、Admin 页面、指标抓取）。
+
+#### 19.9.2 回滚
+
+- **Y 不含 migration**：所有主机 `release.sh activate X` 并重启（协议变化时先 Worker 后 Control Plane 亦可，二者终态一致）。
+- **Y 含 migration**：数据库不支持向下迁移；X 的程序会因“数据库比程序新”拒绝启动（v1.0 起）。步骤：停止 Control Plane → 用第 2 步的备份
+  恢复两库（`dropdb`/`createdb` + `pg_restore`，文档给出命令）→ `activate X` → 启动 → Worker 回到 X。**代价**：升级后在平台中产生的
+  变更丢失（新用户、新 Workspace、Audit、配置）；升级后新建的 Workspace 在 Worker 上的数据成为 `MANAGED_ORPHAN`（只告警、不删除，
+  需要时由管理员手工处理），升级后删除的 Workspace 恢复为元数据存在、数据缺失（reconcile 为 `ERROR`）。因此回滚窗口应尽量短，且在
+  升级后的验证阶段内决定。
+- Runtime 镜像的升级/回滚是独立流程（18.4、18.15），与平台版本回滚互不依赖。
+
+#### 19.9.3 从 v0.13（开发形态）升级到 v1.0
+
+v0.13 没有生产形态，实际部署都是开发形态（`tsx`、开发 compose 的 PostgreSQL、本地构建的 `phase7-toolchain`）。步骤（停机，时长取决于
+数据量）：
+
+1. **通知用户**：旧容器中 `/tmp` 与容器可写层（如自装的 rustup 组件）内容不会保留，需要的先移到 `/workspace`（Phase 15）。
+2. **备份**：`pg_dump` 开发库；外部工具复制 `/var/lib/agent-runtime`（19.10）。
+3. **停止**：Portal 中停止全部 Workspace（数据保留）；停止 Worker、Control Plane、Vite。
+4. **Worker 主机**：按 `storage-runbook.md` 第 3 节准备独立 XFS（`prjquota`）并原样迁入数据（`cp -a` / `rsync -aHAX --numeric-ids`）；安装
+   `nftables`、`xfsprogs` 与出口 unit；创建 `agent-runtime` 用户并按 S1 的清单调整 Worker 自有路径的属主（只改 Worker 自己的元数据与规则
+   目录，不改 Workspace 数据）；`sysctl` inotify 设置。
+5. **Control Plane 主机**：按 19.5/19.6 安装（发布包、compose、nginx、证书）；把开发库 `pg_dump` 恢复到生产 PostgreSQL（同名库）。
+6. **配置迁移**：按文档中的对照表把 `.env` 改写为 `control-plane.env`（`HOST=127.0.0.1`、`PORTAL_ORIGIN`/`WORKSPACE_BASE_URL` 改为 HTTPS
+   域名、`SESSION_COOKIE_SECURE=true`、`AUTH_TRUSTED_PROXIES`、`DATABASE_MIGRATE_ON_START=false`、新增的 Phase 14–18 配置），Worker env 改写为
+   `worker.env`（`CONTROL_PLANE_URL=wss://…:8443/…`、Worker Gateway TLS、`RUNTIME_IMAGES` 同时列出本机已有的 `phase7-toolchain`（以其
+   本地 digest pin）与 v1.0 镜像、`WORKER_MODEL_GATEWAY_URL`）。Worker 凭据、Workspace ID、用户、身份绑定不变。
+7. **数据库**：`agent-runtime-ctl db:migrate`（`0010`～`0014` 在一个事务中）；`worker:configure-gateway` 把各 Worker 的 Gateway 地址改为
+   `https://…:3100`。若启用模型网关：`init-postgres.sh` 创建 `litellm` 库、启动 LiteLLM。
+8. **启动**：Control Plane → Worker。Worker 以协议 v7 连接；reconcile 后 legacy 容器为停止状态、启动时提示需要迁移；`br-` 网络在停止状态下
+   迁移为 `arw-`。
+9. **逐个迁移 legacy Workspace**：Worker 主机执行 `migrate-legacy-workspace <id>`；Portal 启动 → 文件、home、Pi Session 可用（仍为
+   pi-web 0.9.0 / Pi 0.85.1）；再按需停止并“升级到 2026.10-pi1.1”（Phase 18 机制，会话可继续）。
+10. **验证**（19.14 B 的检查表）后，管理员在旧镜像的 Workspace 计数为 0 时从 `RUNTIME_IMAGES` 移除 `phase7-toolchain`。
+
+#### 19.9.4 当前开发环境（v1.0.0-alpha.6，开发形态）→ v1.0 生产形态
+
+19.9.3 的子集：无 XFS、legacy 容器与出口 unit 步骤（已具备）；需要 Worker 运行用户切换（属主调整）、PostgreSQL 迁移到生产位置、
+TLS 入口与内部入口、`RUNTIME_IMAGES` 切到仓库分发的镜像。是否在本 Phase 对 Q8B / worker-c 执行见 Q11。
+
+### 19.10 外部备份与恢复语义
+
+写入 `docs/ops/21-backup-restore.md`（落实 D5 与第 28 节；平台不执行、不调度任何备份）。
+
+| 对象 | 位置 | 方法与一致性 |
+|---|---|---|
+| 平台数据库 `agent_runtime` | CP 主机 PostgreSQL | `pg_dump -Fc`（单库内事务一致，运行中可做）；或停止 PostgreSQL 后对 `/var/lib/agent-runtime-postgres` 做文件系统/卷快照 |
+| 网关数据库 `litellm` | 同上 | 与平台库**紧接着**导出（二者之间不保证跨库一致，见下） |
+| Worker 受管根 | 各 Worker `WORKER_MANAGED_ROOT` | 首选：块设备/虚拟机磁盘/LVM 快照（先 `xfs_freeze -f`，快照后 `-u`）。文件级备份（restic、rsync 等）需保留数值 UID/GID、权限、硬链接、xattr；运行中的 Workspace 可能被拍到写入中途的文件，要求一致时先停止 Workspace |
+| 配置与密钥 | `/etc/agent-runtime/` | 单独备份并加密；丢失后 Worker 凭据需轮换、`SESSION_SECRET` 变化会使全部会话失效 |
+| 不需要备份 | `/opt/agent-runtime`、Docker 容器/网络/镜像、`/tmp` 数据 | 可由发布物、Runtime 镜像归档（**保留仍在使用的旧镜像归档**）与 Worker 重建；容器只读根，不含状态（Phase 15） |
+
+**备份中包含敏感数据**：PostgreSQL 中有密码哈希、session 哈希、Audit；`litellm` 库中有虚拟 key 记录与用量；受管根中有各 Workspace 的
+`metadata/model-key.json`（虚拟 key 明文）与用户文件。备份必须加密并限制访问。
+
+**XFS project 配额**：文件级工具不保留 project ID 与继承标记。恢复后由 Worker 在下一次 ensure/start 前重新打标记与设置上限（Phase 15
+已有路径），S3 验证；块级快照则原样保留。
+
+**恢复语义**（只支持“原 Worker 身份 + 原路径”；更换硬件时保持同一 `WORKER_ID`、凭据、`WORKER_MANAGED_ROOT` 与 Runtime 镜像即视为原
+Worker）：
+
+1. 停止该 Worker（若 Control Plane 也恢复，先停 Control Plane）；恢复受管根；恢复数据库（如需）；先启动 Control Plane 再启动 Worker。
+2. Worker reconcile 接管：容器仍在且一致 → 恢复原状态；容器缺失（新硬件、Docker 数据丢失）→ 按现有规则进入 `ERROR` 或停止状态，用户
+   “启动”时由 `workspace.ensure` 按当前配置重建容器（持久目录不动）——S3 确认 `ERROR` 状态下的启动路径，若不可行则在文档中给出管理员操作。
+3. 数据库与受管根来自不同时间点时（跨主机不可能原子）：数据库较旧 → 之后新建的 Workspace 数据成为 `MANAGED_ORPHAN`（告警、不删除）；
+   之后删除的 Workspace 元数据重新出现而数据缺失（`ERROR`，由用户删除）；数据库较新 → 受管根中缺失的 Workspace 为 `ERROR`。文档给出
+   核对与清理步骤。模型 key 在 `model_keys`、`litellm` 库与 `model-key.json` 三处不一致时的收敛由 S3 实测并写入文档。
+4. 跨 Worker 恢复（把 A 的数据放到 B）不支持；平台不会把它识别为 B 的 Workspace（`FOREIGN_MANAGED_RESOURCE`，只告警）。
+
+### 19.11 安全边界、fail-closed 与发布前安全复查
+
+**本 Phase 的安全不变量**：
+
+- 部署模板不得出现：Docker TCP API、Workspace 挂载 Docker socket、`--privileged`、Workspace host 网络、Worker 以 root 运行、
+  Control Plane 具有任何 capability、明文跨主机链路、对用户网络开放 3000/3001/3100/4400/5432/8443/8444/9464。
+- 公开入口不提供 Worker 控制通道、健康检查与指标；内部入口只暴露 Worker 需要的路径。
+- 版本/迁移/协议不匹配一律拒绝运行（19.8），不在不一致的 schema 或协议上“尽量工作”。
+- 日志（平台与 nginx）不含 query string、Cookie、Authorization、token；密钥只在 `/etc/agent-runtime` 受限文件中。
+- Runtime 镜像只从 pin 的 digest 使用；仓库中已存在的 tag 不被覆盖。
+
+**发布前安全复查清单**（结果逐项记录到 `docs/progress.md`，不合格项必须修复或由负责人明确接受）：
+
+1. **端口扫描**：从用户网络、Worker 网络、外部主机分别 `nmap` CP 与 Worker 主机，只出现端口表中的预期端口。
+2. **TLS**：证书链与 SAN；协议与套件（`openssl s_client`、`nmap --script ssl-enum-ciphers`）；HSTS；80 只跳转。
+3. **Cookie 与头**：Portal `__Host-` Cookie 带 `Secure; HttpOnly; SameSite=Lax`、无 `Domain`；Workspace Cookie host-only；Portal CSP、
+   `frame-ancestors`；Gateway bootstrap 的 CSP 经代理后不变。
+4. **入口路径**：公开 443 上 `/api/workers/connect`、`/health`、`/ready`、`/metrics` 不可用；8444 上 `/key/generate`、`/user/info`、`/metrics`
+   为 404；Workspace Host 不能经伪造 `Host` / `X-Forwarded-*` 访问他人 Workspace（沿用 Gateway 测试，在生产代理后复测）。
+5. **日志**：触发登录、SSO callback、Workspace 打开、带 query 的请求后检查 nginx 与 journald：无 query string、Cookie、token；以已知密钥
+   前缀 grep 全部日志为零。
+6. **密钥文件**：权限与属主；`ps -eo args` 中无密钥；unit 与 compose 文件中无密钥。
+7. **进程权限**：Worker 非 root、`CapEff`/`CapBnd` 等于设计集合；Control Plane 无 capability；`systemd-analyze security` 评分记录。
+8. **容器基线**：只读审计脚本 `deploy/production/scripts/audit-host.sh` 对每个受管容器检查非特权、cap-drop ALL、no-new-privileges、只读根、
+   只有四个受管 bind、无 Docker socket、非 host 网络、资源上限、端口只在 127.0.0.1；对宿主机检查出口表存在、配额生效、Docker 未监听 TCP、
+   UID 1000 账户情况；输出 PASS/FAIL。
+9. **出口**：在生产 Worker 的 Workspace 中运行 `egress-probe`：CP 主机全部端口（含 443/8443/8444）、PostgreSQL、Worker Gateway、内网 RFC1918
+   为 BLOCKED，公网 REACHABLE，模型中继可用。
+10. **依赖漏洞**：发布包 `pnpm audit --prod`、Runtime 镜像与第三方镜像（PostgreSQL、LiteLLM、nginx）用 pin 版本的 Trivy 扫描（Q14）；
+    HIGH/CRITICAL 逐项分级：可修复且相关的修复，不相关或无修复的记录理由。
+11. **Break-glass**：IdP 不可用时 Local Admin 可从管理网络登录。
+12. **表述**：README、文档、发布说明符合 `AGENTS.md` 第 14 节（不宣称 VM 级隔离、零信任等）；AMD64 只标“CI 证据”。
+
+### 19.12 测试计划
+
+单元 / 组件测试（CI 常规任务）：
+
+- Worker 配置：存在 `RUNTIME_IMAGE` 或 `RUNTIME_VERSION` 时拒绝启动；缺少 `RUNTIME_IMAGES` 拒绝启动；`--check-config` 成功/失败的退出码。
+- Control Plane 配置：`DATABASE_MIGRATE_ON_START` 解析；默认 Runtime 镜像。
+- migration（`agent_runtime_test`）：`false` + 待执行 → 拒绝启动并列出名称；未知 migration → 拒绝启动与拒绝 `db:migrate`；`db:status`
+  三类输出；`0014_release` 应用与回填。
+- **v0.13 数据升级**：在空库只执行 `0001`～`0009`，按 v0.13 的 schema 写入代表性数据（Local/外部身份用户、各状态 Workspace、
+  Worker、Audit、会话），再执行到最新；断言数据保留、约束与触发器生效、legacy Workspace 的状态与默认值符合 Phase 14–18 的预期。
+  （migration 文件不可修改，因此“用当前文件的前 9 个”等价于 v0.13。）
+- 协议 v7：`workerVersion` 正反例；v6 hello 被拒绝；版本写入 `workers.worker_version`；Admin API 返回。
+- Gateway：`requestTimeout` 为 0 时慢速上传超过默认 300 s 的等价测试（以可配置的小超时验证配置确实生效）。
+- `release.json` 与 bundle：版本注入、migration 列表与 `migrations/` 一致、协议版本一致。
+
+构建与部署产物测试（`release.yml` 与 PR CI 中的 `deploy` 任务）：
+
+- 发布包冒烟：19.4.1 所述；解包后的文件中没有 `.env`、源码映射以外的测试文件、开发依赖。
+- **nginx 模板**：渲染模板 + 测试证书，在 CI 中运行 pin 的 nginx 容器与桩上游：`nginx -t`；深链接 `/admin/users`、`/activity` 返回
+  `index.html`；`/assets/<存在>` 带 immutable 缓存头，`/assets/<不存在>` 为 404；`/api/*`、`/auth/*` 到达 CP 桩且 `X-Forwarded-For` 被
+  覆盖；公开 `/api/workers/connect` 为 404；Workspace Host 原样到达 Gateway 桩（含 `Host`），WebSocket 升级与双向数据、SSE 逐条到达（无
+  缓冲）；8443 只放行控制路径；8444 只放行推理路径与健康检查；访问日志不含 query string 与 Cookie。
+- `systemd-analyze verify` 全部 unit；`docker compose config` 校验 compose；shellcheck 全部脚本。
+- `build-runtime-image.sh`：本地已存在 tag 时失败；`agent-runtime-image load` 对归档校验和不符、平台不符、无版本标签的
+  镜像拒绝（fake Docker 单测 + 真实归档一次）。
+- `audit-host.sh`：对构造的违规容器（特权、挂载 docker.sock、可写根、host 网络）逐项报 FAIL。
+
+真实环境测试：现有全部套件（`pnpm test`、`test:e2e`、`test:e2e:runtime`（默认镜像改为 CI 镜像）、`test:egress`、`test:quota`、
+`test:model-gateway`、`promtool test rules`）在 rc 前完整运行一次并记录。
+
+**变异检查**（实现时执行并记录）：去掉未知 migration 检查；`DATABASE_MIGRATE_ON_START=false` 仍执行迁移；`RUNTIME_IMAGE` 被静默接受；
+v6 hello 被接受；nginx 公开入口代理 `/api/workers/`；日志格式包含 `$request`；不转发 `Host`；去掉 `Upgrade` 头映射；打开
+`proxy_buffering`；8444 放行 `/key/generate`；`X-Forwarded-For` 改为追加；`agent-runtime-image` 跳过 digest 校验；`release.sh install` 跳过
+校验和；`build-runtime-image.sh` 允许覆盖已有 tag；`audit-host.sh` 不检查 docker.sock 挂载——对应测试均应失败。
+
+### 19.13 开工 spike（编码早期，部分需要负责人）
+
+- **S1 Worker 专用用户与最小 capability**（需要一台可随意配置的 Worker 主机，Q10）：以 UID ≠ 1000 的 `agent-runtime` 用户运行 Worker，
+  从空 capability 开始逐项添加，直到 create/start/stop/delete、配额、出口、中继写 `models.json`、runtime 切换、legacy 迁移脚本全部通过；
+  记录最终集合与需要调整属主的 Worker 自有路径清单（用于 19.9.3/19.9.4）。
+- **S2 镜像归档分发**：`build-runtime-image.sh` 的归档在另一台 Docker 29（containerd 镜像存储）主机 `agent-runtime-image load` 后，镜像 ID
+  与构建主机相同、Worker pin 校验通过（Q3 修订后不再涉及镜像仓库）。
+- **S3 恢复演练**：在测试主机上对受管根做文件级备份，恢复到新的 XFS 与空的 Docker（无容器）；确认 reconcile 结果、启动重建、配额标记
+  重新生效；再对数据库与受管根制造时间差，确认 orphan / `ERROR` 表现与模型 key 收敛。
+- **S4 代理与长连接**：经 nginx + 两级 Gateway 测量 pi-web Terminal WebSocket 与 Prompt SSE 在长时间无输出时的行为（是否有心跳、间隔），
+  以及 >300 s 的慢速大文件上传；据此确定 `proxy_read_timeout` 与 `requestTimeout` 的最终取值。
+- **S5 bundle**：esbuild 打包 Control Plane / Worker（`openid-client`、`pino`、`dockerode`、`prom-client`、`postgres`）在发布包 Node 上运行
+  正常，记录包大小。
+
+### 19.14 验收
+
+自动验收：19.12 全部通过，CI 绿；`release.yml` 在分支上手动触发产出 ARM64 发布包（版本 `0.0.0-<commit>`）；worker-a 上构建并归档
+`agent-runtime:2026.10-pi1.1`。
+
+人工验收要点（详细步骤随各阶段交付说明给出，阶段划分见 19.17；设备分工见 19.17）：
+
+- **A. 从零部署**（生产 Control Plane = worker-a，与开发环境并存；生产 Worker = worker-c，先删除开发 Runtime、受管根数据并退出开发环境；
+  19.17），只按 `docs/ops/README.md` 操作，偏离文档之处即缺陷。OS 准备、Docker、独立
+  XFS、用户、出口 unit、发布包、`internal-ca.sh` 签发证书、dnsmasq、compose（PostgreSQL、LiteLLM、nginx）、`control-plane.env`、
+  `db:migrate`、创建管理员、provision Worker、`agent-runtime-image load`（镜像归档由 worker-a 拷贝）、`worker.env`、启动。预期：Admin Workers 显示 Worker `ONLINE`、版本、
+  镜像、capability 全真、配额与出口生效；浏览器（导入内部 CA、使用 dnsmasq）经 HTTPS 新建 Workspace、打开（证书无警告）、平台模型带工具
+  调用的对话、Terminal、Files 上传/下载（含 >1 GiB 与慢速上传）；Portal 深链接、刷新、前进/后退、登录态恢复（progress.md Next 4）；
+  停止/启动；**重启宿主机**后按顺序（挂载 → 出口 → Docker → compose → Control Plane → Worker）自动恢复，运行中的 Workspace 回到 `RUNNING`。
+- **B. v0.13 → v1.0（单机）**：worker-c 卸载阶段 2 的 Worker 后，以 `v0.13.0` 的开发形态单机部署并造数据（Local 用户，测试环境有 IdP 时加 SSO 用户；多个
+  Workspace：文件、Pi Session、home 配置、一个停止、一个运行），按 19.9.3 原位升级为单机生产形态。预期：用户、角色、身份绑定、Audit 历史保留；
+  legacy Workspace 迁移后文件、Session（可继续对话）、home 配置都在；升级到新镜像后仍可用；出口与配额对迁移后的 Workspace 生效。
+- **C. 跨主机**（与 A 同时进行）：Worker 经 8443/8444 TLS 接入、Worker Gateway 原生 TLS；从用户网络无法访问 8443/8444/3100。
+- **D. 升级与回滚演练**：在 A 的部署上从验收构建 R1 升级到 R2（第二次手动构建，版本不同），按 19.9.1；再回滚到 R1（19.9.2 无 migration
+  分支）；在 R1 的数据库中插入一条虚构的更新 migration 记录，确认 R1 拒绝启动、删除后恢复（含 migration 回滚分支的演示：备份 → R2 迁移 →
+  恢复备份 → R1）。期间运行中的 Workspace 不被停止，浏览器重连后可继续。
+- **E. 备份与恢复演练**：按 `docs/ops/21-backup-restore.md` 备份；之后新建/修改/删除若干 Workspace；停止并删除全部 Workspace 容器（模拟 Docker 数据
+  丢失），恢复数据库与受管根；预期与 19.10 的语义表一致，恢复点之前的文件与 Session 完整。
+- **F. 完整回归**：`docs/demo-runbook.md` 主链在生产部署上完整走一遍；Phase 14–18 关键检查的精简清单（出口探测、配额写满、登录锁定与
+  解锁、禁用用户的连接断开、模型 key 吊销、指标抓取与一条告警、空闲回收（1 小时）、Runtime 升级/回滚、Worker 吊销与重新启用）。
+- **G. 安全复查**：19.11 清单逐项执行并记录。
+- **H. 发布**：验收通过 → 合入 master → tag `v1.0.0-rc.1` → `release.yml` 产出 rc 发布包 → 按 19.9.1 把 worker-c 的单机部署从验收构建升级到
+  rc.1 → 负责人试点验证，**由负责人明确通知后**以同一产物晋升为 `v1.0.0`（Q13），并更新路线图与 progress。
+
+失败时收集：`journalctl -u agent-runtime-{control-plane,worker,egress,platform} --since …`、`docker compose -f /etc/agent-runtime/compose.yml
+logs nginx`、`agent-runtime-ctl version` 与 `db:status`、`release.sh list`、`audit-host.sh` 输出、`ss -ltnp`、`findmnt -T /var/lib/agent-runtime`、
+`openssl s_client -connect <主机>:<端口> -servername <名>` 摘要、`dig @<dnsmasq 地址> <名>`、浏览器开发者工具中失败请求的状态与响应头（不含
+Cookie 值）、Admin 页面截图。
+
+### 19.15 决策（2026-10-19 负责人确认）
+
+- **Q1 部署形态**：发布包 + systemd（Control Plane、Worker），第三方组件 compose——**确认**。负责人另提出“Control Plane 主机一次性容器部署”
+  （nginx、PostgreSQL、LiteLLM、Prometheus、Grafana 与 Control Plane 同一 compose），**单开 Phase 20**（v1.0 之后，见 19.18）；Worker 依赖宿主机
+  nftables、XFS 配额与 Docker Engine，仍以 systemd 运行，不在其中。Phase 19 的 bundle 设计使 Control Plane 镜像只是“发布包 + 基础镜像”的
+  薄封装，不返工。
+- **Q2 反向代理**：nginx——**确认**。pin `nginx:1.30.6-alpine@sha256:970364228b1e4f932abc22d321932816782cca8a20b85a77552a7cfe9acfb3b5`
+  （多架构 index，2026-10-19 查询）。
+- **Q3 仓库**：**修订（2026-10-19）**——GitHub 为普通账户，Runtime 镜像不放镜像仓库：worker-a 构建一次，归档分发到各 Worker，按 digest pin
+  （19.4.2）；发布包仍为 GitHub Release 附件。**追加**：`docs/ops/22-offline-deployment.md`——纯内网企业的离线部署（AMD64）：在联网机器上下载发布包、
+  `docker save` Runtime 镜像与第三方镜像、准备同版本 OS 的离线 apt 包（Docker、nftables、xfsprogs），介质导入后按 `docs/ops/` 01～05 部署；可选内网
+  registry（`registry:2`）导入后按 digest 分发。
+- **Q4 默认 Runtime 镜像**：CI 构建 `agent-runtime:2026.10-pi1.1`——**确认**。**追加**：`docs/ops/23-build-from-source.md`——在 AMD64 主机上手动构建
+  发布包与 Runtime 镜像（不依赖 CI），含校验步骤。两份 AMD64 文档在负责人取得 AMD64 主机实测前标注“未经真实 AMD64 设备验证”（D2）。
+- **Q5**：不采用 snapshot / 可复现构建，保持简洁——**确认**。
+- **Q6**：Worker 上报软件版本（协议 v7、`0014_release`）——**确认**。
+- **Q7**：生产显式 `db:migrate`、开发自动迁移——**确认**；开发与生产的差异在 `docs/ops/01-planning.md` 中列表说明（迁移、日志格式、Cookie、TLS、
+  进程托管、镜像来源、密钥位置）。
+- **Q8 TLS**：按建议——**确认**；负责人要求说明“哪些链路加密、自签证书怎么做、签哪些证书”，见 19.6.1，并写入 `docs/ops/02-tls-and-dns.md`。
+- **Q9 Node**：24 LTS，pin `v24.22.0`（2026-10-14 发布，LTS Krypton）——**确认**；CI 同步改为该版本。
+- **Q10 设备与 DNS**：**修订（2026-10-19）**：只用 worker-a 与 worker-c（AGX 不适用，PVE AMD64 虚拟机为可选补充），分工见 19.17。
+  原定 worker-c（Ubuntu 26.04.1、8 核、30 GiB、Docker 29.9.1、已有 loop XFS 受管根；它目前是开发环境的
+  worker-c，阶段 2 前从开发环境退出并清理，见 19.17）；证书用 `internal-ca.sh` 签发 wildcard；DNS 用 dnsmasq，`docs/ops/02-tls-and-dns.md` 详细写
+  dnsmasq 安装配置与客户端设置，另附 Windows Server 2008 R2 AD 集成 DNS 的配置说明（通配记录、条件转发、组策略分发根证书；注明 2008 R2 已
+  停止支持）。建议验收域名 `ar.internal`（`.internal` 为 ICANN 保留的私有用途顶级域）：`portal.ar.internal`、`*.agent.ar.internal`、内部入口
+  `cp.ar.internal`。开发设备上的 Clash（fake-ip）与 Tailscale DNS 可能接管 `.internal` 解析，文档写明需要的 Clash `fake-ip-filter` / 直连规则。
+- **Q11**：Q8B 保持开发形态，试点数据迁移不进入本 Phase 验收——**确认**。
+- **Q12**：文档与 `audit-host.sh` 检查 UID 1000，不引入其他用户——**确认**（worker-c 的 UID 1000 为 `radxa`，验收中记录为已知告警）。
+- **Q13**：rc.1 由负责人验证，**负责人明确通知后**才晋升 `v1.0.0`——**确认**。
+- **Q14**：Trivy 报告不作门禁，rc 前人工分级——**确认**。
+- **Q15**：可观测性作为生产 compose 的可选 profile——**确认**。
+
+补充问题（阶段 2 开工前需要负责人回答）：
+
+- 已答复（2026-10-19）：worker-c 上的 Runtime 与开发 Workspace 数据可以删除；主要开发测试仍在 worker-a。另提供两台 Jetson AGX Orin 64G
+  （agx1 `192.168.1.138`，agx2 `192.168.1.139`）供测试；核查后因内核缺少 XFS 与 nft fib 不采用（19.16），负责人决定只用 worker-a 与 worker-c（19.17）。
+- 待答复（阶段 2 前）：验收用浏览器所在客户端的操作系统，以及其 Clash 是否为 TUN 模式。
+
+### 19.16 负责人执行的检查结果（2026-10-19）
+
+- Node：`v24.22.0`，2026-10-14，LTS Krypton。
+- nginx `stable-alpine` = `1.30.6-alpine`，index `sha256:970364228b1e…`（含 linux/amd64、linux/arm64）。
+- PostgreSQL `17.6-alpine` index `sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`；生产 compose 以此 pin（开发 compose 只 pin
+  tag，Phase 19 一并补 digest）。
+- worker-c：见 Q10；对外监听只有 sshd（22）、NoMachine（4000）与 Clash 混合端口 7897；`radxa` 为 UID 1000。
+- GitHub 计划：普通账户（Q3 修订为不用镜像仓库）。
+- **Jetson AGX Orin ×2（agx1、agx2，只读核查，2026-10-19）**：Ubuntu 22.04.5 / L4T R36.5.2，内核 `5.15.199-tegra`，12 核、61 GiB，NVMe 233 GiB
+  （剩余 127 / 155 GiB），Docker 29.9.1（containerd 镜像存储、cgroup v2）、Compose v5.6.0，`nft` 1.0.2；用户 `agx` 为 UID 1000（sudo 需要密码）；
+  Clash 只有系统代理（Docker daemon 已配置 `HTTP(S)_PROXY=127.0.0.1:7897`）；agx2 的 Docker 固定 DNS 为 `223.5.5.5`、`119.29.29.29`。
+  **内核没有 `CONFIG_XFS_FS`、`CONFIG_NFT_FIB_IPV4/IPV6`**：Phase 15 的 XFS 项目配额与 Phase 14 的出口规则（`fib daddr type local`）都无法
+  生效，平台会 fail-closed（Worker 不启动任何 Workspace）。因此 **AGX 不能作为 v1.0 Worker**（为 tegra 内核自行编译模块属于环境改造，不在本
+  Phase 范围），**可以作为 Control Plane 主机**（nginx、PostgreSQL、LiteLLM、Control Plane 不依赖这些内核功能）。v0.13 的 Worker 不需要
+  XFS 与 nft，但 v0.13 → v1.0 要求原位升级（数据留在原 Worker 原路径），所以 v0.13 演练的 Worker 也必须放在 worker-c。
+  `docs/ops/01-planning.md` 的主机要求中写明这两项内核配置，`audit-host.sh` 与 Worker 启动日志已能指出缺失项。
+
+### 19.17 分阶段实施与验收
+
+负责人同意分阶段交付；每个阶段结束给出变更总结与该阶段的人工验收步骤，验收通过再进入下一阶段，全部完成后才合入 master。
+
+| 阶段 | 内容 | 设备 | 阶段验收 |
+|---|---|---|---|
+| 1 构建与代码 | 19.8 全部代码变更（含协议 v7、`0014_release`、migration 检查、移除 `RUNTIME_IMAGE`）；esbuild 发布包、`pnpm release:build` 与 `release.yml`；`build-runtime-image.sh` 在 worker-a 构建 `agent-runtime:2026.10-pi1.1`；systemd unit、`agent-runtime-ctl`、`release.sh`、`agent-runtime-image`、`audit-host.sh`；nginx 模板与 CI 测试；spike S4、S5 | worker-a（开发环境）+ CI | CI 绿；发布包可构建并校验；开发环境升到协议 v7 后正常，Admin 显示 Worker 版本；开发 Workspace 经 Phase 18 机制升级到新镜像 |
+| 2 从零部署（跨主机） | `docs/ops/README.md`、`docs/ops/02-tls-and-dns.md`（dnsmasq、Clash 与 Tailscale 客户端设置、AD 2008 R2）、`internal-ca.sh`、生产 compose、`init-*.sh`；spike S1 | **生产 Control Plane = worker-a**（与开发环境并存，见下）；**生产 Worker = worker-c**（删除开发 Runtime 与受管根数据、退出开发环境后从零部署）；dnsmasq 在 worker-c | 19.14 A + C（真实跨主机：8443/8444 TLS、Worker Gateway TLS） |
+| 3 运维演练 | `docs/ops/20-upgrade.md`（19.9.1/19.9.2）、`docs/ops/21-backup-restore.md`；spike S3 | worker-a（生产 CP）+ worker-c | 19.14 D、E |
+| 4 v0.13 升级（单机形态） | 19.9.3、`docs/ops/README.md` 的卸载与清理；`migrate-legacy-workspace` 归位 | worker-c：卸载阶段 2 的 Worker → 以 `v0.13.0` 开发形态单机部署（CP + Worker）→ 原位升级为 v1.0 **单机**生产形态；worker-a 上的生产 Control Plane 停用 | 19.14 B（同时验收单机形态） |
+| 5 回归与发布准备 | `docs/ops/22-offline-deployment.md`、`docs/ops/23-build-from-source.md`（AMD64，标注待实机验证）；README、各 runbook、AGENTS.md、progress、路线图；Trivy 报告；完整回归与安全复查 | worker-c（单机生产）+ CI | 19.14 F、G；之后 H |
+
+**设备约束（2026-10-19 修订，只用 worker-a 与 worker-c）**：
+
+- AGX Orin（agx1/agx2）内核缺少 XFS 与 nft fib（19.16），不参与验收。负责人的 PVE 工作站（2×EPYC 7B13）耗电高、平时不开；需要时可虚拟出
+  AMD64 主机，用于**可选的** AMD64 补充验收（全新 AMD64 单机部署、`docs/ops/22-offline-deployment.md`、`docs/ops/23-build-from-source.md`），不阻塞 v1.0（D2）。
+- worker-a 始终运行开发环境（开发 Control Plane 3000/3001/9464、开发 PostgreSQL 5432、开发 LiteLLM 4400、开发 Worker 与其 nft 表、受管根）。
+  阶段 2、3 的生产 Control Plane 与之并存：只增加 Control Plane 角色（**不在 worker-a 运行生产 Worker**——同一主机两个 Worker 会争用 nft 表、
+  受管根与 Docker）；生产 loopback 端口改用 3200/3201/9465（Control Plane）、5442（PostgreSQL）、4410（LiteLLM），compose 项目名与数据目录独立；
+  nginx 只绑定 LAN 地址 `192.168.1.124` 的 443/80/8443/8444（Tailscale 地址的 443 已被 `tailscale serve` 占用，代理开发用的 Keycloak），因此验收
+  浏览器需在办公室局域网内。worker-a 的 53 端口被 Clash TUN 占用，dnsmasq 放在 worker-c（绑定其 LAN 与 Tailscale 地址）。这种“与开发环境并存”
+  的情形只用于验收，文档以独占主机为准，端口差异在交付说明中列出。
+- “全新设备从零部署”的含义因此为：Worker 主机（worker-c，最依赖环境的角色：XFS、出口规则、capability、Docker）从零部署；Control Plane 主机在
+  已有系统上按文档部署（其前置只有 Docker 与 compose）；单机形态在阶段 4 中于 worker-c 上验收。
+- 客户端 DNS：浏览器所在设备若运行 Clash TUN，需在 Clash 中为 `+.ar.internal` 配置 `fake-ip-filter` 与 `nameserver-policy`（指向 worker-c 的
+  dnsmasq）；文档分别给出 Clash TUN、系统代理与无代理三种情况的设置。
+
+### 19.18 Phase 20（v1.0 之后）：Control Plane 主机一次性容器部署
+
+负责人在 19.15 Q1 中提出，v1.0 发布后单独设计（扩写本节后再开工）：Control Plane 与 Portal 打成 OCI 镜像（基于 Phase 19 发布包），与 nginx、
+PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compose up` 一次完成 Control Plane 主机部署（初始化密钥、证书、数据库在
+首次启动时完成）；Worker 主机仍为发布包 + systemd。需要讨论的问题：Control Plane 容器的网络模式（host 网络以满足 loopback 约束，或放宽
+`MODEL_GATEWAY_ADMIN_URL` 对同一 compose 内部服务名的限制）、升级与回滚方式与 systemd 形态的一致性、两种形态之间的迁移、离线镜像包。
+
+### 19.19 实现中的调整
+
+**阶段 1：构建与代码（2026-10-19）**
+
+- **Runtime 版本改为构建参数**：Dockerfile 的 `io.agent-runtime.runtime.version` 取自必填的 `RUNTIME_VERSION` 构建参数（缺失或含非法
+  字符即构建失败）；`build-runtime-image.sh <tag>` 以 tag 作为版本。worker-a 构建 `agent-runtime:2026.10-pi1.1`
+  （`sha256:3bad0e0f…`，归档 1.4 GB zstd，构建清单 960 行），同主机 `agent-runtime-image load` 后镜像 ID 不变（S2 本机部分；跨主机待
+  worker-c）。
+- **CLI 同样遵守迁移规则**：`user:create`、`worker:*`、`auth:unlock` 原来各自无条件执行 migration，生产中会绕过“先备份再迁移”。
+  改为与 Control Plane 相同的 `prepareDatabase`（读 `DATABASE_MIGRATE_ON_START`），并补集成测试。
+- **管理接口**：`GET /api/admin/system`（版本、commit、协议版本、schema 版本、默认 Runtime 镜像）；`GET /api/admin/workers` 增加
+  `controlPlane: { version, protocolVersion }` 与每个 Worker 的 `workerVersion`；Audit `worker.version_reported`（`0014_release` 触发器）。
+- **协议不匹配的提示**：Control Plane 对版本号不同的 Worker 消息以 1008 关闭，reason 为 “Worker protocol version N unsupported;
+  Control Plane speaks 7”，并记 `warn`；Worker 记录非正常关闭的 code 与 reason（日志字段名避开脱敏规则中的 `code`）。
+- **发布包**：`pnpm release:build` 用 esbuild 打包，`pnpm deploy --legacy --prod --config.node-linker=hoisted` 生成扁平的生产依赖
+  （Control Plane 29 MB、Worker 27 MB），附 Node 24.22.0（118 MB，按官方 SHASUMS 校验）；解包 175 MB。`pnpm deploy` 会把自己的
+  安装设置写进 checkout 的 `node_modules/.pnpm-workspace-state-v1.json`，之后所有 pnpm 命令都要求重装；构建脚本在部署前后保存并还原该
+  文件。发布包内的 Control Plane 实测：未迁移时拒绝启动，`migrate` 后 `/ready` 为 200，日志带版本；Worker `--check-config` 正常，
+  带 `RUNTIME_IMAGE` 时拒绝。
+- **nginx**：模板改为从 `/opt/agent-runtime/current/deploy/nginx/` 读取（`NGINX_ENVSUBST_TEMPLATE_DIR`），切换版本后重启 nginx 容器即可；
+  `/etc/nginx/conf.d` 用 tmpfs，镜像自带的默认站点不加载。**测试发现**：镜像自带 `nginx.conf` 在 http 级别定义 `access_log ... main`
+  （记录完整请求行，含 query string），只在 conf.d 中再加一个 access_log 时两者同时生效——OAuth/OIDC callback 的 code 会进入日志。
+  改为每个 server 块自行声明 access_log（不再继承 http 级别），error log 只保留 `crit`（error log 同样记录请求行）。
+- **S4 结论**：pi-web 0.9.0 与 0.12.0 的 Agent 与 Terminal 事件流（SSE）每 30 秒发送一次注释行，因此 Workspace 入口的
+  `proxy_read_timeout` / `proxy_send_timeout` 取 600 s（只切断死连接），不需要 3600 s。Gateway 的 Node `requestTimeout` 设为 0（慢速上传）。
+- **Worker unit 的 capability**：暂定 `CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE`（`audit-host.sh` 以掩码
+  `0x20100b` 校验），由阶段 2 的 S1 在 worker-c 上收敛。
+- **测试与变异检查（已执行，25 项全部被测试发现）**：migration 忽略未知记录（两处）、`DATABASE_MIGRATE_ON_START=false` 仍迁移、CLI
+  始终迁移、0014 版本触发器失效、`RUNTIME_IMAGE` 被静默接受、v6 hello 被接受、`workerVersion` 可缺省、Control Plane 不说明协议不匹配、
+  两个 Gateway 未关闭 `requestTimeout`；nginx：公开入口代理 `/api/workers/`、日志用 `main` 格式、不转发 Host、去掉 Upgrade 头、打开
+  `proxy_buffering`、8444 放开全部路径、`X-Forwarded-For` 追加、8443 去掉地址白名单；`release.sh` 不校验校验和、`agent-runtime-image`
+  不校验校验和或版本标签、`build-runtime-image.sh` 覆盖已有 tag、`audit-host.sh` 不检查 Docker socket 或特权。
+
+**阶段 2：从零部署（2026-10-20，worker-a 生产 Control Plane + worker-c 生产 Worker）**
+
+- **拓扑**：worker-c 在另一个局域网（192.168.0.0/24），经 Tailscale 子网路由可达 worker-a 的 `192.168.1.124`。用户入口 nginx 绑定
+  `192.168.1.124:443`（Tailscale 地址的 443 由 `tailscale serve` 提供开发用 Keycloak，保留不动），内部入口绑定 `100.112.169.46:8443/8444`；
+  Worker 与 Control Plane 互访用 IP 证书，不依赖 DNS。生产 Control Plane 与开发环境并存：loopback 端口 3200/3201/9465、PostgreSQL 5442、
+  LiteLLM 4410，compose 项目 `agent-runtime-prod`。dnsmasq 在 worker-c，只绑定 `100.115.94.58`。
+- **密钥文件拆分**：Control Plane 的配置与密钥分为 `control-plane.env` 与 `control-plane.secrets.env`（`init-secrets.sh` 生成，unit 与
+  `agent-runtime-ctl` 都读取两者）；`worker:provision` 的输出写入 root-only 文件再分别填入两侧，token 不经终端显示。
+- **S1 结论**：以 UID 999 的 `agent-runtime` 运行 Worker，逐项去掉 capability 后跑完整生命周期：去掉 `CAP_DAC_OVERRIDE` → 配额无法应用
+  （`STORAGE_QUOTA_APPLY_FAILED`），换成 `CAP_DAC_READ_SEARCH` 可以启动但删除失败；去掉 `CAP_FOWNER` 或 `CAP_CHOWN` → “could not set managed
+  Workspace directory ownership”。最终集合即 unit 中的 `CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE`（掩码 `0x20100b`）。
+  试验留下的半初始化 Workspace（目录没有 `managed.json`）Worker 拒绝删除（`WORKSPACE_NOT_MANAGED`，符合第 6 节）；删除其目录后重启 Worker，
+  reconcile 补完成删除。
+- **S2 跨主机结论**：worker-a 构建的归档在 worker-c `agent-runtime-image load` 后镜像 ID 仍为 `sha256:3bad0e0f…`，Worker 的 pin 校验通过。
+- **实测**（经 HTTPS 入口与 API）：Worker `ONLINE`、版本与 Control Plane 一致、出口与配额生效、新镜像六项 capability 全真；Workspace
+  创建 → 运行（worker-c、2026.10-pi1.1）→ 停止 → 删除；Workspace 内经中继 → 8444 → LiteLLM 的请求被网关以虚拟 key 鉴权；Workspace 访问
+  Control Plane 主机 8443/8444/443、本机 Worker Gateway、内网网关均被拒绝，公网可达。`audit-host.sh`：Control Plane 主机 0 失败，Worker 主机
+  0 失败 1 告警（UID 1000 为 `radxa`，Q12 已知）。Control Plane unit（无 capability、`ProtectSystem=strict` 等）与 Worker unit 的加固项均正常运行。
+- **文档**：`docs/ops/README.md`、`docs/ops/02-tls-and-dns.md`（dnsmasq、Tailscale split DNS、Clash、Windows Server 2008 R2 AD、根证书导入）。
+  卸载步骤中删除 Workspace 网络改为按标签（网络名是 `agent-runtime-<id>`，`arw-` 只是网桥名）。
+
+**阶段 2 验收后（2026-10-20）**
+
+- 负责人完成阶段 2 人工验收（含重启 worker-c）；Firefox ESR 不读 Linux 系统证书库，需写入其配置目录的 `cert9.db`（文档已改正）。
+- **验收中发现并修复**：Control Plane 访问原生 TLS 的 Worker Gateway 时，Node 用转发的 `Host`（`<id>.agent.<域>`）作为 SNI 与证书校验名，
+  而 Worker 证书只签 IP，所有 Workspace 请求返回 `UPSTREAM_UNAVAILABLE`（开发环境 Worker Gateway 为 HTTP，从未暴露）。`packages/gateway`
+  对 HTTPS 上游改用目标自身的主机名（IP 不发 SNI、按 IP SAN 校验），补真实 HTTPS 上游回归测试与变异检查。两台主机按 19.9.1 升级到修复版
+  （无 migration）。
+- **worker-a 加入为第二台生产 Worker**（单机形态：Control Plane 与 Worker 同机）：开发数据打包备份到 `~/agent-runtime-dev-backup-worker-a.tar.zst`
+  后清空；Worker Gateway 绑定 `127.0.0.1:3100`（证书 `IP:127.0.0.1`），内部入口白名单加入本机 Tailscale 地址。Workspace 按负载落到 worker-a，
+  打开、中继、出口均正常。
+- **安全复查发现**：worker-a 上的 Workspace 能连到 worker-c 的 Worker Gateway（401，有 token 保护）——Worker 地址在 Tailscale 的
+  `100.64.0.0/10`，不在默认拒绝范围。生产 Worker 通常在 RFC1918 网段（默认拒绝），但不在内网段时必须把每台 Worker 的 Gateway 地址写进
+  `PLATFORM_EGRESS_PROTECTED`；示例与部署文档已写明，实验环境已补上并确认拦截。由 Control Plane 自动把已注册 Worker 的 Gateway 地址加入
+  保护集合（需要随 Worker 注册变化重新下发规则）留作 v1.x 改进。
+
+**阶段 3：运维演练（2026-10-20，worker-a 生产 Control Plane + Worker，worker-c Worker）**
+
+- **升级 / 回滚**（19.9.1、19.9.2 无 migration 分支）：用 `release.sh install|activate` 在两台主机间升级、回滚、再升级，期间两个用户
+  Workspace 的容器启动时间不变（一直运行）。**发现并修复**：Control Plane 收到 SIGTERM 后等待浏览器的长连接（SSE、WebSocket）自然结束，
+  永远等不到，每次停止都被 systemd 在 30 秒后强杀。改为关闭全部 Workspace 连接与监听后退出，并设 10 秒期限；Worker 同样主动关闭连接并
+  退出。修复后（演练中保持一条经 Gateway 的长连接）停止 0.1 秒、重新就绪约 1 秒。
+- **数据库比程序新**：向生产库插入一条虚构的更新 migration 记录，Control Plane 以 `DatabaseNewerThanBuildError` 拒绝启动（systemd
+  每 5 秒重试，始终不运行），`db:status` 以退出码 3 报告；删除记录后恢复。
+- **备份与恢复（S3）**：`pg_dump -Fc` 两库 + worker-c 受管根文件级归档（`tar --numeric-owner --xattrs --acls`）；之后新建、修改、删除
+  Workspace；删除 worker-c 全部受管容器与网络并清空受管根，从归档恢复、两库 `pg_restore`。结果：一致恢复时 Workspace 为 `ERROR`
+  （容器缺失），启动后按当前配置重建，`/workspace`、`/home/agent` 为备份时内容，XFS 配额重新生效，虚拟 key 继续有效；数据库较旧时
+  备份后新建的 Workspace 报告为 `MANAGED_ORPHAN`（容器、目录、网络，不删除），状态与期望相反的为 `ERROR`。均与 19.10 一致，写入
+  `docs/ops/21-backup-restore.md`。带 migration 的回滚（恢复备份）的数据库步骤与此相同，真实 migration 在阶段 4（v0.13 → v1.0）中演练。
+- **发现并修复**：Worker 把名字以 `agent-runtime-` 开头的容器与网络都视为自己的命名空间；生产 compose 项目原名 `agent-runtime-prod`，
+  在 Control Plane 与 Worker 同机时每次 reconcile 都报“未知资源”。项目改名为 `ar-platform`（运行中的部署经 `down` / `up` 迁移，数据目录
+  为 bind 挂载不受影响）。开发环境的 compose 项目（`agent-runtime-platform` 等）有同样现象，只在开发与 Worker 同机时出现，不改。
+- **文档**：`docs/ops/20-upgrade.md`、`docs/ops/21-backup-restore.md`。
+
+**阶段 4：v0.13 → v1.0（2026-10-20，worker-c 单机）**
+
+- worker-c 退出阶段 2 的生产部署（`worker:disable`，按卸载步骤（现 `docs/ops/24-uninstall.md`）卸载，保留 dnsmasq），在其上以 `v0.13.0` 开发形态单机部署
+  （tsx、开发 PostgreSQL、本机已有的 `phase7-toolchain`），造数据：admin 与 alice；alice 两个 Workspace（一个运行、一个停止），各有项目
+  文件、`.bashrc` 改动（在旧容器可写层）、`/tmp` 文件，以及用本机 mock OpenAI 服务经真实 `pi` CLI 生成的会话；记录文件与会话的校验和。
+- 按 19.9.3 原位升级为单机生产形态（同一台主机上 Control Plane 与 Worker，名字 `portal.c.ar.internal`、`*.agent.c.ar.internal`，证书由同一
+  内部 CA 签发）：备份 → 停止 → Worker 自有路径改属主 → 发布包、出口 unit → 生产 PostgreSQL 导入开发库 → `db:migrate`（9 → 14）→
+  Worker 沿用 v0.13 的 ID 与两个 token → 启动 → 两个旧容器报 `STORAGE_MIGRATION_REQUIRED` → `migrate-legacy-workspace` → 启动。
+- **结果**：用户、角色、Worker 凭据未变；v0.13 时期的 22 条 Audit 全部保留；`/workspace` 文件与 Pi 会话 JSONL 与升级前逐字节一致；home 中
+  的 `.bashrc` 改动迁移成功；`/tmp` 按设计未保留；配额 20 GiB、出口规则生效；pi-web 0.9.0（phase7）中会话可见，经平台升级到
+  `2026.10-pi1.1`（Pi 1.1.0）后仍可见。`audit-host.sh` 0 失败。
+- **发现并修复**：`migrate-legacy-workspace` 按开发形态设计（Worker 用户 = Workspace UID）。生产 Worker 用户读不了属于 UID 1000 的 home
+  目录（已存在时检查失败），新建的 home 又属于 Worker 用户（容器内的用户无法访问）。改为由 root 执行，并把 home 交给 `WORKSPACE_UID/GID`；
+  开发形态行为不变。
+- **文档要点**：开发 `.env` 中 JSON 值（`WORKER_GATEWAY_TOKENS_JSON`）为 `set -a; . .env` 需加单引号，迁入生产 env 文件时去掉；
+  `worker:configure-gateway` 会打印一个新 Gateway token 供轮换，沿用旧 token 时忽略。写入 `docs/ops/20-upgrade.md` 第 5 节。
+
+**阶段 4 验收与空闲回收默认值（2026-10-21）**
+
+- 负责人完成阶段 4 人工验收。
+- **决策变更（D6 补充）**：负责人要求生产部署默认开启空闲回收，避免遗忘。生产模板 `control-plane.env.example` 的
+  `IDLE_STOP_AFTER_HOURS` 默认 8 小时（留空即关闭）；代码默认仍为关闭（开发与测试不受影响），判定规则（无连接、无访问、CPU 低于阈值，
+  只停不删）不变。两套演练部署已设为 8 小时。
+
+**阶段 5：回归、安全复查、运维手册（2026-10-21）**
+
+- **运维手册**：负责人要求部署文档与开发文档分开、按序号查阅。新增 `docs/ops/`（README 索引 + 00 功能总览、01～05 首次部署、10 日常运维、
+  20～24 升级/备份/离线/源码构建/卸载、30 排障、31 安全、90 参考）；原 `docs/deployment.md` 拆入各章，`tls-and-dns`、`upgrade-runbook`、
+  `backup-runbook` 移入；开发 runbook 保留原位，由运维章节链接。`docs/README.md` 与根 README 指明两套文档的读者。
+- **安全复查（19.11）**：在 worker-a、worker-c 两套部署上执行，清单与结果写入 `docs/ops/31-security.md` 第 3、4 节：端口、TLS、Cookie 与
+  响应头、入口路径、日志与命令行中的密钥、文件权限、进程 capability、`audit-host.sh`、出口抽查均符合设计；`systemd-analyze security`
+  Control Plane 1.7、Worker 5.3（来自必要的五项 capability 与 docker 组）。
+- **漏洞扫描（Q14，非门槛）**：Trivy 0.76.0。平台发布包 0 HIGH/CRITICAL；第三方镜像与 Runtime 镜像的结论与建议（PostgreSQL 17.x 补丁
+  升级、Runtime 基础层刷新为新 tag）见 `docs/ops/31-security.md` 第 5 节，由负责人决定是否在 v1.0 前处理。
+- **全量回归（worker-a，ARM64）**：`lint`、`typecheck`、`test`（单元 + 独立测试库上的 PostgreSQL 集成，539 项通过）、`test:e2e`（100）、
+  `build:web`、`test:deploy`（10）、`test:egress`（真实内核 nftables，21）、promtool 规则检查与测试、shellcheck、`test:e2e:runtime`
+  （`2026.10-pi1.1`，11）、`test:model-gateway`（固定版本 LiteLLM + mock 上游，5）、`test:quota`（XFS loop 设备，3）全部通过。
+- 两套部署升级到含 `migrate-legacy-workspace` 修复的发布包。负责人确认收尾（2026-10-22）：演示环境恢复为 worker-a 上的 Control Plane +
+  Worker，worker-c 卸载其单机平台后作为 Worker 接入。阶段 5 验收，Phase 19 合入并打 `v1.0.0-rc.1`。
 
 ---
 

@@ -1,19 +1,11 @@
 # Project Progress
 
-Last reviewed: 2026-10-14
+Last reviewed: 2026-10-21
 
 ## Current Milestone
 
-Phase 9～12 的工程实现、自动验证与人工验收已完成。当前里程碑是 v0.x 封版前的 Portal UI /
-Information Architecture cleanup：第一轮为纯前端的中文化、状态/时间展示、删除确认、过渡状态轮询与
-Audit 着色，不改 API contract 或权限模型；第二轮只增加 UI 所需的小型 admin 能力，目前已完成 Worker
-暂停/恢复调度（`0009_worker_scheduling` 与 `PATCH /api/admin/workers/:id`），不改变既有权限模型、
-sticky placement 或 Worker 吊销语义；随后补齐 specs 中已规划但未实现的只读
-`GET /api/admin/workspaces`、Audit 服务端筛选与分页加载/CSV 导出、用户搜索、Portal 内对话框与
-API error code 中文化。
-现有 Local/OIDC/OAuth2、manual/JIT、identity lifecycle 与 Platform Session 主链保持不变；Phase 12 将其
-成功、失败和管理动作纳入脱敏 Audit，并补齐 session fixation、Cookie、CSRF/callback、revocation、
-Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立可用。
+v1.0 Phase 19（生产部署与 v1.0 发布）已验收（2026-10-22）：发布包与 systemd 部署、从零部署、运维演练、v0.13 → v1.0 原位升级、
+全量回归、安全复查与运维手册。已合入 master 并打 `v1.0.0-rc.1`；负责人试用后通知再定为 `v1.0.0`。部署与运维文档为 [ops/README.md](ops/README.md)；实现记录见 `specs.md` 19.19。
 
 ## Current Baseline
 
@@ -238,32 +230,25 @@ Workspace Host 和 WebSocket 安全回归。Local Admin break-glass 继续独立
 
 ## In Progress
 
-v0.x 已以 `v0.13.0` 封版：Portal UI 两轮调整（中文化、交互与审计着色；Worker 暂停调度、全局 Workspace
-视图、审计筛选/分页/导出、用户搜索、对话框与错误码中文化）均已人工验收。v1.0 路线图已确认，见
-[v1-roadmap.md](v1-roadmap.md)，按 Phase 13–19 逐个开发、逐个验收。
+v0.x 已以 `v0.13.0` 封版。v1.0 的 Phase 13～19 已全部验收（tag `v1.0.0-alpha.1`～`alpha.6`、`v1.0.0-rc.1`），范围与顺序见
+[v1-roadmap.md](v1-roadmap.md)。
 
 ## Next
 
-1. Phase 13（工程基线）已验收（含 CI 双架构、日志脱敏、Portal 回归、Worker 对账与 OAuth2 回归），经 PR #1
-   合入 master，tag `v1.0.0-alpha.1`。
-2. Phase 14（网络出口控制）已验收（2026-10-06），经 PR #2 合入 master，tag `v1.0.0-alpha.2`。负责人在 Q8B 上
-   完成全部 11 项人工验收：开机 unit、`CAP_NET_ADMIN` Worker、存量网络迁移、白名单增删与保护地址拒绝、
-   规则漂移恢复、fail-closed、重启宿主机后在 Worker 启动前即生效（Clash 未启动与 TUN 开启两种状态下，
-   宿主机全部地址与 LAN 均 `BLOCKED`、公网 `REACHABLE`）、TUN 下的 IP 字面量拦截、Tailscale 网段与
-   worker-c 接入。CI 的真实内核测试同时覆盖了 Ubuntu 24.04 的 nft 1.0.9。
-3. 下一步：Phase 15（资源与认证防护）开工设计，先在 ARM64 设备上确认文件系统与配额机制。
-4. 生产部署入口的 SPA fallback、刷新/前进后退与登录态恢复回归，并入 Phase 19 验收。
+1. 负责人试用 `v1.0.0-rc.1` → 定为 `v1.0.0`。
+2. 发布后：第三方镜像小版本更新（PostgreSQL 17.x 补丁、nginx）与 Runtime 镜像基础层刷新，按
+   [ops/31-security.md](ops/31-security.md) 第 5 节的漏洞结论安排。
+3. v1.0 之后（Phase 20 候选）：Control Plane 一体化容器部署（specs 19.18）。
 
 ## Risks And Blockers
 
-- Phase 18 的新 Runtime 镜像（pi-web 0.12.0 / Pi 1.1.0）待人工验收；验收前存量 Workspace 仍在 pi-web 0.9.0 / Pi 0.85.1。
+- Runtime 镜像 `2026.10-pi1.1`（pi-web 0.12.0 / Pi 1.1.0）已在 Phase 18 验收并为 v1.0 默认镜像；漏洞扫描结论见 [ops/31-security.md](ops/31-security.md)。
   MiMo v2.5 已于 2026-10-21 下线，Workspace 中自配 xiaomi key 使用 v2.5 的需改用平台 MiMo v2.6。
 
 - Phase 5 的两台真实 Worker placement、浏览器 data path、Prompt/Terminal、sticky/offline/reconnect
   与 bind-mount persistence 已由人工验收确认；自动测试仍不能替代目标生产网络、安全和运维验收。
-- Worker Gateway 的可选原生 TLS 已实现，公开 Workspace Gateway 预期由受信反向代理终止
-  wildcard TLS；本次通过的是开发 HTTP + `nip.io` wildcard DNS，生产 wildcard certificate、
-  TLS termination、proxy timeout 和目标防火墙规则尚未验收。
+- 生产 TLS（nginx 终止 wildcard 证书、内部 CA、Worker Gateway TLS）、proxy timeout 与 SPA fallback 已在 Phase 19 的两套部署上
+  验收；主机防火墙由企业按 [ops/01-planning.md](ops/01-planning.md) 配置，平台不管理。
 - session exchange 存储是单 Control Plane 进程内、短时且 fail-closed；Control Plane restart
   会使尚未消费的 code 失效。Phase 4 单实例不引入 Redis/多实例共享状态。
 - OIDC/OAuth2 authorization transaction 都是单 Control Plane 进程内、短时且一次消费；进程重启会使

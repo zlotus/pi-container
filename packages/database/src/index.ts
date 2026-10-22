@@ -24,7 +24,15 @@ export async function checkDatabase(client: DatabaseClient): Promise<void> {
   await client`select 1`;
 }
 
-export { migrateDatabase } from "./migrate.js";
+export {
+  DatabaseNewerThanBuildError,
+  MIGRATION_NAMES,
+  migrateDatabase,
+  migrationStatus,
+  PendingMigrationsError,
+  prepareDatabase,
+  type MigrationStatus,
+} from "./migrate.js";
 export { createRepository, type Repository } from "./repository.js";
 export {
   AUDIT_EVENT_CATEGORIES,

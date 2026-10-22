@@ -4,6 +4,7 @@ import { cpus, hostname, totalmem } from "node:os";
 import { createJsonLogger, type Logger } from "@agent-runtime/logging";
 import {
   ControlToWorkerMessageSchema,
+  PLATFORM_VERSION,
   WORKER_PROTOCOL_VERSION,
   type Architecture,
   type ControlToWorkerMessage,
@@ -118,6 +119,7 @@ export function buildWorkerHello(
     requestId: randomUUID(),
     payload: {
       workerId: config.WORKER_ID,
+      workerVersion: PLATFORM_VERSION,
       hostname: system.hostname,
       architecture: system.architecture,
       runtimeImages,
@@ -311,7 +313,15 @@ export class WorkerDaemon {
       this.log.warn({ workerId: this.config.WORKER_ID, err: error }, "control channel error");
     });
 
-    socket.on("close", () => {
+    socket.on("close", (code, reason) => {
+      // A Control Plane on another protocol version closes with 1008 and says which one it
+      // speaks (specs.md Phase 19.9.1); the reason is a fixed server text, never a secret.
+      if (code !== 1000 && !this.#stopping) {
+        this.log.warn(
+          { workerId: this.config.WORKER_ID, closeCode: code, closeReason: reason.toString().slice(0, 200) },
+          "control channel closed",
+        );
+      }
       if (this.#heartbeatTimer !== null) clearInterval(this.#heartbeatTimer);
       this.#heartbeatTimer = null;
       if (this.#socket === socket) this.#socket = null;

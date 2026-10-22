@@ -63,4 +63,19 @@ describe("SessionConnectionRegistry", () => {
     expect(second).toHaveBeenCalledOnce();
     expect(other).not.toHaveBeenCalled();
   });
+
+  it("closes every connection once on shutdown (Phase 19.19)", () => {
+    const registry = new SessionConnectionRegistry();
+    const first = vi.fn();
+    const second = vi.fn();
+    registry.register({ userId: "user-a", sessionId: "session-a", workspaceId: "ws-1" }, first);
+    registry.register({ userId: "user-b", sessionId: "session-b", workspaceId: "ws-2" }, second);
+
+    registry.closeAll();
+    registry.closeAll();
+
+    expect(first).toHaveBeenCalledOnce();
+    expect(second).toHaveBeenCalledOnce();
+    expect(registry.activeCount("ws-1") + registry.activeCount("ws-2")).toBe(0);
+  });
 });

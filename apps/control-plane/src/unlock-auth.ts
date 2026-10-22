@@ -3,7 +3,7 @@ import { isIP } from "node:net";
 import {
   createDatabaseClient,
   createRepository,
-  migrateDatabase,
+  prepareDatabase,
 } from "@agent-runtime/database";
 import { z } from "zod";
 
@@ -36,7 +36,8 @@ const input = InputSchema.parse({ action: process.argv[2], value: process.argv[3
 const database = createDatabaseClient(environment.DATABASE_URL);
 
 try {
-  await migrateDatabase(database);
+  // Same rule as the Control Plane: production leaves migrations to the migrate command.
+  await prepareDatabase(database, { migrate: process.env.DATABASE_MIGRATE_ON_START !== "false" });
   const repository = createRepository(database, selectWorker);
   const now = new Date();
   const common = { now, source: "cli" as const, actorUserId: null, requestId: null };

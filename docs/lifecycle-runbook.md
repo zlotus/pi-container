@@ -15,8 +15,9 @@ Phase 18（`specs.md` 第 64 节 Phase 18）的运维说明：Runtime 镜像的�
   RUNTIME_IMAGES=agent-runtime:phase7-toolchain@sha256:<digest>,agent-runtime:phase18-pi1.1-r2@sha256:<digest>
   ```
 
-  digest 取 `docker image inspect <tag> --format '{{.Id}}'`（containerd 镜像存储下与 `RepoDigests` 相同）。本地构建的镜像在
-  不同 Worker 上 digest 不同，各自填写。`RUNTIME_IMAGE`（单镜像、不 pin）只在过渡期保留，与 `RUNTIME_IMAGES` 不能同时设置。
+  digest 取 `docker image inspect <tag> --format '{{.Id}}'`（containerd 镜像存储下与 `RepoDigests` 相同），或直接用
+  `agent-runtime-image verify <tag>` 输出的整行。镜像只构建一次、以归档分发，各 Worker 的 digest 相同（1.2）。过渡期的
+  `RUNTIME_IMAGE` / `RUNTIME_VERSION` 已在 v1.0 移除（Phase 19），环境中仍有它们时 Worker 拒绝启动并提示改写。
 - Worker 每次连接前逐个校验：tag 必须解析到 pin 的 digest、平台为本机架构、有版本标签、版本互不重复；不满足的镜像**不提供**
   （日志 `not offered` 说明原因），全部不满足时 Worker 不连接。每个提供的镜像都跑一次 capability 探针。
 - 已有容器始终用创建它的那个镜像 ID 运行；tag 被改指向其他内容不影响运行中的 Workspace，只影响之后新建的容器（届时该镜像
@@ -25,10 +26,12 @@ Phase 18（`specs.md` 第 64 节 Phase 18）的运维说明：Runtime 镜像的�
 
 ### 1.2 构建与验证
 
+在一台构建主机（开发环境为 worker-a）上，从干净的 checkout 构建一次（`specs.md` 19.4.2）：
+
 ```bash
-docker build --platform linux/arm64 --tag agent-runtime:<新 tag> runtime
-runtime/scripts/verify-image.sh agent-runtime:<新 tag> arm64
-docker image inspect agent-runtime:<新 tag> --format '{{.Id}} {{json .Config.Labels}}'
+# 新 tag 即 runtime version，例如 2026.11-pi1.2；本地已有同名 tag 时拒绝（永不重建）
+deploy/production/scripts/build-runtime-image.sh <新 tag>
+# -> dist/runtime-images/agent-runtime_<tag>_linux-<arch>.tar.zst（+ .sha256、.manifest.txt 构建清单）
 pnpm test:e2e:runtime                      # 真实 Docker：生命周期、Session、Files、持久化、新旧镜像切换
 TEST_DOCKER_RUNTIME=1 pnpm --filter @agent-runtime/worker exec vitest run src/model-relay/catalog.docker.test.ts
 ```
@@ -42,14 +45,17 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD/runtime/package
   npm install --package-lock-only --ignore-scripts --no-audit --no-fund
 ```
 
-**同一镜像分发到各 Worker**：Debian 系统包仍按构建当天解析，各 Worker 分别构建得到的镜像不保证完全相同。开发环境在一台
-Worker 上构建，再分发到其他 Worker（digest 相同，`RUNTIME_IMAGES` 各处一致）：
+**同一镜像分发到各 Worker**：Debian 系统包按构建当天解析，各 Worker 分别构建得到的镜像不保证完全相同，所以**不要在各
+Worker 上各自构建**。把归档拷到其他 Worker 后加载（校验 sha256、平台与版本标签，输出 `RUNTIME_IMAGES` 项；digest 与构建
+主机相同）：
 
 ```bash
-docker save agent-runtime:<tag> | ssh <其他 Worker> docker load
+scp dist/runtime-images/agent-runtime_<tag>_linux-<arch>.tar.zst{,.sha256} <Worker>:/tmp/
+agent-runtime-image load /tmp/agent-runtime_<tag>_linux-<arch>.tar.zst   # 发布包 bin/ 中；开发 checkout 为 deploy/production/bin/
+# 也可：docker save agent-runtime:<tag> | ssh <Worker> docker load，再 agent-runtime-image verify agent-runtime:<tag>
 ```
 
-生产环境由 CI 构建一次、推送到内部镜像仓库（Phase 19）。
+v1.0 不使用镜像仓库（`specs.md` 19.15 Q3）；企业已有内部仓库时的做法见 `docs/ops/22-offline-deployment.md`。
 
 最后一条在本机的每个 Runtime 镜像中加载平台模型目录：新旧镜像共用一个目录，任一 Pi 版本拒绝都不能上线。pi-web 版本变化时
 必须重写 `runtime/patches/pi-web-<版本>.mjs`（只接受 pin 的版本，片段对不上即构建失败），并按 `specs.md` 18.1 的检查表核对

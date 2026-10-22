@@ -39,6 +39,8 @@ export interface WorkerRecord {
   capabilities: Partial<WorkerCapabilities>;
   /** Every image the Worker offers; the three fields above repeat the first one. */
   runtimeImages: WorkerRuntimeImage[];
+  /** The software version from the Worker's last hello (protocol v7); null before. */
+  workerVersion: string | null;
   maxWorkspaces: number | null;
   allocatedWorkspaces: number;
   systemResources: {
@@ -76,6 +78,7 @@ interface WorkerRow {
   runtime_version: string | null;
   capabilities: Partial<WorkerCapabilities>;
   runtime_images: WorkerRuntimeImage[];
+  worker_version: string | null;
   max_workspaces: number | null;
   allocated_workspaces: number;
   cpu_capacity: { logicalCpuCount?: number };
@@ -108,6 +111,7 @@ function mapWorker(row: WorkerRow): WorkerRecord {
     runtimeVersion: row.runtime_version,
     capabilities: row.capabilities,
     runtimeImages: row.runtime_images,
+    workerVersion: row.worker_version,
     maxWorkspaces: row.max_workspaces,
     allocatedWorkspaces: row.allocated_workspaces,
     systemResources: {
@@ -307,6 +311,7 @@ export function createWorkerRepository(database: DatabaseClient) {
     async recordWorkerHello(input: {
       credentialHash: string;
       workerId: string;
+      workerVersion: string;
       hostname: string;
       architecture: Architecture;
       runtimeImages: RuntimeImageReport[];
@@ -336,6 +341,7 @@ export function createWorkerRepository(database: DatabaseClient) {
             runtime_version = ${first.runtimeVersion},
             capabilities = ${capabilities},
             runtime_images = ${runtimeImages},
+            worker_version = ${input.workerVersion},
             max_workspaces = ${input.maxWorkspaces},
             allocated_workspaces = ${input.allocatedWorkspaces},
             cpu_capacity = ${cpuCapacity},
@@ -402,7 +408,7 @@ export function createWorkerRepository(database: DatabaseClient) {
       const rows = await database<WorkerRow[]>`
         select
           id, hostname, architecture, status, enabled, schedulable, runtime_image,
-          runtime_version, capabilities, runtime_images, max_workspaces,
+          runtime_version, capabilities, runtime_images, worker_version, max_workspaces,
           allocated_workspaces, cpu_capacity, memory_bytes,
           last_heartbeat_at, egress_enforced, egress_revision::text,
           egress_checked_at, storage_enforced, storage_fs_type,

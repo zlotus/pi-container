@@ -4,7 +4,7 @@ import { hashPassword } from "@agent-runtime/auth";
 import {
   createDatabaseClient,
   createRepository,
-  migrateDatabase,
+  prepareDatabase,
 } from "@agent-runtime/database";
 import { z } from "zod";
 
@@ -27,7 +27,8 @@ const input = InputSchema.parse(process.env);
 const database = createDatabaseClient(input.DATABASE_URL);
 
 try {
-  await migrateDatabase(database);
+  // Same rule as the Control Plane: production leaves migrations to the migrate command.
+  await prepareDatabase(database, { migrate: process.env.DATABASE_MIGRATE_ON_START !== "false" });
   const repository = createRepository(database, selectWorker);
   const user = await repository.createUser({
     id: randomUUID(),

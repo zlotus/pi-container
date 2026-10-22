@@ -1,0 +1,54 @@
+# Control Plane (Portal API, Worker control channel, Workspace Gateway, metrics), run from
+# the active release /opt/agent-runtime/current (specs.md Phase 19.5). Every listener
+# binds loopback; nginx is the only entry point. See docs/ops/03-control-plane-host.md.
+#
+# Install (root): install -m 0644 <release>/deploy/systemd/agent-runtime-*.service /etc/systemd/system/
+#                 systemctl daemon-reload && systemctl enable --now agent-runtime-control-plane
+[Unit]
+Description=Agent Runtime Control Plane
+Documentation=file:///opt/agent-runtime/current/deploy
+Wants=network-online.target agent-runtime-platform.service
+After=network-online.target agent-runtime-platform.service
+
+[Service]
+Type=simple
+User=agent-runtime-cp
+Group=agent-runtime-cp
+EnvironmentFile=/etc/agent-runtime/control-plane.env
+# Generated secrets (init-secrets.sh): DATABASE_URL, SESSION_SECRET, keys and tokens.
+EnvironmentFile=/etc/agent-runtime/control-plane.secrets.env
+# Trust the internal CA for HTTPS to Worker Gateways (specs.md Phase 19.6.1).
+Environment=NODE_EXTRA_CA_CERTS=/etc/agent-runtime/tls/internal-ca.crt
+ExecStart=/opt/agent-runtime/current/bin/node /opt/agent-runtime/current/app/control-plane/server.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+# Many long-lived Workspace connections (WebSocket, SSE).
+LimitNOFILE=65536
+
+# Hardening: no capabilities, read-only system, nothing to write but its own temp.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+ReadOnlyPaths=/etc/agent-runtime
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -138,9 +138,15 @@ RUN chmod 0755 \
       /usr/local/lib/agent-runtime/runtime-capability-probe.mjs \
       /usr/local/bin/runtime-capability-probe
 
-LABEL io.agent-runtime.phase="18" \
-      io.agent-runtime.playwright.version="1.63.0" \
-      io.agent-runtime.runtime.version="phase-18-r2" \
+# Every build gets a new tag and runtime version; an existing tag is never rebuilt
+# (specs.md Phase 18.15, 19.4.2). deploy/production/scripts/build-runtime-image.sh sets it.
+ARG RUNTIME_VERSION
+RUN case "${RUNTIME_VERSION}" in \
+      ""|*[!A-Za-z0-9._+-]*) echo "RUNTIME_VERSION build argument is required" >&2; exit 1 ;; \
+    esac
+
+LABEL io.agent-runtime.playwright.version="1.63.0" \
+      io.agent-runtime.runtime.version="${RUNTIME_VERSION}" \
       io.agent-runtime.pi-web.version="0.12.0" \
       io.agent-runtime.pi.version="1.1.0"
 

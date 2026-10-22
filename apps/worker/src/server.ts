@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { createLogger, LoggingConfigSchema } from "@agent-runtime/logging";
+import { PLATFORM_VERSION, WORKER_PROTOCOL_VERSION } from "@agent-runtime/protocol";
 import Docker from "dockerode";
 
 import { loadWorkerConfig } from "./config.js";
@@ -22,6 +23,14 @@ import { WorkspaceUsageSampler } from "./usage/sampler.js";
 
 const config = loadWorkerConfig(process.env);
 const log = await createLogger("worker", LoggingConfigSchema.parse(process.env));
+if (process.argv.includes("--check-config")) {
+  // Installation and release checks: validate the configuration, start nothing (19.8).
+  console.log(
+    `Worker configuration is valid (worker ${config.WORKER_ID}, ${PLATFORM_VERSION}, protocol ${WORKER_PROTOCOL_VERSION}).`,
+  );
+  process.exit(0);
+}
+log.info({ version: PLATFORM_VERSION, protocolVersion: WORKER_PROTOCOL_VERSION }, "worker starting");
 const modelGatewayUrl = config.WORKER_MODEL_GATEWAY_URL;
 const egress = new EgressController({
   nft: new ExecNftClient(config.WORKER_EGRESS_NFT_PATH),
@@ -98,11 +107,15 @@ const gateway = buildWorkerGateway({
   ...(tls === undefined ? {} : { tls }),
 });
 
+// Open Gateway connections would keep the process alive; Workspace containers keep
+// running either way (specs.md Phase 19.19).
 const shutdown = (): void => {
   daemon.stop();
   oomEvents.stop();
   gateway.close();
-  void modelAccess?.stop();
+  gateway.closeAllConnections();
+  void Promise.resolve(modelAccess?.stop()).finally(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5_000).unref();
 };
 
 process.once("SIGINT", shutdown);
