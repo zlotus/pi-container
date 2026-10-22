@@ -4,9 +4,8 @@ Last reviewed: 2026-10-21
 
 ## Current Milestone
 
-v1.0 Phase 19（生产部署与 v1.0 发布）：阶段 1～4 已完成并验收（发布包与 systemd 部署、从零部署、运维演练、v0.13 → v1.0 原位
-升级），阶段 5（全量回归、安全复查、运维手册、发布准备）待验收。验收后合入 master 并打 `v1.0.0-rc.1`，负责人试用后通知再定为
-`v1.0.0`。部署与运维文档为 [ops/README.md](ops/README.md)；实现记录见 `specs.md` 19.19。
+v1.0 Phase 19（生产部署与 v1.0 发布）已验收（2026-10-22）：发布包与 systemd 部署、从零部署、运维演练、v0.13 → v1.0 原位升级、
+全量回归、安全复查与运维手册。已合入 master 并打 `v1.0.0-rc.1`；负责人试用后通知再定为 `v1.0.0`。部署与运维文档为 [ops/README.md](ops/README.md)；实现记录见 `specs.md` 19.19。
 
 ## Current Baseline
 
@@ -231,12 +230,12 @@ v1.0 Phase 19（生产部署与 v1.0 发布）：阶段 1～4 已完成并验收
 
 ## In Progress
 
-v0.x 已以 `v0.13.0` 封版。v1.0 的 Phase 13～18 已验收（tag `v1.0.0-alpha.1`～`alpha.6`），Phase 19 在 `phase-19-production`
-分支（PR #7）上进行，范围与顺序见 [v1-roadmap.md](v1-roadmap.md)。
+v0.x 已以 `v0.13.0` 封版。v1.0 的 Phase 13～19 已全部验收（tag `v1.0.0-alpha.1`～`alpha.6`、`v1.0.0-rc.1`），范围与顺序见
+[v1-roadmap.md](v1-roadmap.md)。
 
 ## Next
 
-1. Phase 19 阶段 5 人工验收 → 合入 → `v1.0.0-rc.1` → 负责人试用 → `v1.0.0`。
+1. 负责人试用 `v1.0.0-rc.1` → 定为 `v1.0.0`。
 2. 发布后：第三方镜像小版本更新（PostgreSQL 17.x 补丁、nginx）与 Runtime 镜像基础层刷新，按
    [ops/31-security.md](ops/31-security.md) 第 5 节的漏洞结论安排。
 3. v1.0 之后（Phase 20 候选）：Control Plane 一体化容器部署（specs 19.18）。

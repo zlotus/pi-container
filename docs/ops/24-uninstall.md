@@ -4,8 +4,6 @@
 
 ## 1. 卸载与清理
 
-删除一台主机上的平台（不可恢复；先按 [21 备份与恢复](21-backup-restore.md) 备份需要的数据）：
-
 ```bash
 # Worker 主机
 sudo systemctl disable --now agent-runtime-worker agent-runtime-egress
@@ -23,5 +21,5 @@ sudo rm -rf /opt/agent-runtime /etc/agent-runtime
 sudo userdel agent-runtime 2>/dev/null; sudo userdel agent-runtime-cp 2>/dev/null
 ```
 
-在 Control Plane 中删除一台已清理的 Worker：`WORKER_ID=<id> sudo -E agent-runtime-ctl worker:disable`，其 Workspace 删除后
+在 Control Plane 中删除一台已清理的 Worker：`sudo WORKER_ID=<id> agent-runtime-ctl worker:disable`，其 Workspace 删除后
 `worker:delete`（[lifecycle-runbook.md](../lifecycle-runbook.md)）。

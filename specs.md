@@ -6910,6 +6910,8 @@ PostgreSQL、LiteLLM、Prometheus、Grafana 组成一个 compose，`docker compo
 - **全量回归（worker-a，ARM64）**：`lint`、`typecheck`、`test`（单元 + 独立测试库上的 PostgreSQL 集成，539 项通过）、`test:e2e`（100）、
   `build:web`、`test:deploy`（10）、`test:egress`（真实内核 nftables，21）、promtool 规则检查与测试、shellcheck、`test:e2e:runtime`
   （`2026.10-pi1.1`，11）、`test:model-gateway`（固定版本 LiteLLM + mock 上游，5）、`test:quota`（XFS loop 设备，3）全部通过。
+- 两套部署升级到含 `migrate-legacy-workspace` 修复的发布包。负责人确认收尾（2026-10-22）：演示环境恢复为 worker-a 上的 Control Plane +
+  Worker，worker-c 卸载其单机平台后作为 Worker 接入。阶段 5 验收，Phase 19 合入并打 `v1.0.0-rc.1`。
 
 ---
 
