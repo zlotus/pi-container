@@ -198,6 +198,9 @@ export function proxyHttpRequest(
   response: ServerResponse,
   options: HttpProxyOptions,
 ): void {
+  // Callers authorize first; a Browser that left meanwhile already fired "close", so a
+  // connection registered now would never be unregistered (it would block idle stop).
+  if (response.destroyed) return;
   const path = targetPath(request);
   if (path === null) {
     sendJsonError(response, 400, "INVALID_PROXY_PATH", "Invalid request path");
@@ -322,6 +325,13 @@ export function proxyWebSocketUpgrade(
   head: Buffer,
   options: WebSocketProxyOptions,
 ): void {
+  // Same as HTTP, but HTTP server sockets allow half-open: a Browser that left while the
+  // caller was authorizing may only have ended the socket, which never emits "close".
+  const browserGone = () => socket.destroyed || socket.readableEnded;
+  if (browserGone()) {
+    socket.destroy();
+    return;
+  }
   const path = targetPath(request);
   if (path === null) {
     options.onRejected?.(400);
@@ -358,6 +368,11 @@ export function proxyWebSocketUpgrade(
   upstreamRequest.once("upgrade", (upstreamResponse, upstreamSocket, upstreamHead) => {
     responseStarted = true;
     upstreamRequest.setTimeout(0);
+    if (browserGone()) {
+      upstreamSocket.destroy();
+      socket.destroy();
+      return;
+    }
     upstreamSocket.setTimeout(0);
     const responseHeaders = { ...upstreamResponse.headers };
     const setCookie = responseHeaders["set-cookie"]?.filter(
@@ -381,13 +396,23 @@ export function proxyWebSocketUpgrade(
       upstreamSocket.destroy();
     });
     if (unregister !== undefined) {
-      socket.once("close", unregister);
-      upstreamSocket.once("close", unregister);
+      let unregistered = false;
+      const unregisterOnce = () => {
+        if (unregistered) return;
+        unregistered = true;
+        unregister();
+      };
+      socket.once("close", unregisterOnce);
+      upstreamSocket.once("close", unregisterOnce);
     }
     socket.once("error", () => upstreamSocket.destroy());
     upstreamSocket.once("error", () => socket.destroy());
     socket.once("close", () => upstreamSocket.destroy());
     upstreamSocket.once("close", () => socket.destroy());
+    // A peer's FIN alone never emits "close" on a half-open socket, so the connection would
+    // stay registered; WebSocket has no use for half-close.
+    socket.once("end", () => socket.destroy());
+    upstreamSocket.once("end", () => upstreamSocket.destroy());
     upstreamSocket.pipe(socket);
     socket.pipe(upstreamSocket);
   });

@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import type { AddressInfo } from "node:net";
+import { connect, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
@@ -14,6 +14,7 @@ import {
   parseHttpOrigin,
   parseWorkspaceBaseUrl,
   proxyHttpRequest,
+  proxyWebSocketUpgrade,
   sanitizeRequestHeaders,
   stripPlatformCookies,
   workspaceHost,
@@ -150,7 +151,131 @@ describe("HTTP proxy connection lifecycle", () => {
       ]);
     }
   });
+
+  it("does not register a request the Browser aborted before proxying started", async () => {
+    const upstream = createServer((_request, response) => response.end("ok"));
+    upstream.listen(0, "127.0.0.1");
+    await once(upstream, "listening");
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+    let active = 0;
+    const proxy = createServer((request, response) => {
+      // The Control Plane authorizes (database lookups) before it proxies.
+      setTimeout(() => {
+        proxyHttpRequest(request, response, {
+          target: new URL(`http://127.0.0.1:${upstreamPort}`),
+          requestHeaders: request.headers,
+          onConnected: () => {
+            active += 1;
+            return () => (active -= 1);
+          },
+        });
+      }, 100);
+    });
+    proxy.listen(0, "127.0.0.1");
+    await once(proxy, "listening");
+    const proxyPort = (proxy.address() as AddressInfo).port;
+    const destroyAll = trackSockets(proxy, upstream);
+
+    try {
+      const outgoing = httpRequest({ hostname: "127.0.0.1", port: proxyPort, path: "/favicon.ico" });
+      outgoing.once("error", () => undefined);
+      outgoing.end();
+      setTimeout(() => outgoing.destroy(), 20);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      expect(active).toBe(0);
+    } finally {
+      destroyAll();
+      await Promise.all([
+        new Promise<void>((resolve) => proxy.close(() => resolve())),
+        new Promise<void>((resolve) => upstream.close(() => resolve())),
+      ]);
+    }
+  });
 });
+
+describe("WebSocket proxy connection lifecycle", () => {
+  /** A proxy that waits `authorizeMs` (the Control Plane's authorization) before proxying. */
+  async function webSocketProxy(authorizeMs: number) {
+    const upstream = createServer();
+    upstream.on("upgrade", (_request, socket) => {
+      socket.write("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
+    });
+    upstream.listen(0, "127.0.0.1");
+    await once(upstream, "listening");
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+    const state = { active: 0 };
+    const proxy = createServer();
+    proxy.on("upgrade", (request, socket, head) => {
+      setTimeout(() => {
+        proxyWebSocketUpgrade(request, socket, head, {
+          target: new URL(`http://127.0.0.1:${upstreamPort}`),
+          requestHeaders: request.headers,
+          onConnected: () => {
+            state.active += 1;
+            return () => (state.active -= 1);
+          },
+        });
+      }, authorizeMs);
+    });
+    proxy.listen(0, "127.0.0.1");
+    await once(proxy, "listening");
+    const destroyAll = trackSockets(proxy, upstream);
+    const client = connect((proxy.address() as AddressInfo).port, "127.0.0.1");
+    client.once("error", () => undefined);
+    await once(client, "connect");
+    client.write(
+      "GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n" +
+        "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+    );
+    return {
+      state,
+      client,
+      async close() {
+        destroyAll();
+        await Promise.all([
+          new Promise<void>((resolve) => proxy.close(() => resolve())),
+          new Promise<void>((resolve) => upstream.close(() => resolve())),
+        ]);
+      },
+    };
+  }
+
+  it("unregisters an upgrade the Browser closed before proxying started", async () => {
+    const { state, client, close } = await webSocketProxy(100);
+    try {
+      setTimeout(() => client.destroy(), 20);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      expect(state.active).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+
+  it("unregisters a WebSocket the Browser only half-closed", async () => {
+    const { state, client, close } = await webSocketProxy(0);
+    try {
+      await once(client, "data");
+      expect(state.active).toBe(1);
+      client.end();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(state.active).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+});
+
+/** Destroys every socket these servers accepted, upgraded ones included, so close() returns. */
+function trackSockets(...servers: Server[]): () => void {
+  const sockets = new Set<Socket>();
+  for (const server of servers) server.on("connection", (socket: Socket) => sockets.add(socket));
+  return () => {
+    for (const socket of sockets) socket.destroy();
+  };
+}
 
 /** A certificate for IP:127.0.0.1 only, signed by a throwaway CA. */
 function ipCertificate(): { ca: string; cert: string; key: string } {
