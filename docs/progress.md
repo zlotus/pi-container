@@ -1,6 +1,6 @@
 # Project Progress
 
-Last reviewed: 2026-10-21
+Last reviewed: 2026-10-23
 
 ## Current Milestone
 
@@ -235,7 +235,9 @@ v0.x 已以 `v0.13.0` 封版。v1.0 的 Phase 13～19 已全部验收（tag `v1.
 
 ## Next
 
-1. 负责人试用 `v1.0.0-rc.1` → 定为 `v1.0.0`。
+1. 负责人试用 `v1.0.0-rc.1` → 定为 `v1.0.0`。试用中发现并修复（hotfix，2026-10-23）：浏览器在 Gateway
+   鉴权期间取消请求（或 WebSocket 只半关闭）时，连接登记永不注销，Portal 一直显示"当前有连接"，该 Workspace
+   直到 Control Plane 重启都不会被空闲回收；修复在 `packages/gateway`，附回归测试。
 2. 发布后：第三方镜像小版本更新（PostgreSQL 17.x 补丁、nginx）与 Runtime 镜像基础层刷新，按
    [ops/31-security.md](ops/31-security.md) 第 5 节的漏洞结论安排。
 3. v1.0 之后（Phase 20 候选）：Control Plane 一体化容器部署（specs 19.18）。
