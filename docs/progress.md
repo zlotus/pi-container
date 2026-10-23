@@ -5,7 +5,7 @@ Last reviewed: 2026-10-23
 ## Current Milestone
 
 v1.0 Phase 19（生产部署与 v1.0 发布）已验收（2026-10-22）：发布包与 systemd 部署、从零部署、运维演练、v0.13 → v1.0 原位升级、
-全量回归、安全复查与运维手册。已合入 master 并打 `v1.0.0-rc.1`；负责人试用后通知再定为 `v1.0.0`。部署与运维文档为 [ops/README.md](ops/README.md)；实现记录见 `specs.md` 19.19。
+全量回归、安全复查与运维手册。已合入 master 并打 `v1.0.0-rc.1`；试用中修复一个 Gateway bug（PR #8）后发布 `v1.0.0-rc.2`，负责人试用后通知再由 rc.2 产物晋升为 `v1.0.0`。部署与运维文档为 [ops/README.md](ops/README.md)；实现记录见 `specs.md` 19.19。
 
 ## Current Baseline
 
@@ -230,12 +230,12 @@ v1.0 Phase 19（生产部署与 v1.0 发布）已验收（2026-10-22）：发布
 
 ## In Progress
 
-v0.x 已以 `v0.13.0` 封版。v1.0 的 Phase 13～19 已全部验收（tag `v1.0.0-alpha.1`～`alpha.6`、`v1.0.0-rc.1`），范围与顺序见
+v0.x 已以 `v0.13.0` 封版。v1.0 的 Phase 13～19 已全部验收（tag `v1.0.0-alpha.1`～`alpha.6`、`v1.0.0-rc.1`、`v1.0.0-rc.2`），范围与顺序见
 [v1-roadmap.md](v1-roadmap.md)。
 
 ## Next
 
-1. 负责人试用 `v1.0.0-rc.1` → 定为 `v1.0.0`。试用中发现并修复（hotfix，2026-10-23）：浏览器在 Gateway
+1. 负责人试用 `v1.0.0-rc.2` → 晋升为 `v1.0.0`。rc.1 试用中发现并修复（hotfix PR #8，2026-10-23，负责人验收后发布 rc.2）：浏览器在 Gateway
    鉴权期间取消请求（或 WebSocket 只半关闭）时，连接登记永不注销，Portal 一直显示"当前有连接"，该 Workspace
    直到 Control Plane 重启都不会被空闲回收；修复在 `packages/gateway`，附回归测试。
 2. 发布后：第三方镜像小版本更新（PostgreSQL 17.x 补丁、nginx）与 Runtime 镜像基础层刷新，按
