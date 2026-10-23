@@ -45,7 +45,10 @@ describeWithDocker("audit-host.sh container baseline", () => {
   let output = "";
 
   beforeAll(() => {
-    execFileSync("docker", ["image", "inspect", IMAGE], { stdio: "ignore" });
+    // nginx.docker.test.ts may still be pulling the same image in parallel.
+    if (spawnSync("docker", ["image", "inspect", IMAGE], { stdio: "ignore" }).status !== 0) {
+      execFileSync("docker", ["pull", IMAGE], { stdio: "ignore" });
+    }
     for (const [name, extra] of CASES) execFileSync("docker", baseline(name, extra), { stdio: "ignore" });
     // Writable root and no limits: drop the hardening flags entirely.
     execFileSync("docker", [
